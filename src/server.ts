@@ -1,6 +1,14 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { z } from "zod";
+import {
+  createBranch,
+  listRepoTree,
+  openPr,
+  readRepoFile,
+  searchCode,
+  writeRepoFile,
+} from "./github";
 
 export interface Env {
   DB: D1Database;
@@ -13,6 +21,11 @@ export interface Env {
   GITHUB_CLIENT_SECRET: string;
   COOKIE_ENCRYPTION_KEY: string;
   ADMIN_GITHUB_LOGIN: string;
+  // GitHub App for repo fallthrough (read and write). The private key and
+  // installation id are Worker secrets; the client id is a plain var.
+  GITHUB_APP_CLIENT_ID: string;
+  GITHUB_APP_PRIVATE_KEY: string;
+  GITHUB_APP_INSTALLATION_ID?: string;
 }
 
 export interface Props extends Record<string, unknown> {
@@ -320,6 +333,94 @@ export function buildServer(env: Env, operator: boolean): McpServer {
         .prepare("SELECT namespace, repos, created_at FROM namespaces ORDER BY namespace")
         .all();
       return ok(results);
+    }
+  );
+
+  // Repo fallthrough: live GitHub access via the Capsid GitHub App. Reads are
+  // open to any admitted client; writes require the operator key. The target
+  // repo is resolved per namespace from the namespaces table.
+  const guarded = async (fn: () => Promise<unknown>) => {
+    try {
+      return ok(await fn());
+    } catch (err) {
+      return fail(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  server.registerTool(
+    "list_repo_tree",
+    {
+      description: "List a directory in a namespace's GitHub repo. Omit path for the repo root. Live GitHub, briefly cached.",
+      inputSchema: { namespace: z.string(), path: z.string().optional(), ref: z.string().optional() },
+    },
+    ({ namespace, path, ref }) => guarded(() => listRepoTree(env, namespace, path ?? "", ref))
+  );
+
+  server.registerTool(
+    "read_repo_file",
+    {
+      description: "Read a file from a namespace's GitHub repo, decoded to text. Optional ref (branch, tag, or sha). Live GitHub, briefly cached.",
+      inputSchema: { namespace: z.string(), path: z.string(), ref: z.string().optional() },
+    },
+    ({ namespace, path, ref }) => guarded(() => readRepoFile(env, namespace, path, ref))
+  );
+
+  server.registerTool(
+    "search_code",
+    {
+      description: "Search code with the GitHub code search API. Pass a namespace to scope to its repo, otherwise searches all of the owner's repos the App can see.",
+      inputSchema: { query: z.string(), namespace: z.string().optional() },
+    },
+    ({ query, namespace }) => guarded(() => searchCode(env, namespace, query))
+  );
+
+  server.registerTool(
+    "write_repo_file",
+    {
+      description:
+        "Write a file to a namespace's GitHub repo. mode 'pr' (default) commits to a new branch and opens a PR; mode 'direct' commits straight to the default branch. Requires operator key.",
+      inputSchema: {
+        namespace: z.string(),
+        path: z.string(),
+        content: z.string(),
+        message: z.string(),
+        mode: z.enum(["pr", "direct"]).optional(),
+        branch: z.string().optional(),
+      },
+    },
+    ({ namespace, path, content, message, mode, branch }) => {
+      if (!operator) return Promise.resolve(fail(DENIED));
+      return guarded(() => writeRepoFile(env, namespace, path, content, message, mode ?? "pr", branch));
+    }
+  );
+
+  server.registerTool(
+    "create_branch",
+    {
+      description: "Create a branch in a namespace's GitHub repo. Branches off the default branch unless 'from' is given. Requires operator key.",
+      inputSchema: { namespace: z.string(), branch: z.string(), from: z.string().optional() },
+    },
+    ({ namespace, branch, from }) => {
+      if (!operator) return Promise.resolve(fail(DENIED));
+      return guarded(() => createBranch(env, namespace, branch, from));
+    }
+  );
+
+  server.registerTool(
+    "open_pr",
+    {
+      description: "Open a pull request in a namespace's GitHub repo. Base defaults to the repo's default branch. Requires operator key.",
+      inputSchema: {
+        namespace: z.string(),
+        title: z.string(),
+        head: z.string(),
+        base: z.string().optional(),
+        body: z.string().optional(),
+      },
+    },
+    ({ namespace, title, head, base, body }) => {
+      if (!operator) return Promise.resolve(fail(DENIED));
+      return guarded(() => openPr(env, namespace, title, head, base, body));
     }
   );
 

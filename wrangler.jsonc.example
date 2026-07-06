@@ -7,6 +7,13 @@
   "keep_vars": true,
   "observability": { "enabled": true },
   "triggers": { "crons": ["0 9 * * *"] },
+  // Non-secret vars. The GitHub App client id is public; the App private key and
+  // installation id are set with `wrangler secret put` and never committed:
+  //   wrangler secret put GITHUB_APP_PRIVATE_KEY       (paste the .pem contents)
+  //   wrangler secret put GITHUB_APP_INSTALLATION_ID   (optional; auto-resolved if omitted)
+  "vars": {
+    "GITHUB_APP_CLIENT_ID": "YOUR_GITHUB_APP_CLIENT_ID"
+  },
   "d1_databases": [
     {
       "binding": "DB",
