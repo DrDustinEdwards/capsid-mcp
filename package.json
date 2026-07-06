@@ -1,0 +1,23 @@
+{
+  "name": "capsid-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Capsid: a Cloudflare-native MCP server serving a consolidated knowledge base from D1 and R2",
+  "license": "MIT",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260702.1",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.107.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "agents": "^0.17.3",
+    "zod": "^4.4.3"
+  }
+}
