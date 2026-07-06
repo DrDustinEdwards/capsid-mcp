@@ -1,5 +1,6 @@
 import type { AuthRequest } from "@cloudflare/workers-oauth-provider";
 import { createMcpHandler } from "agents/mcp";
+import { runBackup } from "./backup";
 import { buildServer, isAdminUser, isOperator, sha256Hex, type Env } from "./server";
 
 const GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize";
@@ -261,11 +262,23 @@ async function handleOperatorMcp(request: Request, env: Env, ctx: ExecutionConte
   return createMcpHandler(buildServer(env, true), { route: "/ops/mcp" })(request, env, ctx);
 }
 
+async function handleBackup(request: Request, env: Env): Promise<Response> {
+  if (!(await isOperator(request, env))) {
+    return new Response("unauthorized: valid operator key required", {
+      status: 401,
+      headers: { "WWW-Authenticate": 'Bearer realm="capsid-operator"' },
+    });
+  }
+  const summary = await runBackup(env);
+  return Response.json(summary);
+}
+
 export const defaultHandler = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/health") return new Response("ok");
     if (url.pathname === "/ops/mcp") return handleOperatorMcp(request, env, ctx);
+    if (url.pathname === "/ops/backup" && request.method === "POST") return handleBackup(request, env);
     if (url.pathname === "/authorize" && request.method === "GET") return handleAuthorizeGet(request, env);
     if (url.pathname === "/authorize" && request.method === "POST") return handleAuthorizePost(request, env);
     if (url.pathname === "/callback") return handleCallback(request, env);

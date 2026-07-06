@@ -52,6 +52,34 @@ function fail(message: string) {
 
 const DENIED = "unauthorized: this tool requires a valid operator key (Authorization: Bearer <key>)";
 
+type ConfirmVerdict = "accepted" | "declined" | "unsupported";
+
+// Asks the connected client to confirm a destructive action via MCP elicitation.
+// Stateless Streamable HTTP clients usually cannot answer server-initiated
+// requests, so "unsupported" is the common case and callers must fall back to
+// requiring an explicit confirm:true argument.
+async function confirmDestructive(server: McpServer, message: string): Promise<ConfirmVerdict> {
+  if (!server.server.getClientCapabilities()?.elicitation) return "unsupported";
+  try {
+    const result = await server.server.elicitInput(
+      {
+        message,
+        requestedSchema: {
+          type: "object",
+          properties: {
+            confirm: { type: "boolean", title: "Confirm", description: "Set to true to proceed" },
+          },
+          required: ["confirm"],
+        },
+      },
+      { timeout: 90_000 }
+    );
+    return result.action === "accept" && result.content?.confirm === true ? "accepted" : "declined";
+  } catch {
+    return "unsupported";
+  }
+}
+
 export function buildServer(env: Env, operator: boolean): McpServer {
   const server = new McpServer(SERVER_INFO);
   const db = env.DB;
@@ -98,7 +126,7 @@ export function buildServer(env: Env, operator: boolean): McpServer {
   server.registerTool(
     "write",
     {
-      description: "Create or update a document. Snapshots the prior version and writes an audit log entry. Requires operator key.",
+      description: "Create or update a document. Snapshots the prior version and writes an audit log entry. Overwriting an existing document needs confirmation: the server elicits it when the client supports elicitation, otherwise pass confirm: true.",
       inputSchema: {
         namespace: z.string(),
         path: z.string(),
@@ -107,14 +135,27 @@ export function buildServer(env: Env, operator: boolean): McpServer {
         type: z.string().optional(),
         tags: z.string().optional(),
         status: z.string().optional(),
+        confirm: z.boolean().optional(),
       },
     },
-    async ({ namespace, path, title, body, type, tags, status }) => {
+    async ({ namespace, path, title, body, type, tags, status, confirm }) => {
       if (!operator) return fail(DENIED);
       const prior = await db
         .prepare("SELECT id, title, body FROM documents WHERE namespace = ?1 AND path = ?2")
         .bind(namespace, path)
         .first<{ id: number; title: string | null; body: string | null }>();
+      if (prior && confirm !== true) {
+        const verdict = await confirmDestructive(
+          server,
+          `Overwrite ${namespace}/${path}? The current version will be snapshotted to document_versions first.`
+        );
+        if (verdict === "declined") return fail(`overwrite of ${namespace}/${path} declined`);
+        if (verdict === "unsupported") {
+          return fail(
+            `confirmation required: ${namespace}/${path} already exists. Re-run write with confirm: true to overwrite it. The current version will be snapshotted to document_versions first.`
+          );
+        }
+      }
       const statements: D1PreparedStatement[] = [];
       if (prior) {
         statements.push(
@@ -153,16 +194,28 @@ export function buildServer(env: Env, operator: boolean): McpServer {
   server.registerTool(
     "delete",
     {
-      description: "Delete a document. Snapshots it first and writes an audit log entry. Requires operator key.",
-      inputSchema: { namespace: z.string(), path: z.string() },
+      description: "Delete a document. Snapshots it first and writes an audit log entry. Needs confirmation: the server elicits it when the client supports elicitation, otherwise pass confirm: true.",
+      inputSchema: { namespace: z.string(), path: z.string(), confirm: z.boolean().optional() },
     },
-    async ({ namespace, path }) => {
+    async ({ namespace, path, confirm }) => {
       if (!operator) return fail(DENIED);
       const prior = await db
         .prepare("SELECT id, title, body FROM documents WHERE namespace = ?1 AND path = ?2")
         .bind(namespace, path)
         .first<{ id: number; title: string | null; body: string | null }>();
       if (!prior) return fail(`not found: ${namespace}/${path}`);
+      if (confirm !== true) {
+        const verdict = await confirmDestructive(
+          server,
+          `Delete ${namespace}/${path}? It will be snapshotted to document_versions first, so it can be recovered.`
+        );
+        if (verdict === "declined") return fail(`delete of ${namespace}/${path} declined`);
+        if (verdict === "unsupported") {
+          return fail(
+            `confirmation required: re-run delete with confirm: true to remove ${namespace}/${path}. It will be snapshotted to document_versions first.`
+          );
+        }
+      }
       await db.batch([
         db
           .prepare(

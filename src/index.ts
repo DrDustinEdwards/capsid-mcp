@@ -1,5 +1,6 @@
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { createMcpHandler } from "agents/mcp";
+import { runBackup } from "./backup";
 import { defaultHandler } from "./github-handler";
 import { buildServer, isAdminUser, type Env, type Props } from "./server";
 
@@ -15,7 +16,7 @@ const apiHandler = {
   },
 };
 
-export default new OAuthProvider({
+const provider = new OAuthProvider({
   apiRoute: "/mcp",
   apiHandler,
   defaultHandler,
@@ -23,3 +24,10 @@ export default new OAuthProvider({
   tokenEndpoint: "/token",
   clientRegistrationEndpoint: "/register",
 });
+
+export default {
+  fetch: (request: Request, env: Env, ctx: ExecutionContext) => provider.fetch(request, env, ctx),
+  scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(runBackup(env));
+  },
+} satisfies ExportedHandler<Env>;

@@ -17,6 +17,7 @@ All access is gated. Human clients (claude.ai, MCP Inspector) authenticate via G
 
 - `POST /mcp` MCP over Streamable HTTP, requires an OAuth access token (admin only)
 - `POST /ops/mcp` MCP over Streamable HTTP for headless agents, requires the operator key as `Authorization: Bearer <key>`
+- `POST /ops/backup` runs a backup on demand, requires the operator key, returns a JSON summary
 - `GET /authorize`, `POST /authorize`, `GET /callback` GitHub OAuth flow
 - `POST /token`, `POST /register` OAuth token exchange and dynamic client registration (served by the library)
 - `GET /.well-known/oauth-authorization-server` and `GET /.well-known/oauth-protected-resource` OAuth discovery metadata (served by the library)
@@ -28,6 +29,29 @@ Two parallel paths, both fully gated:
 
 1. **OAuth (`/mcp`)** for human clients. The client discovers the server via the `.well-known` endpoints, registers itself dynamically, and is sent through `/authorize`. After a one-time approval screen, the browser goes to GitHub. On return, the GitHub user is checked against `ADMIN_GITHUB_LOGIN`: set it to your GitHub username, or to your immutable numeric GitHub user id (find it at `https://api.github.com/users/<login>`). Any other GitHub account gets a 403. The admin check runs again on every `/mcp` request as defense in depth.
 2. **Operator key (`/ops/mcp`)** for agents and cron. Same tools, same server, gated by the existing sha256-hashed bearer key (`OPERATOR_KEY_HASH`). The OAuth library never sees this route, so the two paths cannot interfere. Note: this path moved from `/mcp` to `/ops/mcp`; update any headless client configs.
+
+## Destructive writes need confirmation
+
+`delete`, and any `write` that would overwrite an existing document, ask for confirmation first. When the connected client supports [MCP elicitation](https://modelcontextprotocol.io/specification/draft/client/elicitation), the server sends an elicitation request and proceeds only on an explicit accept. Most Streamable HTTP clients run stateless and cannot answer server-initiated requests, so the fallback applies: the tool rejects with a clear message and you re-run it with `confirm: true`. Creating a brand new document never needs confirmation.
+
+Deletes are never unrecoverable at the data layer: every delete (and every overwrite) snapshots the prior row into `document_versions` first, so recovery exists regardless of how the confirmation went.
+
+## Backups
+
+D1 Time Travel already provides 30-day point-in-time recovery, so backups here are for longer retention and portability, not short-term recovery.
+
+A daily Cron Trigger (09:00 UTC) exports the whole database to the `MEDIA` R2 bucket:
+
+- `backups/json/<timestamp>.json` a full JSON dump of all four tables (documents, namespaces, document_versions, audit_log). The 14 most recent dumps are kept; older ones are pruned automatically.
+- `backups/markdown/<namespace>/<path>` a plain-markdown mirror of every document body, verbatim, one file per document. This mirror tracks the current state (files for deleted documents are pruned), so the knowledge base stays readable and portable with no Capsid dependency.
+
+Run one on demand with the operator key:
+
+```
+curl -X POST https://capsid.<your-subdomain>.workers.dev/ops/backup -H "Authorization: Bearer <key>"
+```
+
+The response is a summary: the JSON dump key, document count, markdown files written and pruned, and how many JSON dumps were kept and pruned.
 
 ## Clone setup
 

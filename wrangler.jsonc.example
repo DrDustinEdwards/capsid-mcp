@@ -6,6 +6,7 @@
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "keep_vars": true,
   "observability": { "enabled": true },
+  "triggers": { "crons": ["0 9 * * *"] },
   "d1_databases": [
     {
       "binding": "DB",
