@@ -1,4 +1,10 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
+import {
+  ErrorCode,
+  GetPromptRequestSchema,
+  ListPromptsRequestSchema,
+  McpError,
+} from "@modelcontextprotocol/sdk/types.js";
 import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { z } from "zod";
 import {
@@ -517,6 +523,86 @@ export function buildServer(env: Env, operator: boolean): McpServer {
       return guarded(() => openPr(env, namespace, title, head, base, body));
     }
   );
+
+  // Resources: every document is addressable context at capsid://<namespace>/<path>.
+  // Read-only, same visibility as the read tool. The D1 queries run lazily, only
+  // when a client actually calls resources/list or resources/read.
+  server.registerResource(
+    "document",
+    new ResourceTemplate("capsid://{namespace}/{+path}", {
+      list: async () => {
+        const { results } = await db
+          .prepare("SELECT namespace, path, title FROM documents ORDER BY namespace, path")
+          .all<{ namespace: string; path: string; title: string | null }>();
+        return {
+          resources: results.map((row) => ({
+            uri: `capsid://${row.namespace}/${row.path}`,
+            name: `${row.namespace}/${row.path}`,
+            title: row.title ?? undefined,
+            mimeType: "text/markdown",
+          })),
+        };
+      },
+    }),
+    // Template metadata spreads onto every listed resource, so keep it to
+    // fields that are true per document.
+    { title: "Capsid documents", mimeType: "text/markdown" },
+    async (uri, variables) => {
+      const namespace = String(variables.namespace);
+      const path = String(variables.path);
+      const row = await db
+        .prepare("SELECT body FROM documents WHERE namespace = ?1 AND path = ?2")
+        .bind(namespace, path)
+        .first<{ body: string | null }>();
+      if (!row) throw new McpError(ErrorCode.InvalidParams, `not found: ${uri.href}`);
+      return { contents: [{ uri: uri.href, mimeType: "text/markdown", text: row.body ?? "" }] };
+    }
+  );
+
+  // Prompts: reusable templates stored as type 'prompt' documents whose bodies
+  // use {{variable}} placeholders. Handled at the protocol level (McpServer only
+  // lists prompts registered at build time) so the D1 query runs lazily, only on
+  // prompts/list and prompts/get. Prompt name is the doc path without .md.
+  const PLACEHOLDER = /\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g;
+  const promptVariables = (body: string) => [...new Set([...body.matchAll(PLACEHOLDER)].map((m) => m[1]))];
+  server.server.registerCapabilities({ prompts: { listChanged: false } });
+  server.server.setRequestHandler(ListPromptsRequestSchema, async () => {
+    const { results } = await db
+      .prepare("SELECT path, title, body FROM documents WHERE type = 'prompt' ORDER BY namespace, path")
+      .all<{ path: string; title: string | null; body: string | null }>();
+    return {
+      prompts: results.map((row) => ({
+        name: row.path.replace(/\.md$/, ""),
+        description: row.title ?? undefined,
+        arguments: promptVariables(row.body ?? "").map((name) => ({ name, required: true })),
+      })),
+    };
+  });
+  server.server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+    const { name } = request.params;
+    const args = request.params.arguments ?? {};
+    const row = await db
+      .prepare("SELECT title, body FROM documents WHERE type = 'prompt' AND (path = ?1 OR path = ?1 || '.md') LIMIT 1")
+      .bind(name)
+      .first<{ title: string | null; body: string | null }>();
+    if (!row) throw new McpError(ErrorCode.InvalidParams, `prompt not found: ${name}`);
+    const missing = new Set<string>();
+    const text = (row.body ?? "").replace(PLACEHOLDER, (placeholder, variable: string) => {
+      const value = args[variable];
+      if (value === undefined) {
+        missing.add(variable);
+        return placeholder;
+      }
+      return String(value);
+    });
+    if (missing.size > 0) {
+      throw new McpError(ErrorCode.InvalidParams, `missing arguments for prompt ${name}: ${[...missing].join(", ")}`);
+    }
+    return {
+      description: row.title ?? undefined,
+      messages: [{ role: "user" as const, content: { type: "text" as const, text } }],
+    };
+  });
 
   return server;
 }
