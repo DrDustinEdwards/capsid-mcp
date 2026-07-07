@@ -1,6 +1,12 @@
 # Capsid
 
-Capsid is a single-user, Cloudflare-native MCP server that serves a consolidated knowledge base from D1 and R2. It speaks MCP over Streamable HTTP and exposes a small, purposeful tool set: list, read, write, delete, move, find, search (FTS5), and namespaces.
+Capsid is a single-user, Cloudflare-native MCP server that serves a consolidated knowledge base from D1 and R2, and reaches your GitHub repositories directly. It speaks MCP over Streamable HTTP and exposes a small, purposeful tool set:
+
+- **Documents:** list, read, write, delete, move, find, search (FTS5), namespaces
+- **Repo access:** list_repo_tree, read_repo_file, search_code, write_repo_file, create_branch, open_pr
+- **Maintenance:** lint (the consolidation loop)
+
+It also exposes the rest of the MCP surface: **Resources** (every document addressable at `capsid://<namespace>/<path>`) and **Prompts** (reusable templates stored as documents).
 
 All access is gated. Human clients (claude.ai, MCP Inspector) authenticate via GitHub OAuth, and only the configured admin GitHub account is admitted. Headless agents and cron use a separate operator-key endpoint. Every write snapshots the prior version into `document_versions` and appends to `audit_log`, so you get history and rollback for free.
 
@@ -8,10 +14,38 @@ All access is gated. Human clients (claude.ai, MCP Inspector) authenticate via G
 
 - Cloudflare Worker (TypeScript), stateless MCP via `createMcpHandler` from the Agents SDK
 - [workers-oauth-provider](https://github.com/cloudflare/workers-oauth-provider) wrapping the MCP handler: OAuth 2.1 with PKCE, dynamic client registration, and token storage in KV
-- GitHub as the identity provider, locked to a single admin account
+- GitHub OAuth App as the identity provider for login, locked to a single admin account
+- A separate GitHub App for repo access, minting short-lived installation tokens
 - D1 for documents, versions, namespaces, and audit log, with FTS5 full text search
 - R2 (`MEDIA` binding) for media
 - KV (`APP_KV` binding) for app state, plus an `OAUTH_KV` binding for OAuth tokens
+
+## Knowledge model
+
+Documents are typed. The model is Karpathy's LLM Wiki pattern: raw sources compiled into a maintained wiki.
+
+- `core` one always-loaded summary per namespace, read first to orient
+- `concept`, `decision`, `note`, `spec`, `task`, `protocol`, `post` the compiled knowledge and content
+- `episodic` session summaries, written at the end of a work session so the next session resumes
+- `procedural` agent-updatable rules
+- `prompt` reusable prompt templates with `{{variable}}` placeholders
+- `source` raw, un-compiled input
+
+Namespaces are projects, each mapped to its GitHub repo(s) in the `namespaces` table.
+
+## Repo access
+
+Capsid reaches your repositories directly through a dedicated GitHub App. The Worker mints a short-lived installation token (RS256 JWT signed with Web Crypto, exchanged for an installation access token, cached in KV), so no long-lived token is stored. The repo per namespace is resolved from the `namespaces` table.
+
+- **Read** (open to admitted clients): `list_repo_tree`, `read_repo_file`, `search_code`
+- **Write** (operator-gated): `write_repo_file`, `create_branch`, `open_pr`. `write_repo_file` defaults to `mode: "pr"` (commit to a new branch and open a pull request); `mode: "direct"` commits straight to the default branch.
+
+## Consolidation (lint)
+
+The `lint` tool runs the wiki maintenance loop. The Worker never calls an LLM; the driving client does the reasoning with the ordinary read and write tools.
+
+- `lint(namespace, mode: "gather")` returns a read-only packet: the namespace `core.md`, the compiled `concept` and `decision` docs, every un-archived `episodic` and `source` doc, and the schema and conventions. The driving LLM synthesizes an updated `core.md` and any new concept docs from this.
+- `lint(namespace, mode: "finalize", consumed: [paths])` archives the consumed raw entries under an `archive/` path prefix and writes one audit row. It only moves and never deletes, so nothing is lost, and `gather` excludes `archive/`, so the loop is idempotent.
 
 ## Endpoints
 
@@ -28,7 +62,9 @@ All access is gated. Human clients (claude.ai, MCP Inspector) authenticate via G
 Two parallel paths, both fully gated:
 
 1. **OAuth (`/mcp`)** for human clients. The client discovers the server via the `.well-known` endpoints, registers itself dynamically, and is sent through `/authorize`. After a one-time approval screen, the browser goes to GitHub. On return, the GitHub user is checked against `ADMIN_GITHUB_LOGIN`: set it to your GitHub username, or to your immutable numeric GitHub user id (find it at `https://api.github.com/users/<login>`). Any other GitHub account gets a 403. The admin check runs again on every `/mcp` request as defense in depth.
-2. **Operator key (`/ops/mcp`)** for agents and cron. Same tools, same server, gated by the existing sha256-hashed bearer key (`OPERATOR_KEY_HASH`). The OAuth library never sees this route, so the two paths cannot interfere. Note: this path moved from `/mcp` to `/ops/mcp`; update any headless client configs.
+2. **Operator key (`/ops/mcp`)** for agents and cron. Same tools, same server, gated by the existing sha256-hashed bearer key (`OPERATOR_KEY_HASH`). The OAuth library never sees this route, so the two paths cannot interfere.
+
+Login and repo access use two different GitHub credentials: a GitHub **OAuth App** for login (OAuth Apps cannot mint installation tokens) and a separate GitHub **App** for repo access. Keep both.
 
 ## Destructive writes need confirmation
 
@@ -50,8 +86,6 @@ Run one on demand with the operator key:
 ```
 curl -X POST https://capsid.<your-subdomain>.workers.dev/ops/backup -H "Authorization: Bearer <key>"
 ```
-
-The response is a summary: the JSON dump key, document count, markdown files written and pruned, and how many JSON dumps were kept and pruned.
 
 ## Clone setup
 
@@ -77,28 +111,24 @@ The response is a summary: the JSON dump key, document count, markdown files wri
 
    The real `wrangler.jsonc` is gitignored on purpose. Never commit it.
 
-4. Apply the migration:
+4. Apply the migration (idempotent, `IF NOT EXISTS` everywhere):
 
    ```
    npx wrangler d1 migrations apply capsid --remote
    ```
 
-   Note: the migration is idempotent (IF NOT EXISTS everywhere). Applying it against an already-migrated database, including the original capsid D1, is a no-op. Cloners must run it once.
-
-5. Generate an operator key and store its hash as a secret. Keep the raw key somewhere safe; it is what headless MCP clients send as the bearer token on `/ops/mcp`.
+5. Generate an operator key and store its sha256 hash as a secret. Keep the raw key safe; headless MCP clients send it as the bearer token on `/ops/mcp`:
 
    ```
    npx wrangler secret put OPERATOR_KEY_HASH
    ```
 
-   The value must be the lowercase hex sha256 of your raw key. Never store the raw key anywhere in the repo.
-
-6. Create a GitHub OAuth App at https://github.com/settings/developers with:
+6. Create a GitHub **OAuth App** (for login) at https://github.com/settings/developers with:
 
    - Homepage URL: `https://capsid.<your-subdomain>.workers.dev`
    - Authorization callback URL: `https://capsid.<your-subdomain>.workers.dev/callback`
 
-   Then set the OAuth secrets (none of these ever go in the repo):
+   Then set the OAuth secrets:
 
    ```
    npx wrangler secret put GITHUB_CLIENT_ID
@@ -107,18 +137,26 @@ The response is a summary: the JSON dump key, document count, markdown files wri
    npx wrangler secret put ADMIN_GITHUB_LOGIN      # your GitHub username, or your numeric GitHub user id
    ```
 
-   For local dev with `wrangler dev`, create a second GitHub OAuth App with callback `http://localhost:8787/callback` and put the four values in `.dev.vars` (gitignored).
+7. For repo access, create a GitHub **App** (this is separate from the OAuth App above). Permissions: Repository contents read and write, Pull requests read and write, Metadata read. Install it on your account or org, on the repositories you want reachable. Note its Client ID, generate a private key (`.pem`), then:
 
-7. Type check and deploy:
+   ```
+   # put the App client id in wrangler.jsonc vars as GITHUB_APP_CLIENT_ID
+   npx wrangler secret put GITHUB_APP_PRIVATE_KEY        # paste the .pem contents
+   npx wrangler secret put GITHUB_APP_INSTALLATION_ID    # optional; auto-resolved if omitted
+   ```
+
+   Only the private key is used to mint installation tokens; the App client secret is not needed.
+
+8. Type check and deploy:
 
    ```
    npx tsc --noEmit
    npx wrangler deploy
    ```
 
-8. Connect claude.ai: Settings, Connectors, Add custom connector, URL `https://capsid.<your-subdomain>.workers.dev/mcp`. The connector registers itself via dynamic client registration and walks you through the GitHub login. Only the `ADMIN_GITHUB_LOGIN` account gets in.
+9. Connect claude.ai: Settings, Connectors, Add custom connector, URL `https://capsid.<your-subdomain>.workers.dev/mcp`. The connector registers itself via dynamic client registration and walks you through the GitHub login. Only the `ADMIN_GITHUB_LOGIN` account gets in.
 
-9. Or test the flow first with the MCP Inspector:
+   Or test the flow first with the MCP Inspector:
 
    ```
    npx @modelcontextprotocol/inspector
@@ -126,11 +164,11 @@ The response is a summary: the JSON dump key, document count, markdown files wri
 
    Set transport to Streamable HTTP, URL to `https://capsid.<your-subdomain>.workers.dev/mcp`, open the Auth tab, and run Quick OAuth Flow.
 
-## Auth roadmap
+## Roadmap
 
-- Phase 1 (done): single service token, bearer key checked against `OPERATOR_KEY_HASH`. Now served at `/ops/mcp`.
-- Phase 2 (done): GitHub OAuth via workers-oauth-provider on `/mcp`, locked to a single admin account. This is what claude.ai and other OAuth-only clients use.
-- Phase 3 (deferred): first-class service tokens for agents and cron, issued and revocable per client, replacing the single shared operator key.
+- Phase 1 (done): single operator token on `/ops/mcp`, bearer key checked against `OPERATOR_KEY_HASH`.
+- Phase 2 (done): GitHub OAuth via workers-oauth-provider on `/mcp`, locked to a single admin account.
+- Phase 3 (deferred): first-class service tokens for agents and cron, issued and revocable per client, replacing the single shared operator key; an autonomous, scheduled lint run once agents exist to drive it.
 
 ## License
 
