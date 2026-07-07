@@ -336,6 +336,100 @@ export function buildServer(env: Env, operator: boolean): McpServer {
     }
   );
 
+  // Consolidation loop (the LLM Wiki maintenance step). The Worker does no
+  // reasoning: a capable client calls gather, synthesizes the update with the
+  // existing read/write tools, then calls finalize to archive what it consumed.
+  server.registerTool(
+    "lint",
+    {
+      description:
+        "Consolidation loop for a namespace. mode 'gather' (default, read-only) returns the packet a driving LLM needs to compile the wiki: current core.md, the concept and decision docs, every unconsolidated episodic and source doc, and the capsid schema and conventions rules. After writing the updated core.md and concept docs via write, call mode 'finalize' with consumed: the episodic/source paths that were compiled. Finalize moves them under archive/ (never deletes, never touches core or concept docs) and writes one audit row. Finalize requires operator key.",
+      inputSchema: {
+        namespace: z.string(),
+        mode: z.enum(["gather", "finalize"]).optional(),
+        consumed: z.array(z.string()).optional(),
+      },
+    },
+    async ({ namespace, mode, consumed }) => {
+      if ((mode ?? "gather") === "gather") {
+        const core = await db
+          .prepare("SELECT namespace, path, title, type, status, body, updated_at FROM documents WHERE namespace = ?1 AND path = 'core.md'")
+          .bind(namespace)
+          .first();
+        const wiki = await db
+          .prepare(
+            `SELECT namespace, path, title, type, status, tags, body, updated_at
+             FROM documents
+             WHERE namespace = ?1 AND type IN ('concept', 'decision')
+             ORDER BY path`
+          )
+          .bind(namespace)
+          .all();
+        const raw = await db
+          .prepare(
+            `SELECT namespace, path, title, type, status, tags, body, created_at, updated_at
+             FROM documents
+             WHERE namespace = ?1 AND type IN ('episodic', 'source')
+               AND status = 'published' AND path NOT LIKE 'archive/%'
+             ORDER BY created_at`
+          )
+          .bind(namespace)
+          .all();
+        const rules = await db
+          .prepare("SELECT namespace, path, title, body FROM documents WHERE namespace = 'capsid' AND path IN ('schema.md', 'conventions.md') ORDER BY path")
+          .all();
+        return ok({
+          mode: "gather",
+          namespace,
+          core: core ?? null,
+          wiki: wiki.results,
+          unconsolidated: raw.results,
+          rules: rules.results,
+        });
+      }
+
+      if (!operator) return fail(DENIED);
+      const paths = [...new Set(consumed ?? [])];
+      if (paths.length === 0) {
+        return fail("finalize requires consumed: the episodic/source paths that were compiled into the wiki");
+      }
+      const problems: string[] = [];
+      for (const path of paths) {
+        const row = await db
+          .prepare("SELECT type FROM documents WHERE namespace = ?1 AND path = ?2")
+          .bind(namespace, path)
+          .first<{ type: string | null }>();
+        if (!row) problems.push(`not found: ${namespace}/${path}`);
+        else if (path.startsWith("archive/")) problems.push(`already archived: ${namespace}/${path}`);
+        else if (row.type !== "episodic" && row.type !== "source") {
+          problems.push(`not consumable: ${namespace}/${path} has type '${row.type}' (only episodic and source docs are archived)`);
+        }
+      }
+      if (problems.length > 0) return fail(`finalize aborted, nothing archived:\n${problems.join("\n")}`);
+      const statements = paths.map((path) =>
+        db
+          .prepare("UPDATE documents SET path = 'archive/' || path, updated_at = datetime('now') WHERE namespace = ?1 AND path = ?2")
+          .bind(namespace, path)
+      );
+      statements.push(
+        db
+          .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES ('operator', 'lint', ?1, NULL, ?2)")
+          .bind(namespace, JSON.stringify({ consolidated: paths.length, consumed: paths }))
+      );
+      try {
+        await db.batch(statements);
+      } catch (err) {
+        return fail(`finalize failed, nothing archived (an archive/ target may already exist): ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return ok({
+        mode: "finalize",
+        namespace,
+        consolidated: paths.length,
+        archived: paths.map((path) => ({ from: path, to: `archive/${path}` })),
+      });
+    }
+  );
+
   // Repo fallthrough: live GitHub access via the Capsid GitHub App. Reads are
   // open to any admitted client; writes require the operator key. The target
   // repo is resolved per namespace from the namespaces table.
