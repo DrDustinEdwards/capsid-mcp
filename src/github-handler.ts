@@ -120,6 +120,12 @@ button { background: #1a7f37; color: #fff; border: 0; border-radius: 6px; paddin
     status: 200,
     headers: {
       "Content-Type": "text/html;charset=utf-8",
+      // The dialog has an inline <style> and posts a form back to /authorize.
+      // No scripts, images, or third-party origins, so lock everything else down.
+      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+      "X-Content-Type-Options": "nosniff",
+      "Referrer-Policy": "no-referrer",
+      "X-Frame-Options": "DENY",
       "Set-Cookie": `${CSRF_COOKIE}=${csrf}; HttpOnly; Secure; SameSite=Lax; Path=/authorize; Max-Age=${STATE_TTL_SECONDS}`,
     },
   });

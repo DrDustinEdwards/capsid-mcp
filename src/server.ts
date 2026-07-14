@@ -15,6 +15,7 @@ import {
   searchCode,
   writeRepoFile,
 } from "./github";
+import { normalizeDashes } from "./normalize";
 
 export interface Env {
   DB: D1Database;
@@ -159,6 +160,10 @@ export function buildServer(env: Env, operator: boolean): McpServer {
     },
     async ({ namespace, path, title, body, type, tags, status, confirm }) => {
       if (!operator) return fail(DENIED);
+      // Normalize wide dashes server-side so no client can store an em dash,
+      // regardless of whether the Claude Code hook ran. See ./normalize.
+      title = normalizeDashes(title, "title");
+      body = normalizeDashes(body, "prose");
       const prior = await db
         .prepare("SELECT id, title, body FROM documents WHERE namespace = ?1 AND path = ?2")
         .bind(namespace, path)
@@ -339,6 +344,64 @@ export function buildServer(env: Env, operator: boolean): McpServer {
         .prepare("SELECT namespace, repos, created_at FROM namespaces ORDER BY namespace")
         .all();
       return ok(results);
+    }
+  );
+
+  // Register a namespace: the one row in the namespaces table that repo tools and
+  // the namespaces list read. Writing documents to a new namespace label does not
+  // create it, so without this a namespace was a raw D1 insert (how bsw shipped).
+  // Create-only: it will not overwrite an existing mapping. Requires operator key.
+  const REPO_SHAPE = /^[^/\s]+\/[^/\s]+$/;
+  server.registerTool(
+    "register_namespace",
+    {
+      description:
+        "Register a namespace by inserting its row in the namespaces table, so repo tools and the namespaces list can see it. Give repo as 'owner/name' (label defaults to 'primary'), or pass a repos JSON array like [{\"repo\":\"owner/name\",\"label\":\"primary\"}] for a multi-repo namespace. Create-only: it will not overwrite an existing namespace. Requires operator key.",
+      inputSchema: {
+        namespace: z.string(),
+        repo: z.string().optional(),
+        label: z.string().optional(),
+        repos: z.string().optional(),
+      },
+    },
+    async ({ namespace, repo, label, repos }) => {
+      if (!operator) return fail(DENIED);
+      const ns = namespace.trim();
+      if (!ns) return fail("namespace is required");
+      let list: Array<{ repo: string; label: string }>;
+      if (repos) {
+        try {
+          const parsed = JSON.parse(repos);
+          if (!Array.isArray(parsed) || parsed.length === 0) {
+            return fail("repos must be a non-empty JSON array of { repo, label } entries");
+          }
+          for (const r of parsed) {
+            if (!r || typeof r.repo !== "string" || !REPO_SHAPE.test(r.repo)) {
+              return fail(`each repos entry needs a "repo" of the form owner/name (got ${JSON.stringify(r)})`);
+            }
+          }
+          list = parsed.map((r) => ({ repo: r.repo, label: typeof r.label === "string" && r.label.trim() ? r.label.trim() : "primary" }));
+        } catch (err) {
+          return fail(`invalid repos JSON: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      } else {
+        if (!repo || !REPO_SHAPE.test(repo)) {
+          return fail('provide repo as "owner/name", or pass a repos JSON array');
+        }
+        list = [{ repo, label: (label ?? "primary").trim() || "primary" }];
+      }
+      const existing = await db.prepare("SELECT namespace FROM namespaces WHERE namespace = ?1").bind(ns).first();
+      if (existing) {
+        return fail(`namespace already registered: ${ns}. Edit its namespaces row directly to change the repo mapping.`);
+      }
+      const reposJson = JSON.stringify(list);
+      await db.batch([
+        db.prepare("INSERT INTO namespaces (namespace, repos) VALUES (?1, ?2)").bind(ns, reposJson),
+        db
+          .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES ('operator', 'register_namespace', ?1, NULL, ?2)")
+          .bind(ns, reposJson),
+      ]);
+      return ok({ namespace: ns, repos: list, action: "registered" });
     }
   );
 
