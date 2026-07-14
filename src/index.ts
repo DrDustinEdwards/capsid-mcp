@@ -1,8 +1,9 @@
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { createMcpHandler } from "agents/mcp";
+import { isAdminUser } from "./auth";
 import { runBackup } from "./backup";
 import { defaultHandler } from "./github-handler";
-import { buildServer, isAdminUser, type Env, type Props } from "./server";
+import { buildServer, type Env, type Props } from "./server";
 
 const apiHandler = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {

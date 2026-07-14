@@ -1,7 +1,8 @@
 import type { AuthRequest } from "@cloudflare/workers-oauth-provider";
 import { createMcpHandler } from "agents/mcp";
+import { isAdminUser, operatorGrant, sha256Hex } from "./auth";
 import { runBackup } from "./backup";
-import { buildServer, isAdminUser, isOperator, sha256Hex, type Env } from "./server";
+import { buildServer, type Env } from "./server";
 
 const GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize";
 const GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token";
@@ -259,18 +260,21 @@ async function handleCallback(request: Request, env: Env): Promise<Response> {
 }
 
 async function handleOperatorMcp(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-  if (!(await isOperator(request, env))) {
+  // "write" keys get the full tool set; "ro:" keys get operator=false, so the
+  // per-tool write gate is a live boundary for them.
+  const grant = await operatorGrant(request, env);
+  if (!grant) {
     return new Response("unauthorized: valid operator key required", {
       status: 401,
       headers: { "WWW-Authenticate": 'Bearer realm="capsid-operator"' },
     });
   }
-  return createMcpHandler(buildServer(env, true), { route: "/ops/mcp" })(request, env, ctx);
+  return createMcpHandler(buildServer(env, grant === "write"), { route: "/ops/mcp" })(request, env, ctx);
 }
 
 async function handleBackup(request: Request, env: Env): Promise<Response> {
-  if (!(await isOperator(request, env))) {
-    return new Response("unauthorized: valid operator key required", {
+  if ((await operatorGrant(request, env)) !== "write") {
+    return new Response("unauthorized: write-grant operator key required", {
       status: 401,
       headers: { "WWW-Authenticate": 'Bearer realm="capsid-operator"' },
     });

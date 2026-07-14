@@ -4,6 +4,10 @@ const JSON_PREFIX = "backups/json/";
 const MARKDOWN_PREFIX = "backups/markdown/";
 const KEEP_JSON_BACKUPS = 14;
 const PUT_CONCURRENCY = 20;
+// Retention for the history tables, pruned after each export so every pruned
+// row still exists in at least one JSON dump (and in D1 Time Travel).
+const VERSION_RETENTION_DAYS = 90;
+const AUDIT_RETENTION_DAYS = 180;
 
 const TABLES = ["documents", "namespaces", "document_versions", "audit_log"] as const;
 
@@ -14,6 +18,8 @@ export interface BackupSummary {
   markdown_pruned: number;
   json_backups_kept: number;
   json_backups_pruned: number;
+  versions_pruned: number;
+  audit_pruned: number;
 }
 
 async function listAllKeys(bucket: R2Bucket, prefix: string): Promise<string[]> {
@@ -60,6 +66,14 @@ export async function runBackup(env: Env): Promise<BackupSummary> {
   const staleDumps = dumps.slice(KEEP_JSON_BACKUPS);
   if (staleDumps.length > 0) await env.MEDIA.delete(staleDumps);
 
+  // Prune history AFTER the export above, so the rows leaving D1 are in today's dump.
+  const [prunedVersions, prunedAudit] = await env.DB.batch([
+    env.DB.prepare("DELETE FROM document_versions WHERE snapshot_at < datetime('now', ?1)").bind(
+      `-${VERSION_RETENTION_DAYS} days`
+    ),
+    env.DB.prepare("DELETE FROM audit_log WHERE at < datetime('now', ?1)").bind(`-${AUDIT_RETENTION_DAYS} days`),
+  ]);
+
   return {
     json_key: jsonKey,
     documents: docs.length,
@@ -67,5 +81,7 @@ export async function runBackup(env: Env): Promise<BackupSummary> {
     markdown_pruned: staleMarkdown.length,
     json_backups_kept: dumps.length - staleDumps.length,
     json_backups_pruned: staleDumps.length,
+    versions_pruned: prunedVersions.meta.changes ?? 0,
+    audit_pruned: prunedAudit.meta.changes ?? 0,
   };
 }

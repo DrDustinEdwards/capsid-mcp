@@ -2,9 +2,11 @@
 
 Capsid is a single-user, Cloudflare-native MCP server that serves a consolidated knowledge base from D1 and R2, and reaches your GitHub repositories directly. It speaks MCP over Streamable HTTP and exposes a small, purposeful tool set:
 
-- **Documents:** list, read, write, delete, move, find, search (FTS5), namespaces
+- **Documents:** list, read, write, delete, move, find, search (FTS5, with a plain-text fallback when a query is not valid FTS5 syntax), namespaces
 - **Repo access:** list_repo_tree, read_repo_file, search_code, write_repo_file, create_branch, open_pr
-- **Maintenance:** lint (the consolidation loop)
+- **Maintenance:** lint (the consolidation loop), register_namespace (adds a namespace-to-repo mapping; create-only, operator-gated)
+
+Writes normalize wide dashes (em and en) to plain ASCII punctuation server-side, so no client can store an em dash. The `namespaces` tool reports each namespace's count of unconsolidated episodic/source docs, so any session can see where a lint run is due.
 
 It also exposes the rest of the MCP surface: **Resources** (every document addressable at `capsid://<namespace>/<path>`) and **Prompts** (reusable templates stored as documents).
 
@@ -25,11 +27,13 @@ All access is gated. Human clients (claude.ai, MCP Inspector) authenticate via G
 Documents are typed. The model is Karpathy's LLM Wiki pattern: raw sources compiled into a maintained wiki.
 
 - `core` one always-loaded summary per namespace, read first to orient
-- `concept`, `decision`, `note`, `spec`, `task`, `protocol`, `post` the compiled knowledge and content
+- `concept`, `decision`, `note`, `spec`, `task`, `protocol`, `post`, `reference` the compiled knowledge and content
 - `episodic` session summaries, written at the end of a work session so the next session resumes
 - `procedural` agent-updatable rules
 - `prompt` reusable prompt templates with `{{variable}}` placeholders
 - `source` raw, un-compiled input
+
+The `write` tool validates the type against this list, so off-schema types cannot silently escape the consolidation loop.
 
 Namespaces are projects, each mapped to its GitHub repo(s) in the `namespaces` table.
 
@@ -62,7 +66,7 @@ The `lint` tool runs the wiki maintenance loop. The Worker never calls an LLM; t
 Two parallel paths, both fully gated:
 
 1. **OAuth (`/mcp`)** for human clients. The client discovers the server via the `.well-known` endpoints, registers itself dynamically, and is sent through `/authorize`. After a one-time approval screen, the browser goes to GitHub. On return, the GitHub user is checked against `ADMIN_GITHUB_LOGIN`: set it to your GitHub username, or to your immutable numeric GitHub user id (find it at `https://api.github.com/users/<login>`). Any other GitHub account gets a 403. The admin check runs again on every `/mcp` request as defense in depth.
-2. **Operator key (`/ops/mcp`)** for agents and cron. Same tools, same server, gated by the existing sha256-hashed bearer key (`OPERATOR_KEY_HASH`). The OAuth library never sees this route, so the two paths cannot interfere.
+2. **Operator keys (`/ops/mcp`)** for agents and cron. Same server, gated by sha256-hashed bearer keys. `OPERATOR_KEY_HASH` holds one or more comma-separated hashes: a plain entry is a full (write) key, and an entry prefixed `ro:` is a read-only key that can use the read tools but is denied write, delete, move, register_namespace, repo writes, and lint finalize. Revoke a key by removing its hash; the others keep working. The OAuth library never sees this route, so the two paths cannot interfere.
 
 Login and repo access use two different GitHub credentials: a GitHub **OAuth App** for login (OAuth Apps cannot mint installation tokens) and a separate GitHub **App** for repo access. Keep both.
 
@@ -80,6 +84,8 @@ A daily Cron Trigger (09:00 UTC) exports the whole database to the `MEDIA` R2 bu
 
 - `backups/json/<timestamp>.json` a full JSON dump of all four tables (documents, namespaces, document_versions, audit_log). The 14 most recent dumps are kept; older ones are pruned automatically.
 - `backups/markdown/<namespace>/<path>` a plain-markdown mirror of every document body, verbatim, one file per document. This mirror tracks the current state (files for deleted documents are pruned), so the knowledge base stays readable and portable with no Capsid dependency.
+
+After each export the history tables are pruned in D1: `document_versions` rows older than 90 days and `audit_log` rows older than 180 days. Pruning runs after the export, so every pruned row exists in at least one retained JSON dump.
 
 Run one on demand with the operator key:
 
@@ -122,6 +128,8 @@ curl -X POST https://capsid.<your-subdomain>.workers.dev/ops/backup -H "Authoriz
    ```
    npx wrangler secret put OPERATOR_KEY_HASH
    ```
+
+   The value is one or more comma-separated lowercase hex sha256 hashes. Prefix an entry with `ro:` to make that key read-only, e.g. `<full-key-hash>,ro:<agent-key-hash>`. Never store a raw key anywhere in the repo.
 
 6. Create a GitHub **OAuth App** (for login) at https://github.com/settings/developers with:
 
@@ -168,7 +176,7 @@ curl -X POST https://capsid.<your-subdomain>.workers.dev/ops/backup -H "Authoriz
 
 - Phase 1 (done): single operator token on `/ops/mcp`, bearer key checked against `OPERATOR_KEY_HASH`.
 - Phase 2 (done): GitHub OAuth via workers-oauth-provider on `/mcp`, locked to a single admin account.
-- Phase 3 (deferred): first-class service tokens for agents and cron, issued and revocable per client, replacing the single shared operator key; an autonomous, scheduled lint run once agents exist to drive it.
+- Phase 3 (partial): multiple operator keys with a read-only tier, individually revocable by editing the secret. Still deferred: per-client issued tokens with names and per-key audit, and an autonomous, scheduled lint run once agents exist to drive it.
 
 ## License
 

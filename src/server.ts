@@ -43,25 +43,6 @@ export interface Props extends Record<string, unknown> {
 
 const SERVER_INFO = { name: "capsid", version: "1.0.0" };
 
-export async function sha256Hex(input: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-export async function isOperator(request: Request, env: Env): Promise<boolean> {
-  const auth = request.headers.get("Authorization");
-  if (!auth || !auth.startsWith("Bearer ") || !env.OPERATOR_KEY_HASH) return false;
-  const hash = await sha256Hex(auth.slice("Bearer ".length).trim());
-  return hash === env.OPERATOR_KEY_HASH.toLowerCase();
-}
-
-export function isAdminUser(env: Env, user: { id: number | string; login: string }): boolean {
-  const admin = (env.ADMIN_GITHUB_LOGIN ?? "").trim();
-  if (!admin) return false;
-  if (/^\d+$/.test(admin)) return String(user.id) === admin;
-  return user.login.toLowerCase() === admin.toLowerCase();
-}
-
 function ok(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
 }
@@ -70,7 +51,15 @@ function fail(message: string) {
   return { content: [{ type: "text" as const, text: message }], isError: true };
 }
 
-const DENIED = "unauthorized: this tool requires a valid operator key (Authorization: Bearer <key>)";
+const DENIED = "unauthorized: this tool requires a write-grant operator key; read-only (ro:) keys can only use the read tools";
+
+// The memory model's document types (capsid/schema.md). Validated on write so
+// off-schema types cannot silently escape the lint loop again (docs stored as
+// type "session" or "handoff" were invisible to gather and the counts).
+const DOC_TYPES = new Set([
+  "core", "concept", "semantic", "note", "decision", "spec", "task", "protocol",
+  "post", "episodic", "procedural", "source", "prompt", "reference",
+]);
 
 type ConfirmVerdict = "accepted" | "declined" | "unsupported";
 
@@ -160,6 +149,11 @@ export function buildServer(env: Env, operator: boolean): McpServer {
     },
     async ({ namespace, path, title, body, type, tags, status, confirm }) => {
       if (!operator) return fail(DENIED);
+      if (type && !DOC_TYPES.has(type)) {
+        return fail(
+          `unknown type '${type}'; valid types: ${[...DOC_TYPES].join(", ")}. Session logs and handoffs are 'episodic'.`
+        );
+      }
       // Normalize wide dashes server-side so no client can store an em dash,
       // regardless of whether the Claude Code hook ran. See ./normalize.
       title = normalizeDashes(title, "title");
@@ -311,8 +305,8 @@ export function buildServer(env: Env, operator: boolean): McpServer {
       },
     },
     async ({ query, namespace, type }) => {
-      try {
-        const { results } = await db
+      const run = (match: string) =>
+        db
           .prepare(
             `SELECT d.id, d.namespace, d.path, d.title, d.type, d.status, d.updated_at,
                     snippet(documents_fts, 1, '[', ']', ' ... ', 16) AS snippet
@@ -324,11 +318,18 @@ export function buildServer(env: Env, operator: boolean): McpServer {
              ORDER BY bm25(documents_fts)
              LIMIT 25`
           )
-          .bind(query, namespace ?? null, type ?? null)
+          .bind(match, namespace ?? null, type ?? null)
           .all();
-        return ok(results);
-      } catch (err) {
-        return fail(`search failed (check FTS5 query syntax): ${err instanceof Error ? err.message : String(err)}`);
+      try {
+        return ok((await run(query)).results);
+      } catch {
+        // Hyphens, quotes, and bare AND/OR/NOT are FTS5 syntax. Retry the whole
+        // query as a quoted phrase so plain text is always a safe input.
+        try {
+          return ok((await run(`"${query.replace(/"/g, '""')}"`)).results);
+        } catch (err) {
+          return fail(`search failed (check FTS5 query syntax): ${err instanceof Error ? err.message : String(err)}`);
+        }
       }
     }
   );
@@ -340,8 +341,16 @@ export function buildServer(env: Env, operator: boolean): McpServer {
       inputSchema: {},
     },
     async () => {
+      // unconsolidated = published episodic/source docs not yet archived by the
+      // lint loop; surfaced here so every session sees which namespaces need a run.
       const { results } = await db
-        .prepare("SELECT namespace, repos, created_at FROM namespaces ORDER BY namespace")
+        .prepare(
+          `SELECT n.namespace, n.repos, n.created_at,
+                  (SELECT COUNT(*) FROM documents d
+                   WHERE d.namespace = n.namespace AND d.type IN ('episodic', 'source')
+                     AND d.status = 'published' AND d.path NOT LIKE 'archive/%') AS unconsolidated
+           FROM namespaces n ORDER BY n.namespace`
+        )
         .all();
       return ok(results);
     }
@@ -447,6 +456,12 @@ export function buildServer(env: Env, operator: boolean): McpServer {
         const rules = await db
           .prepare("SELECT namespace, path, title, body FROM documents WHERE namespace = 'capsid' AND path IN ('schema.md', 'conventions.md') ORDER BY path")
           .all();
+        // Rough packet size so a driving LLM knows when a gather will not fit
+        // its context and it should consolidate in batches instead.
+        const packetChars = [core, ...wiki.results, ...raw.results, ...rules.results].reduce(
+          (sum, row) => sum + String((row as { body?: unknown } | null)?.body ?? "").length,
+          0
+        );
         return ok({
           mode: "gather",
           namespace,
@@ -454,6 +469,10 @@ export function buildServer(env: Env, operator: boolean): McpServer {
           wiki: wiki.results,
           unconsolidated: raw.results,
           rules: rules.results,
+          packet_chars: packetChars,
+          ...(packetChars > 150_000
+            ? { warning: "large packet: consider consolidating the oldest unconsolidated docs first, in batches, using read on individual paths" }
+            : {}),
         });
       }
 
