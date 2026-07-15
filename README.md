@@ -55,7 +55,7 @@ The `lint` tool runs the wiki maintenance loop. The Worker never calls an LLM; t
 
 - `POST /mcp` MCP over Streamable HTTP, requires an OAuth access token (admin only)
 - `POST /ops/mcp` MCP over Streamable HTTP for headless agents, requires the operator key as `Authorization: Bearer <key>`
-- `POST /ops/backup` runs a backup on demand, requires the operator key, returns a JSON summary
+- `POST /ops/backup` runs a backup on demand, requires a write-grant operator key, returns a JSON summary
 - `GET /authorize`, `POST /authorize`, `GET /callback` GitHub OAuth flow
 - `POST /token`, `POST /register` OAuth token exchange and dynamic client registration (served by the library)
 - `GET /.well-known/oauth-authorization-server` and `GET /.well-known/oauth-protected-resource` OAuth discovery metadata (served by the library)
@@ -65,7 +65,7 @@ The `lint` tool runs the wiki maintenance loop. The Worker never calls an LLM; t
 
 Two parallel paths, both fully gated:
 
-1. **OAuth (`/mcp`)** for human clients. The client discovers the server via the `.well-known` endpoints, registers itself dynamically, and is sent through `/authorize`. After a one-time approval screen, the browser goes to GitHub. On return, the GitHub user is checked against `ADMIN_GITHUB_LOGIN`: set it to your GitHub username, or to your immutable numeric GitHub user id (find it at `https://api.github.com/users/<login>`). Any other GitHub account gets a 403. The admin check runs again on every `/mcp` request as defense in depth.
+1. **OAuth (`/mcp`)** for human clients. The client discovers the server via the `.well-known` endpoints, registers itself dynamically, and is sent through `/authorize`. After a one-time approval screen, the browser goes to GitHub. On return, the GitHub user is checked against `ADMIN_GITHUB_LOGIN`: set it to your GitHub username, or to your immutable numeric GitHub user id (find it at `https://api.github.com/users/<login>`). Any other GitHub account gets a 403. The admin check runs again on every `/mcp` request as defense in depth. An admitted admin holds a full write grant.
 2. **Operator keys (`/ops/mcp`)** for agents and cron. Same server, gated by sha256-hashed bearer keys. `OPERATOR_KEY_HASH` holds one or more comma-separated hashes: a plain entry is a full (write) key, and an entry prefixed `ro:` is a read-only key that can use the read tools but is denied write, delete, move, register_namespace, repo writes, and lint finalize. Revoke a key by removing its hash; the others keep working. The OAuth library never sees this route, so the two paths cannot interfere.
 
 Login and repo access use two different GitHub credentials: a GitHub **OAuth App** for login (OAuth Apps cannot mint installation tokens) and a separate GitHub **App** for repo access. Keep both.
@@ -87,11 +87,29 @@ A daily Cron Trigger (09:00 UTC) exports the whole database to the `MEDIA` R2 bu
 
 After each export the history tables are pruned in D1: `document_versions` rows older than 90 days and `audit_log` rows older than 180 days. Pruning runs after the export, so every pruned row exists in at least one retained JSON dump.
 
-Run one on demand with the operator key:
+Run one on demand with a write-grant operator key (read-only keys are refused):
 
 ```
 curl -X POST https://capsid.<your-subdomain>.workers.dev/ops/backup -H "Authorization: Bearer <key>"
 ```
+
+## Restore
+
+Three paths, in the order to try them. Path 2 has been executed end to end against a scratch database: all four table counts matched the source and search worked on the restored copy.
+
+1. **D1 Time Travel** (last 30 days, fastest), for fat-finger recovery or a bad bulk change. `wrangler d1 time-travel info capsid`, then `wrangler d1 time-travel restore capsid --bookmark=<bookmark>`. This rewinds the live database in place, so take a fresh bookmark first to keep the restore itself reversible.
+
+2. **Table-scoped export and import**, for rebuilding into a new database (migration, region move, corruption). Note that `wrangler d1 export` fails outright on this database, because D1 cannot export databases with FTS5 virtual tables. Export the four real tables individually and data-only, taking the schema from the migration instead:
+
+   ```
+   wrangler d1 export capsid --remote --no-schema --table <table> --output export-<table>.sql
+   ```
+
+   Create the new database, apply `migrations/0001_init.sql`, then execute the four exports with `documents` first. Importing `documents` fires the FTS sync triggers, so `documents_fts` rebuilds itself and needs no separate step. Verify with count queries against both databases and one MATCH query on the new one, then point `wrangler.jsonc` at the new `database_id` and deploy.
+
+3. **The R2 JSON dump**, for anything beyond the 30-day Time Travel window. Wrangler cannot list R2 objects, so get the exact key from the Cloudflare dashboard or from the `json_key` field of a `/ops/backup` response, then `wrangler r2 object get capsid-media/backups/json/<key>.json --file dump.json`. Convert each table in `dump.tables` to INSERT statements and follow path 2 from the create step. The `backups/markdown/` mirror is the last-resort human-readable copy: bodies only, no metadata.
+
+Single-document recovery rarely needs any of this. Every overwrite and delete snapshots the prior row into `document_versions` first, so recovering one document is usually just reading its latest snapshot back.
 
 ## Clone setup
 
