@@ -29,7 +29,7 @@ End: write a `session-YYYY-MM-DD.md` episodic (type `episodic`, under ~2KB) to t
 3. No real vault content in any seed or fixture. Sample data must be obviously fake (example.com, lorem-style bodies, namespace "sample").
 4. The lint loop never calls an LLM from the Worker. The driving client does all reasoning with ordinary read and write tools. Gather is read-only; finalize archives, never deletes.
 5. Every overwrite and delete snapshots the prior row into document_versions and appends to audit_log. Do not add a write path that skips this.
-6. Writes normalize wide dashes to ASCII server-side. This is the enforcement layer for the portfolio em dash rule; no client can store an em dash. Keep it that way.
+6. Writes normalize wide dashes to ASCII server-side. This is the enforcement layer for the portfolio em dash rule; no client can store an em dash. Keep it that way. Note the scope: only DOCUMENT writes to D1 are normalized. Repo writes (write_repo_file) pass content through verbatim, which is how em dashes reached foxhound's docs/canon copies.
 
 ## Auth model
 
@@ -49,11 +49,14 @@ Restore gotcha: `wrangler d1 export` fails outright on this database because of 
 - claude.ai's connector UI is OAuth-only. No static bearer tokens, no API keys, no custom headers. That is why the OAuth layer exists at all.
 - MCP tool lists are cached at connect time. Tools deployed after a session connected will not appear until the connector is reconnected or a new chat starts.
 - `search_code` currently returns 0 results for every query (verified 2026-07-16 against terms confirmed present via read_repo_file). Use list_repo_tree plus read_repo_file until fixed.
+- Repo tools resolve a namespace to its `primary` repo only; multi-repo namespaces (recova -> foxhound + legacy recova) are declarable but not addressable. Needs a repo selector on the repo tools.
+- register_namespace is create-only; remapping an existing namespace requires a raw D1 update. Needs an update_namespace tool.
 - The MCP spec ships breaking changes on 2026-07-28: stateless core, Multi Round-Trip Requests replacing server-initiated elicitation, auth hardening, Sampling deprecated. The stateless design and `confirm: true` fallback already match the direction, but a compliance pass is due once the Agents SDK updates.
 
 ## Commands
 
-- `npm test` - vitest (auth, normalize).
-- `npx tsc --noEmit` - type check before every push.
-- `npx wrangler deploy` - deploy the Worker.
+- `npm test` - node --test (test/auth.test.ts, test/normalize.test.ts). Not vitest.
+- `npm run check` - tsc --noEmit. Run before every push.
+- `npm run dev` - wrangler dev.
+- `npm run deploy` - wrangler deploy.
 - `npx wrangler secret put KEY` - set a secret. Never commit one.
