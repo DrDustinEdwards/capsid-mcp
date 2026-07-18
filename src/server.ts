@@ -611,18 +611,29 @@ export function buildServer(env: Env, operator: boolean): McpServer {
     "search_code",
     {
       description:
-        "Case-insensitive substring search across a namespace repo's files. Walks the repo tree and greps blobs server-side (GitHub's code-search index does not serve these private repos over an App token), so scope with path_prefix on large repos. Returns path, line number, and the matching line. namespace is required.",
+        "Case-insensitive substring search across a namespace repo's files. Walks the repo tree and greps blobs server-side (GitHub's code-search index does not serve these private repos over an App token), so scope with path_prefix on large repos. Returns path, line number, and the matching line. When it stops early it sets truncated:true with a note explaining why and a next_start to resume from (or raise max_files); a truncated result is a partial scan, not an empty repo. namespace is required.",
       inputSchema: {
         query: z.string(),
         namespace: z.string(),
-        path_prefix: z.string().optional().describe("Only scan files whose path starts with this prefix, e.g. 'src/'."),
+        path_prefix: z.string().optional().describe("Only scan files whose path starts with this prefix, e.g. 'app/lib/billing'."),
         ref: z.string().optional().describe("Branch, tag, or sha to search. Defaults to the default branch."),
         max_results: z.number().int().positive().optional().describe("Cap on returned matches (default 20)."),
+        max_files: z.number().int().positive().optional().describe("Cap on files fetched and scanned (default 200). Raise for a wider sweep; narrowing path_prefix is cheaper."),
+        start: z.number().int().nonnegative().optional().describe("Candidate-file offset to resume a truncated scan; pass the previous result's next_start."),
         repo: z.string().optional().describe(REPO_ARG),
       },
     },
-    ({ query, namespace, path_prefix, ref, max_results, repo }) =>
-      guarded(() => searchCode(env, namespace, query, { pathPrefix: path_prefix, ref, maxResults: max_results, repoSelector: repo }))
+    ({ query, namespace, path_prefix, ref, max_results, max_files, start, repo }) =>
+      guarded(() =>
+        searchCode(env, namespace, query, {
+          pathPrefix: path_prefix,
+          ref,
+          maxResults: max_results,
+          maxFiles: max_files,
+          start,
+          repoSelector: repo,
+        })
+      )
   );
 
   server.registerTool(

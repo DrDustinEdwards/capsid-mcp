@@ -303,7 +303,7 @@ export async function searchCode(
   env: Env,
   namespace: string | undefined,
   query: string,
-  opts: { pathPrefix?: string; ref?: string; repoSelector?: string; maxResults?: number; maxFiles?: number } = {}
+  opts: { pathPrefix?: string; ref?: string; repoSelector?: string; maxResults?: number; maxFiles?: number; start?: number } = {}
 ) {
   if (!namespace) {
     throw new Error("search_code needs a namespace: it walks one repo's tree. Pass namespace (and optional repo).");
@@ -311,7 +311,8 @@ export async function searchCode(
   const { owner, repo, full } = await resolveRepo(env, namespace, opts.repoSelector);
   const ref = opts.ref || (await getDefaultBranch(env, owner, repo));
   const maxResults = opts.maxResults && opts.maxResults > 0 ? opts.maxResults : 20;
-  const maxFiles = opts.maxFiles && opts.maxFiles > 0 ? opts.maxFiles : 50;
+  const maxFiles = opts.maxFiles && opts.maxFiles > 0 ? opts.maxFiles : 200;
+  const start = opts.start && opts.start > 0 ? Math.floor(opts.start) : 0;
   const pathPrefix = (opts.pathPrefix ?? "").replace(/^\/+/, "");
 
   // GitHub resolves a branch, tag, or sha for the tree sha here. recursive=1
@@ -343,13 +344,17 @@ export async function searchCode(
   const needle = query.toLowerCase();
   const items: Array<{ path: string; line: number; text: string }> = [];
   let filesScanned = 0;
-  let capped = false;
-  for (const c of candidates) {
+  let index = start;
+  let stoppedAtFileCap = false;
+  for (; index < candidates.length; index++) {
     if (filesScanned >= maxFiles) {
-      capped = true;
+      // Cap reached before candidates[index] was scanned, so it is the first
+      // unsearched file: a caller can resume the scan from here.
+      stoppedAtFileCap = true;
       break;
     }
     filesScanned++;
+    const c = candidates[index];
     const blob = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/git/blobs/${c.sha}`);
     if (!blob.ok) continue;
     const blobData = (await blob.json()) as { content?: string; encoding?: string };
@@ -369,21 +374,51 @@ export async function searchCode(
       }
     }
     if (items.length >= maxResults) {
-      capped = filesScanned < candidates.length;
+      index++;
       break;
     }
   }
 
-  return {
+  const remaining = candidates.length - index;
+  const result: {
+    repo: string;
+    ref: string;
+    query: string;
+    candidates: number;
+    start: number;
+    files_scanned: number;
+    total_results: number;
+    truncated: boolean;
+    next_start?: number;
+    note?: string;
+    items: typeof items;
+  } = {
     repo: full,
     ref,
     query,
     candidates: candidates.length,
+    start,
     files_scanned: filesScanned,
     total_results: items.length,
-    truncated: capped,
+    truncated: false,
     items,
   };
+
+  // A boolean alone is not actionable: say WHY it stopped and what to do next.
+  if (stoppedAtFileCap && remaining > 0) {
+    result.truncated = true;
+    result.next_start = index;
+    result.note =
+      `Stopped at the max_files cap (${maxFiles}): ${remaining} of ${candidates.length} candidate files were not searched, so matches past this point are NOT included. ` +
+      `Narrow with path_prefix (a subdirectory), or pass start=${index} to continue this scan from where it left off.`;
+  } else if (items.length >= maxResults && remaining > 0) {
+    result.truncated = true;
+    result.note =
+      `Returned the first ${maxResults} matches (max_results cap) with files still unsearched; more matches may exist. ` +
+      `Raise max_results, or narrow with path_prefix.`;
+  }
+
+  return result;
 }
 
 // ---- write -------------------------------------------------------------------
