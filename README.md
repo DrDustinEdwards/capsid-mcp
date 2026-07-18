@@ -1,9 +1,9 @@
 # Capsid
 
-Capsid is a single-user, Cloudflare-native MCP server that serves a consolidated knowledge base from D1 and R2, and reaches your GitHub repositories directly. It speaks MCP over Streamable HTTP and exposes a small, purposeful tool set (19 tools):
+Capsid is a single-user, Cloudflare-native MCP server that serves a consolidated knowledge base from D1 and R2, and reaches your GitHub repositories directly. It speaks MCP over Streamable HTTP and exposes a small, purposeful tool set (22 tools):
 
-- **Documents:** list, read, write, delete, move, find, search (FTS5, with a plain-text fallback when a query is not valid FTS5 syntax), namespaces
-- **Repo access:** list_repo_tree, read_repo_file, search_code, write_repo_file, create_branch, open_pr, delete_repo_file, manage_pr
+- **Documents:** list, read, write, delete, move, find, search (FTS5, with a plain-text fallback when a query is not valid FTS5 syntax), namespaces, backlinks (typed edges), brief (one-call session start)
+- **Repo access:** list_repo_tree, read_repo_file, search_code, write_repo_file, create_branch, open_pr, delete_repo_file, manage_pr, ci_status (CI runs via the GitHub App)
 - **Maintenance:** lint (the consolidation loop), register_namespace (create), update_namespace (remap)
 
 Writes normalize wide dashes (em and en) to plain ASCII punctuation server-side, so no client can store an em dash. The `namespaces` tool reports each namespace's count of unconsolidated episodic/source docs, so any session can see where a lint run is due.
@@ -202,7 +202,8 @@ Note: MCP clients cache the tool list at connect time. After deploying new tools
 - Phase 2 (done): GitHub OAuth via workers-oauth-provider on `/mcp`, locked to a single admin account.
 - Phase 3 (partial): multiple operator keys with a read-only tier, individually revocable by editing the secret. Still deferred: per-client issued tokens with names and per-key audit, and an autonomous, scheduled lint run once agents exist to drive it.
 - Phase 4 (done, 2026-07): multi-repo namespaces with a repo selector on every repo tool; update_namespace; delete_repo_file; manage_pr (merge/close); search_code reimplemented as a tree walk.
-- Phase 5 (planned): typed document links with a backlinks query; truth lints (cross-doc contradiction check, doc-vs-artifact binding, doc-vs-live-Cloudflare infra binding); alignment with the 2026 MCP spec revision.
+- Phase 5 (done, 2026-07): typed document links (`document_links`) with a `backlinks` query; `brief` for one-call session start; `ci_status` for CI visibility via the GitHub App; truth lints documented as lint-loop steps (cross-doc contradiction, doc-vs-artifact binding, and doc-vs-live-Cloudflare infra binding via the Cloudflare MCP tools, since the Worker holds no Cloudflare API token).
+- Later: alignment with the 2026-07-28 MCP spec revision (readiness audited; waiting on the SDK release); adopting fiberplane/drift for doc-code drift on repos where docs and code are co-located (foxhound keeps its canon in Capsid, so it does not fit); per-client issued operator tokens.
 
 ## License
 
