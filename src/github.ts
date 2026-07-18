@@ -187,22 +187,6 @@ export async function resolveRepo(env: Env, namespace: string, selector?: string
   return { owner, repo, full: chosen.repo };
 }
 
-async function anyRepo(env: Env): Promise<RepoRef> {
-  const { results } = await env.DB.prepare("SELECT repos FROM namespaces ORDER BY namespace").all<{ repos: string }>();
-  for (const row of results) {
-    try {
-      const list = JSON.parse(row.repos || "[]") as Array<{ repo: string }>;
-      if (list[0]?.repo) {
-        const [owner, repo] = list[0].repo.split("/");
-        if (owner && repo) return { owner, repo, full: list[0].repo };
-      }
-    } catch {
-      // skip malformed rows
-    }
-  }
-  throw new Error("no repos are configured in the namespaces table");
-}
-
 function encodePath(path: string): string {
   return path
     .split("/")
@@ -255,30 +239,110 @@ export async function readRepoFile(env: Env, namespace: string, path: string, re
   return { repo: `${owner}/${repo}`, path, size: data.size, sha: data.sha, content };
 }
 
-export async function searchCode(env: Env, namespace: string | undefined, query: string) {
-  let seed: RepoRef;
-  let scoped: string;
-  if (namespace) {
-    seed = await resolveRepo(env, namespace);
-    scoped = `${query} repo:${seed.full}`;
-  } else {
-    seed = await anyRepo(env);
-    scoped = `${query} user:${seed.owner}`;
+// search_code fallback: a server-side tree walk, not the REST search API.
+//
+// Verified 2026-07-17 via the live search_code tool: GitHub's GET /search/code
+// returns HTTP 200 with total_count 0 and an empty items array for these private
+// repos when queried with a GitHub App installation token, even for terms that
+// read_repo_file confirms are present (e.g. "normalizeDashes"). It is not a 403
+// or 422 (those would surface as an error); the code search index simply does
+// not serve App-token requests on private repos, which is why both Capsid and
+// the hosted GitHub connector returned 0. So we fetch the repo tree and grep the
+// blobs ourselves instead of trusting the search index.
+const SEARCH_EXCLUDE_DIRS = ["node_modules/", ".git/", "dist/"];
+const SEARCH_EXCLUDE_FILES = new Set(["package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb"]);
+const SEARCH_EXCLUDE_EXTS = new Set([
+  "png", "jpg", "jpeg", "gif", "webp", "ico", "pdf", "zip", "gz", "tgz", "tar", "bz2",
+  "woff", "woff2", "ttf", "otf", "eot", "mp4", "mov", "webm", "mp3", "wav", "wasm",
+  "bin", "exe", "dll", "so", "dylib", "class", "jar", "pyc", "lockb",
+]);
+const SEARCH_BLOB_LIMIT = 200 * 1024; // skip blobs over 200KB
+const SEARCH_TREE_LIMIT = 5000; // refuse to scan a tree bigger than this whole
+
+export async function searchCode(
+  env: Env,
+  namespace: string | undefined,
+  query: string,
+  opts: { pathPrefix?: string; ref?: string; repoSelector?: string; maxResults?: number; maxFiles?: number } = {}
+) {
+  if (!namespace) {
+    throw new Error("search_code needs a namespace: it walks one repo's tree. Pass namespace (and optional repo).");
   }
-  const resp = await cachedGet(
-    env,
-    seed.owner,
-    seed.repo,
-    `/search/code?q=${encodeURIComponent(scoped)}&per_page=30`
-  );
-  if (!resp.ok) throw new Error(`search_code failed (${resp.status}): ${await resp.text()}`);
-  const data = (await resp.json()) as {
-    total_count: number;
-    items: Array<{ path: string; repository: { full_name: string }; html_url: string }>;
+  const { owner, repo, full } = await resolveRepo(env, namespace, opts.repoSelector);
+  const ref = opts.ref || (await getDefaultBranch(env, owner, repo));
+  const maxResults = opts.maxResults && opts.maxResults > 0 ? opts.maxResults : 20;
+  const maxFiles = opts.maxFiles && opts.maxFiles > 0 ? opts.maxFiles : 50;
+  const pathPrefix = (opts.pathPrefix ?? "").replace(/^\/+/, "");
+
+  // GitHub resolves a branch, tag, or sha for the tree sha here. recursive=1
+  // returns the whole tree in one call.
+  const treeResp = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(ref)}?recursive=1`);
+  if (!treeResp.ok) throw new Error(`search_code tree fetch failed (${treeResp.status}): ${await treeResp.text()}`);
+  const tree = (await treeResp.json()) as {
+    tree: Array<{ path: string; type: string; sha: string; size?: number }>;
+    truncated: boolean;
   };
+  if (tree.truncated || tree.tree.length > SEARCH_TREE_LIMIT) {
+    throw new Error(
+      `search_code: ${full}@${ref} tree is too large to scan whole (${tree.tree.length} entries, truncated=${tree.truncated}). Narrow it with path_prefix.`
+    );
+  }
+
+  const candidates = tree.tree.filter((e) => {
+    if (e.type !== "blob") return false;
+    if (pathPrefix && !e.path.startsWith(pathPrefix)) return false;
+    if (SEARCH_EXCLUDE_DIRS.some((d) => e.path.startsWith(d) || e.path.includes(`/${d}`))) return false;
+    const base = e.path.split("/").pop() ?? e.path;
+    if (SEARCH_EXCLUDE_FILES.has(base)) return false;
+    const ext = base.includes(".") ? base.slice(base.lastIndexOf(".") + 1).toLowerCase() : "";
+    if (SEARCH_EXCLUDE_EXTS.has(ext)) return false;
+    if (typeof e.size === "number" && e.size > SEARCH_BLOB_LIMIT) return false;
+    return true;
+  });
+
+  const needle = query.toLowerCase();
+  const items: Array<{ path: string; line: number; text: string }> = [];
+  let filesScanned = 0;
+  let capped = false;
+  for (const c of candidates) {
+    if (filesScanned >= maxFiles) {
+      capped = true;
+      break;
+    }
+    filesScanned++;
+    const blob = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/git/blobs/${c.sha}`);
+    if (!blob.ok) continue;
+    const blobData = (await blob.json()) as { content?: string; encoding?: string };
+    if (blobData.encoding !== "base64" || !blobData.content) continue;
+    let text: string;
+    try {
+      text = decodeBase64Utf8(blobData.content);
+    } catch {
+      continue; // binary that slipped past the extension filter
+    }
+    // Match line by line, then let text and its lines fall out of scope so only
+    // one blob is ever held in memory at a time.
+    const lines = text.split("\n");
+    for (let i = 0; i < lines.length && items.length < maxResults; i++) {
+      if (lines[i].toLowerCase().includes(needle)) {
+        items.push({ path: c.path, line: i + 1, text: lines[i].trim().slice(0, 200) });
+      }
+    }
+    if (items.length >= maxResults) {
+      capped = filesScanned < candidates.length;
+      break;
+    }
+  }
+
   return {
-    total_count: data.total_count,
-    items: data.items.map((i) => ({ repo: i.repository.full_name, path: i.path, url: i.html_url })),
+    repo: full,
+    ref,
+    query,
+    candidates: candidates.length,
+    files_scanned: filesScanned,
+    total_results: items.length,
+    truncated: capped,
+    items,
   };
 }
 

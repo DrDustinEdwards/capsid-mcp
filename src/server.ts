@@ -580,10 +580,19 @@ export function buildServer(env: Env, operator: boolean): McpServer {
   server.registerTool(
     "search_code",
     {
-      description: "Search code with the GitHub code search API. Pass a namespace to scope to its repo, otherwise searches all of the owner's repos the App can see.",
-      inputSchema: { query: z.string(), namespace: z.string().optional() },
+      description:
+        "Case-insensitive substring search across a namespace repo's files. Walks the repo tree and greps blobs server-side (GitHub's code-search index does not serve these private repos over an App token), so scope with path_prefix on large repos. Returns path, line number, and the matching line. namespace is required.",
+      inputSchema: {
+        query: z.string(),
+        namespace: z.string(),
+        path_prefix: z.string().optional().describe("Only scan files whose path starts with this prefix, e.g. 'src/'."),
+        ref: z.string().optional().describe("Branch, tag, or sha to search. Defaults to the default branch."),
+        max_results: z.number().int().positive().optional().describe("Cap on returned matches (default 20)."),
+        repo: z.string().optional().describe(REPO_ARG),
+      },
     },
-    ({ query, namespace }) => guarded(() => searchCode(env, namespace, query))
+    ({ query, namespace, path_prefix, ref, max_results, repo }) =>
+      guarded(() => searchCode(env, namespace, query, { pathPrefix: path_prefix, ref, maxResults: max_results, repoSelector: repo }))
   );
 
   server.registerTool(

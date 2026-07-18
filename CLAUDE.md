@@ -48,7 +48,7 @@ Restore gotcha: `wrangler d1 export` fails outright on this database because of 
 
 - claude.ai's connector UI is OAuth-only. No static bearer tokens, no API keys, no custom headers. That is why the OAuth layer exists at all.
 - MCP tool lists are cached at connect time. Tools deployed after a session connected will not appear until the connector is reconnected or a new chat starts.
-- DEFECT: `search_code` returns 0 results for every query, including terms verified present via read_repo_file (2026-07-16). The hosted GitHub MCP connector's search_code returns 0 on these repos too, so cross-repo audits in this window are read-verified, not grep-verified.
+- `search_code` walks the repo tree and greps blobs server-side rather than calling GitHub's code-search API, which returns empty 200s for these private repos over an App installation token (verified 2026-07-17). Scope large repos with `path_prefix`; it refuses trees over 5,000 blobs.
 - Repo tools take an optional `repo` argument (a label like "primary"/"legacy" or a mapped "owner/name") to address multi-repo namespaces (recova -> foxhound primary + recova legacy). Omit it for the primary repo. An unmapped selector is rejected with the valid values; the namespace mapping is the authorization boundary. Repo writes are audit-logged with the resolved repo.
 - GAP: `register_namespace` is create-only. Remapping an existing namespace requires a raw D1 update (done once, 2026-07-16). Needs `update_namespace`, operator-gated and audit-logged.
 - GAP: no `delete_repo_file`, so deprecating a repo file can only overwrite it with a stub.
