@@ -529,22 +529,52 @@ export function buildServer(env: Env, operator: boolean): McpServer {
     }
   };
 
+  // Repo writes are operator-gated and audit-logged. The whole result (which
+  // includes the resolved repo) goes into params so a misdirected write is
+  // diagnosable from the log; path is the file path where one applies.
+  const guardedWrite = async (
+    action: string,
+    namespace: string,
+    path: string | null,
+    fn: () => Promise<Record<string, unknown>>
+  ) => {
+    if (!operator) return fail(DENIED);
+    let result: Record<string, unknown>;
+    try {
+      result = await fn();
+    } catch (err) {
+      return fail(err instanceof Error ? err.message : String(err));
+    }
+    await db
+      .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES ('operator', ?1, ?2, ?3, ?4)")
+      .bind(action, namespace, path, JSON.stringify(result))
+      .run();
+    return ok(result);
+  };
+
+  // A namespace can map to more than one repo (e.g. recova -> foxhound primary +
+  // recova legacy). The optional `repo` argument on every repo tool selects one:
+  // pass a label ("primary", "legacy") or a full "owner/name" that is mapped to
+  // the namespace. Omit it to target the primary repo. Use `namespaces` to see
+  // the mapping.
+  const REPO_ARG = "Optional repo selector for a multi-repo namespace: a label (\"primary\", \"legacy\") or a mapped \"owner/name\". Defaults to the primary repo.";
+
   server.registerTool(
     "list_repo_tree",
     {
       description: "List a directory in a namespace's GitHub repo. Omit path for the repo root. Live GitHub, briefly cached.",
-      inputSchema: { namespace: z.string(), path: z.string().optional(), ref: z.string().optional() },
+      inputSchema: { namespace: z.string(), path: z.string().optional(), ref: z.string().optional(), repo: z.string().optional().describe(REPO_ARG) },
     },
-    ({ namespace, path, ref }) => guarded(() => listRepoTree(env, namespace, path ?? "", ref))
+    ({ namespace, path, ref, repo }) => guarded(() => listRepoTree(env, namespace, path ?? "", ref, repo))
   );
 
   server.registerTool(
     "read_repo_file",
     {
       description: "Read a file from a namespace's GitHub repo, decoded to text. Optional ref (branch, tag, or sha). Live GitHub, briefly cached.",
-      inputSchema: { namespace: z.string(), path: z.string(), ref: z.string().optional() },
+      inputSchema: { namespace: z.string(), path: z.string(), ref: z.string().optional(), repo: z.string().optional().describe(REPO_ARG) },
     },
-    ({ namespace, path, ref }) => guarded(() => readRepoFile(env, namespace, path, ref))
+    ({ namespace, path, ref, repo }) => guarded(() => readRepoFile(env, namespace, path, ref, repo))
   );
 
   server.registerTool(
@@ -568,24 +598,23 @@ export function buildServer(env: Env, operator: boolean): McpServer {
         message: z.string(),
         mode: z.enum(["pr", "direct"]).optional(),
         branch: z.string().optional(),
+        repo: z.string().optional().describe(REPO_ARG),
       },
     },
-    ({ namespace, path, content, message, mode, branch }) => {
-      if (!operator) return Promise.resolve(fail(DENIED));
-      return guarded(() => writeRepoFile(env, namespace, path, content, message, mode ?? "pr", branch));
-    }
+    ({ namespace, path, content, message, mode, branch, repo }) =>
+      guardedWrite("write_repo_file", namespace, path, () =>
+        writeRepoFile(env, namespace, path, content, message, mode ?? "pr", branch, repo)
+      )
   );
 
   server.registerTool(
     "create_branch",
     {
       description: "Create a branch in a namespace's GitHub repo. Branches off the default branch unless 'from' is given. Requires operator key.",
-      inputSchema: { namespace: z.string(), branch: z.string(), from: z.string().optional() },
+      inputSchema: { namespace: z.string(), branch: z.string(), from: z.string().optional(), repo: z.string().optional().describe(REPO_ARG) },
     },
-    ({ namespace, branch, from }) => {
-      if (!operator) return Promise.resolve(fail(DENIED));
-      return guarded(() => createBranch(env, namespace, branch, from));
-    }
+    ({ namespace, branch, from, repo }) =>
+      guardedWrite("create_branch", namespace, null, () => createBranch(env, namespace, branch, from, repo))
   );
 
   server.registerTool(
@@ -598,12 +627,11 @@ export function buildServer(env: Env, operator: boolean): McpServer {
         head: z.string(),
         base: z.string().optional(),
         body: z.string().optional(),
+        repo: z.string().optional().describe(REPO_ARG),
       },
     },
-    ({ namespace, title, head, base, body }) => {
-      if (!operator) return Promise.resolve(fail(DENIED));
-      return guarded(() => openPr(env, namespace, title, head, base, body));
-    }
+    ({ namespace, title, head, base, body, repo }) =>
+      guardedWrite("open_pr", namespace, null, () => openPr(env, namespace, title, head, base, body, repo))
   );
 
   // Resources: every document is addressable context at capsid://<namespace>/<path>.

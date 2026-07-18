@@ -151,7 +151,13 @@ async function cachedGet(env: Env, owner: string, repo: string, path: string): P
 
 // ---- repo resolution ---------------------------------------------------------
 
-export async function resolveRepo(env: Env, namespace: string, label?: string): Promise<RepoRef> {
+// Resolve a namespace to one of its mapped repos. `selector` is the optional
+// `repo` tool argument: a label from the namespace's repos array ("primary",
+// "legacy") or a full "owner/name" that MUST appear in that array. The namespace
+// mapping is the authorization boundary, so an unknown selector is rejected with
+// the valid values rather than falling through to an arbitrary repo. With no
+// selector the default is the entry labeled "primary" (or the first entry).
+export async function resolveRepo(env: Env, namespace: string, selector?: string): Promise<RepoRef> {
   const row = await env.DB.prepare("SELECT repos FROM namespaces WHERE namespace = ?1")
     .bind(namespace)
     .first<{ repos: string }>();
@@ -163,10 +169,19 @@ export async function resolveRepo(env: Env, namespace: string, label?: string): 
     list = [];
   }
   if (list.length === 0) throw new Error(`namespace ${namespace} has no repo mapping`);
-  const chosen =
-    (label ? list.find((r) => r.label === label) : undefined) ??
-    list.find((r) => r.label === "primary") ??
-    list[0];
+  let chosen: { repo: string; label?: string } | undefined;
+  if (selector) {
+    chosen = list.find((r) => r.label === selector) ?? list.find((r) => r.repo === selector);
+    if (!chosen) {
+      const labels = list.map((r) => r.label).filter(Boolean).join(", ") || "(none)";
+      const repos = list.map((r) => r.repo).join(", ");
+      throw new Error(
+        `repo '${selector}' is not mapped to namespace ${namespace}. Valid labels: ${labels}. Valid repos: ${repos}.`
+      );
+    }
+  } else {
+    chosen = list.find((r) => r.label === "primary") ?? list[0];
+  }
   const [owner, repo] = chosen.repo.split("/");
   if (!owner || !repo) throw new Error(`invalid repo entry for ${namespace}: ${chosen.repo}`);
   return { owner, repo, full: chosen.repo };
@@ -198,8 +213,8 @@ function encodePath(path: string): string {
 
 // ---- read --------------------------------------------------------------------
 
-export async function listRepoTree(env: Env, namespace: string, path = "", ref?: string) {
-  const { owner, repo } = await resolveRepo(env, namespace);
+export async function listRepoTree(env: Env, namespace: string, path = "", ref?: string, repoSelector?: string) {
+  const { owner, repo } = await resolveRepo(env, namespace, repoSelector);
   const query = ref ? `?ref=${encodeURIComponent(ref)}` : "";
   const resp = await cachedGet(env, owner, repo, `/repos/${owner}/${repo}/contents/${encodePath(path)}${query}`);
   if (!resp.ok) throw new Error(`list_repo_tree failed (${resp.status}): ${await resp.text()}`);
@@ -217,8 +232,8 @@ export async function listRepoTree(env: Env, namespace: string, path = "", ref?:
   };
 }
 
-export async function readRepoFile(env: Env, namespace: string, path: string, ref?: string) {
-  const { owner, repo } = await resolveRepo(env, namespace);
+export async function readRepoFile(env: Env, namespace: string, path: string, ref?: string, repoSelector?: string) {
+  const { owner, repo } = await resolveRepo(env, namespace, repoSelector);
   const query = ref ? `?ref=${encodeURIComponent(ref)}` : "";
   const resp = await cachedGet(env, owner, repo, `/repos/${owner}/${repo}/contents/${encodePath(path)}${query}`);
   if (!resp.ok) throw new Error(`read_repo_file failed (${resp.status}): ${await resp.text()}`);
@@ -315,8 +330,8 @@ async function putFile(
   return { commitSha: data.commit.sha, fileSha: data.content.sha };
 }
 
-export async function createBranch(env: Env, namespace: string, branch: string, from?: string) {
-  const { owner, repo } = await resolveRepo(env, namespace);
+export async function createBranch(env: Env, namespace: string, branch: string, from?: string, repoSelector?: string) {
+  const { owner, repo } = await resolveRepo(env, namespace, repoSelector);
   const base = from || (await getDefaultBranch(env, owner, repo));
   const sha = await getRefSha(env, owner, repo, base);
   const resp = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/git/refs`, {
@@ -334,9 +349,10 @@ export async function openPr(
   title: string,
   head: string,
   base?: string,
-  body?: string
+  body?: string,
+  repoSelector?: string
 ) {
-  const { owner, repo } = await resolveRepo(env, namespace);
+  const { owner, repo } = await resolveRepo(env, namespace, repoSelector);
   const baseBranch = base || (await getDefaultBranch(env, owner, repo));
   const resp = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/pulls`, {
     method: "POST",
@@ -359,9 +375,10 @@ export async function writeRepoFile(
   content: string,
   message: string,
   mode: "pr" | "direct" = "pr",
-  branch?: string
+  branch?: string,
+  repoSelector?: string
 ) {
-  const { owner, repo } = await resolveRepo(env, namespace);
+  const { owner, repo } = await resolveRepo(env, namespace, repoSelector);
   const defaultBranch = await getDefaultBranch(env, owner, repo);
 
   if (mode === "direct") {
@@ -383,7 +400,9 @@ export async function writeRepoFile(
   }
   const res = await putFile(env, owner, repo, path, content, message, work);
   const title = message.split("\n")[0] || `Update ${path}`;
-  const pr = await openPr(env, namespace, title, work, defaultBranch, `Automated change to \`${path}\` via Capsid.`);
+  // Pass the resolved repo full name so the PR lands on the same repo the file
+  // was committed to, not the namespace default.
+  const pr = await openPr(env, namespace, title, work, defaultBranch, `Automated change to \`${path}\` via Capsid.`, `${owner}/${repo}`);
   return {
     repo: `${owner}/${repo}`,
     mode: "pr",
