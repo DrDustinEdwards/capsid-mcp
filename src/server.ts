@@ -414,6 +414,57 @@ export function buildServer(env: Env, operator: boolean): McpServer {
     }
   );
 
+  // Remap an existing namespace's repos. register_namespace stays the create
+  // path; this is the update path that the recova remap needed (previously a raw
+  // D1 UPDATE that bypassed the audit log). Snapshots the prior mapping. It does
+  // NOT rename the namespace: a rename touches document keys, versions, and audit
+  // history and is a separate task.
+  server.registerTool(
+    "update_namespace",
+    {
+      description:
+        "Remap an existing namespace's repos. Pass repos as a JSON array like [{\"repo\":\"owner/name\",\"label\":\"primary\"},{\"repo\":\"owner/legacy\",\"label\":\"legacy\"}], with exactly one entry labeled \"primary\". The namespace must already exist (use register_namespace to create). Snapshots the prior mapping to the audit log. Does NOT rename the namespace or move its documents. Requires operator key.",
+      inputSchema: { namespace: z.string(), repos: z.string() },
+    },
+    async ({ namespace, repos }) => {
+      if (!operator) return fail(DENIED);
+      const ns = namespace.trim();
+      if (!ns) return fail("namespace is required");
+      let list: Array<{ repo: string; label: string }>;
+      try {
+        const parsed = JSON.parse(repos);
+        if (!Array.isArray(parsed) || parsed.length === 0) {
+          return fail("repos must be a non-empty JSON array of { repo, label } entries");
+        }
+        for (const r of parsed) {
+          if (!r || typeof r.repo !== "string" || !REPO_SHAPE.test(r.repo)) {
+            return fail(`each repos entry needs a "repo" of the form owner/name (got ${JSON.stringify(r)})`);
+          }
+        }
+        list = parsed.map((r) => ({ repo: r.repo, label: typeof r.label === "string" && r.label.trim() ? r.label.trim() : "primary" }));
+      } catch (err) {
+        return fail(`invalid repos JSON: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      const primaries = list.filter((r) => r.label === "primary").length;
+      if (primaries !== 1) {
+        return fail(`repos must have exactly one entry labeled "primary" (found ${primaries})`);
+      }
+      const existing = await db
+        .prepare("SELECT repos FROM namespaces WHERE namespace = ?1")
+        .bind(ns)
+        .first<{ repos: string }>();
+      if (!existing) return fail(`namespace not found: ${ns}. Use register_namespace to create it.`);
+      const reposJson = JSON.stringify(list);
+      await db.batch([
+        db.prepare("UPDATE namespaces SET repos = ?2 WHERE namespace = ?1").bind(ns, reposJson),
+        db
+          .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES ('operator', 'update_namespace', ?1, NULL, ?2)")
+          .bind(ns, JSON.stringify({ old: existing.repos, new: reposJson })),
+      ]);
+      return ok({ namespace: ns, repos: list, action: "updated", previous: existing.repos });
+    }
+  );
+
   // Consolidation loop (the LLM Wiki maintenance step). The Worker does no
   // reasoning: a capable client calls gather, synthesizes the update with the
   // existing read/write tools, then calls finalize to archive what it consumed.
