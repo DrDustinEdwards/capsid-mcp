@@ -1,10 +1,10 @@
 # Capsid
 
-Capsid is a single-user, Cloudflare-native MCP server that serves a consolidated knowledge base from D1 and R2, and reaches your GitHub repositories directly. It speaks MCP over Streamable HTTP and exposes a small, purposeful tool set:
+Capsid is a single-user, Cloudflare-native MCP server that serves a consolidated knowledge base from D1 and R2, and reaches your GitHub repositories directly. It speaks MCP over Streamable HTTP and exposes a small, purposeful tool set (19 tools):
 
 - **Documents:** list, read, write, delete, move, find, search (FTS5, with a plain-text fallback when a query is not valid FTS5 syntax), namespaces
-- **Repo access:** list_repo_tree, read_repo_file, search_code, write_repo_file, create_branch, open_pr
-- **Maintenance:** lint (the consolidation loop), register_namespace (adds a namespace-to-repo mapping; create-only, operator-gated)
+- **Repo access:** list_repo_tree, read_repo_file, search_code, write_repo_file, create_branch, open_pr, delete_repo_file, manage_pr
+- **Maintenance:** lint (the consolidation loop), register_namespace (create), update_namespace (remap)
 
 Writes normalize wide dashes (em and en) to plain ASCII punctuation server-side, so no client can store an em dash. The `namespaces` tool reports each namespace's count of unconsolidated episodic/source docs, so any session can see where a lint run is due.
 
@@ -39,10 +39,14 @@ Namespaces are projects, each mapped to its GitHub repo(s) in the `namespaces` t
 
 ## Repo access
 
-Capsid reaches your repositories directly through a dedicated GitHub App. The Worker mints a short-lived installation token (RS256 JWT signed with Web Crypto, exchanged for an installation access token, cached in KV), so no long-lived token is stored. The repo per namespace is resolved from the `namespaces` table.
+Capsid reaches your repositories directly through a dedicated GitHub App. The Worker mints a short-lived installation token (RS256 JWT signed with Web Crypto, exchanged for an installation access token, cached in KV), so no long-lived token is stored. Repos are resolved from the `namespaces` table.
+
+A namespace can map to more than one repo, each with a label (for example a rebuild as `primary` and the app it replaces as `legacy`). Every repo tool takes an optional `repo` parameter, a label or a mapped `owner/name`; unmapped repos are rejected, so the namespace mapping is the authorization boundary. Default is the `primary` repo.
 
 - **Read** (open to admitted clients): `list_repo_tree`, `read_repo_file`, `search_code`
-- **Write** (operator-gated): `write_repo_file`, `create_branch`, `open_pr`. `write_repo_file` defaults to `mode: "pr"` (commit to a new branch and open a pull request); `mode: "direct"` commits straight to the default branch.
+- **Write** (operator-gated): `write_repo_file`, `create_branch`, `open_pr`, `delete_repo_file`, `manage_pr`. `write_repo_file` defaults to `mode: "pr"` (commit to a new branch and open a pull request); `mode: "direct"` commits straight to the default branch. `manage_pr` merges (squash by default) or closes a pull request.
+
+`search_code` is a server-side tree walk (recursive Git Trees listing, then bounded content scans), not GitHub's code search API, because that API returns empty results for private repositories under a GitHub App installation token. Use `path_prefix` to narrow large repos.
 
 ## Consolidation (lint)
 
@@ -66,7 +70,7 @@ The `lint` tool runs the wiki maintenance loop. The Worker never calls an LLM; t
 Two parallel paths, both fully gated:
 
 1. **OAuth (`/mcp`)** for human clients. The client discovers the server via the `.well-known` endpoints, registers itself dynamically, and is sent through `/authorize`. After a one-time approval screen, the browser goes to GitHub. On return, the GitHub user is checked against `ADMIN_GITHUB_LOGIN`: set it to your GitHub username, or to your immutable numeric GitHub user id (find it at `https://api.github.com/users/<login>`). Any other GitHub account gets a 403. The admin check runs again on every `/mcp` request as defense in depth. An admitted admin holds a full write grant.
-2. **Operator keys (`/ops/mcp`)** for agents and cron. Same server, gated by sha256-hashed bearer keys. `OPERATOR_KEY_HASH` holds one or more comma-separated hashes: a plain entry is a full (write) key, and an entry prefixed `ro:` is a read-only key that can use the read tools but is denied write, delete, move, register_namespace, repo writes, and lint finalize. Revoke a key by removing its hash; the others keep working. The OAuth library never sees this route, so the two paths cannot interfere.
+2. **Operator keys (`/ops/mcp`)** for agents and cron. Same server, gated by sha256-hashed bearer keys. `OPERATOR_KEY_HASH` holds one or more comma-separated hashes: a plain entry is a full (write) key, and an entry prefixed `ro:` is a read-only key that can use the read tools but is denied write, delete, move, register_namespace, update_namespace, repo writes, PR management, and lint finalize. Revoke a key by removing its hash; the others keep working. The OAuth library never sees this route, so the two paths cannot interfere.
 
 Login and repo access use two different GitHub credentials: a GitHub **OAuth App** for login (OAuth Apps cannot mint installation tokens) and a separate GitHub **App** for repo access. Keep both.
 
@@ -176,8 +180,8 @@ Single-document recovery rarely needs any of this. Every overwrite and delete sn
 8. Type check and deploy:
 
    ```
-   npx tsc --noEmit
-   npx wrangler deploy
+   npm run check
+   npm run deploy
    ```
 
 9. Connect claude.ai: Settings, Connectors, Add custom connector, URL `https://capsid.<your-subdomain>.workers.dev/mcp`. The connector registers itself via dynamic client registration and walks you through the GitHub login. Only the `ADMIN_GITHUB_LOGIN` account gets in.
@@ -190,11 +194,15 @@ Single-document recovery rarely needs any of this. Every overwrite and delete sn
 
    Set transport to Streamable HTTP, URL to `https://capsid.<your-subdomain>.workers.dev/mcp`, open the Auth tab, and run Quick OAuth Flow.
 
+Note: MCP clients cache the tool list at connect time. After deploying new tools, reconnect the connector or start a new chat to see them.
+
 ## Roadmap
 
 - Phase 1 (done): single operator token on `/ops/mcp`, bearer key checked against `OPERATOR_KEY_HASH`.
 - Phase 2 (done): GitHub OAuth via workers-oauth-provider on `/mcp`, locked to a single admin account.
 - Phase 3 (partial): multiple operator keys with a read-only tier, individually revocable by editing the secret. Still deferred: per-client issued tokens with names and per-key audit, and an autonomous, scheduled lint run once agents exist to drive it.
+- Phase 4 (done, 2026-07): multi-repo namespaces with a repo selector on every repo tool; update_namespace; delete_repo_file; manage_pr (merge/close); search_code reimplemented as a tree walk.
+- Phase 5 (planned): typed document links with a backlinks query; truth lints (cross-doc contradiction check, doc-vs-artifact binding, doc-vs-live-Cloudflare infra binding); alignment with the 2026 MCP spec revision.
 
 ## License
 
