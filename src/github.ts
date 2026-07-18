@@ -184,6 +184,13 @@ export function parseReposList(reposJson: string): { list: RepoEntry[] } | { err
   return { list };
 }
 
+// update_namespace requires exactly one primary (register_namespace does not, so
+// this is not folded into parseReposList). Returns an error string or null.
+export function requireSinglePrimary(list: RepoEntry[]): string | null {
+  const primaries = list.filter((r) => r.label === "primary").length;
+  return primaries === 1 ? null : `repos must have exactly one entry labeled "primary" (found ${primaries})`;
+}
+
 // Resolve a namespace to one of its mapped repos. `selector` is the optional
 // `repo` tool argument: a label from the namespace's repos array ("primary",
 // "legacy") or a full "owner/name" that MUST appear in that array. The namespace

@@ -16,6 +16,7 @@ import {
   parseReposList,
   readRepoFile,
   REPO_SHAPE,
+  requireSinglePrimary,
   searchCode,
   writeRepoFile,
 } from "./github";
@@ -425,10 +426,8 @@ export function buildServer(env: Env, operator: boolean): McpServer {
       const parsed = parseReposList(repos);
       if ("error" in parsed) return fail(parsed.error);
       const list = parsed.list;
-      const primaries = list.filter((r) => r.label === "primary").length;
-      if (primaries !== 1) {
-        return fail(`repos must have exactly one entry labeled "primary" (found ${primaries})`);
-      }
+      const primaryError = requireSinglePrimary(list);
+      if (primaryError) return fail(primaryError);
       const existing = await db
         .prepare("SELECT repos FROM namespaces WHERE namespace = ?1")
         .bind(ns)
