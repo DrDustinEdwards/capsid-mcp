@@ -24,7 +24,7 @@ End: write a `session-YYYY-MM-DD.md` episodic (type `episodic`, under ~2KB) to t
 
 ## Hard rules
 
-1. Keep the worker lean. Few tools, no dead code, no speculative abstractions. The tool surface is deliberately small (19 tools) and should stay that way.
+1. Keep the worker lean. Few tools, no dead code, no speculative abstractions. The tool surface is deliberately small (22 tools) and should stay that way. The last additions were the ontology and session layer: `backlinks` (typed edges from document_links), `brief` (one-call session start), and `ci_status` (CI runs via the GitHub App).
 2. The operator key is stored only as a sha256 hash in a Worker secret (OPERATOR_KEY_HASH). Never commit wrangler.jsonc, .dev.vars, or .env.
 3. No real vault content in any seed or fixture. Sample data must be obviously fake (example.com, lorem-style bodies, namespace "sample").
 4. The lint loop never calls an LLM from the Worker. The driving client does all reasoning with ordinary read and write tools. Gather is read-only; finalize archives, never deletes.

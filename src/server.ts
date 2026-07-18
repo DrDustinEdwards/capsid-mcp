@@ -8,6 +8,7 @@ import {
 import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { z } from "zod";
 import {
+  ciStatus,
   createBranch,
   deleteRepoFile,
   listRepoTree,
@@ -135,6 +136,98 @@ export function buildServer(env: Env, operator: boolean): McpServer {
         .bind(namespace, path)
         .first();
       return row ? ok(row) : fail(`not found: ${namespace}/${path}`);
+    }
+  );
+
+  // One-call session start: assembles the read ritual so a session cannot skip a
+  // piece of it (a skipped core.md caused a real status misread). Pure assembly,
+  // no reasoning. Size-bounded so it stays loadable; when trimmed it says so.
+  server.registerTool(
+    "brief",
+    {
+      description:
+        "One-call session start for a namespace. Returns capsid/conventions.md, capsid/repo-structure.md, the namespace core.md, its open (non-archived) task docs, the 3 most recent episodics, and the typed edges on core.md, each with updated_at so staleness shows. Read-only assembly, no reasoning. Size-bounded near 40KB; if trimmed, the `trimmed` field lists what was dropped to metadata. Doing the start-ritual reads by hand stays a valid fallback.",
+      inputSchema: { namespace: z.string() },
+    },
+    async ({ namespace }) => {
+      const BUDGET = 40_000;
+      const doc = (ns: string, path: string) =>
+        db
+          .prepare("SELECT namespace, path, title, type, body, updated_at FROM documents WHERE namespace = ?1 AND path = ?2")
+          .bind(ns, path)
+          .first<{ namespace: string; path: string; title: string | null; type: string | null; body: string | null; updated_at: string }>();
+      const [conventions, repoStructure, core] = await Promise.all([
+        doc("capsid", "conventions.md"),
+        doc("capsid", "repo-structure.md"),
+        doc(namespace, "core.md"),
+      ]);
+      const openTasks = (
+        await db
+          .prepare(
+            "SELECT namespace, path, title, type, body, updated_at FROM documents WHERE namespace = ?1 AND type = 'task' AND status = 'published' AND path NOT LIKE 'archive/%' ORDER BY updated_at DESC"
+          )
+          .bind(namespace)
+          .all<{ namespace: string; path: string; title: string | null; type: string | null; body: string | null; updated_at: string }>()
+      ).results;
+      const recentEpisodics = (
+        await db
+          .prepare(
+            "SELECT namespace, path, title, type, body, updated_at FROM documents WHERE namespace = ?1 AND type = 'episodic' AND path NOT LIKE 'archive/%' ORDER BY created_at DESC LIMIT 3"
+          )
+          .bind(namespace)
+          .all<{ namespace: string; path: string; title: string | null; type: string | null; body: string | null; updated_at: string }>()
+      ).results;
+      const coreOut = (
+        await db
+          .prepare("SELECT type, to_ns, to_path FROM document_links WHERE from_ns = ?1 AND from_path = 'core.md' ORDER BY type, to_ns, to_path")
+          .bind(namespace)
+          .all()
+      ).results;
+      const coreIn = (
+        await db
+          .prepare("SELECT type, from_ns, from_path FROM document_links WHERE to_ns = ?1 AND to_path = 'core.md' ORDER BY type, from_ns, from_path")
+          .bind(namespace)
+          .all()
+      ).results;
+
+      // Stay under budget by trimming the largest, most re-readable sections to
+      // metadata first (episodics, then task bodies), and report what was cut.
+      type Row = { namespace: string; path: string; title: string | null; body: string | null; updated_at: string };
+      const bodyChars = (rows: Row[]) => rows.reduce((sum, r) => sum + (r.body?.length ?? 0), 0);
+      const toStub = (rows: Row[]) =>
+        rows.map((r) => ({ namespace: r.namespace, path: r.path, title: r.title, updated_at: r.updated_at, body: `(trimmed for size: read ${r.namespace}/${r.path})` }));
+      const trimmed: string[] = [];
+      let total =
+        (conventions?.body?.length ?? 0) +
+        (repoStructure?.body?.length ?? 0) +
+        (core?.body?.length ?? 0) +
+        bodyChars(openTasks as Row[]) +
+        bodyChars(recentEpisodics as Row[]);
+      let episodicsOut: unknown[] = recentEpisodics;
+      let tasksOut: unknown[] = openTasks;
+      if (total > BUDGET) {
+        total -= bodyChars(recentEpisodics as Row[]);
+        episodicsOut = toStub(recentEpisodics as Row[]);
+        trimmed.push(`${recentEpisodics.length} episodic bodies`);
+      }
+      if (total > BUDGET) {
+        total -= bodyChars(openTasks as Row[]);
+        tasksOut = toStub(openTasks as Row[]);
+        trimmed.push(`${openTasks.length} task bodies`);
+      }
+
+      return ok({
+        namespace,
+        conventions,
+        repo_structure: repoStructure,
+        core,
+        open_tasks: tasksOut,
+        recent_episodics: episodicsOut,
+        core_links: { outgoing: coreOut, incoming: coreIn },
+        approx_chars: total,
+        ...(core ? {} : { warning: `no core.md for namespace ${namespace}` }),
+        ...(trimmed.length ? { trimmed } : {}),
+      });
     }
   );
 
@@ -772,6 +865,20 @@ export function buildServer(env: Env, operator: boolean): McpServer {
     },
     ({ namespace, number, action, merge_method, repo }) =>
       guardedWrite("manage_pr", namespace, null, () => managePr(env, namespace, number, action, merge_method ?? "squash", repo))
+  );
+
+  server.registerTool(
+    "ci_status",
+    {
+      description:
+        "Recent CI workflow runs for a namespace's repo (name, head sha, status, conclusion, timestamps). For the most recent failed run it also returns the failing jobs/steps and a bounded log tail. Read-only; use it to verify a deploy is green after a merge instead of guessing. Needs the GitHub App's Actions: Read permission.",
+      inputSchema: {
+        namespace: z.string(),
+        repo: z.string().optional().describe(REPO_ARG),
+        limit: z.number().int().positive().optional().describe("How many recent runs to return (default 10, max 20)."),
+      },
+    },
+    ({ namespace, repo, limit }) => guarded(() => ciStatus(env, namespace, repo, { limit }))
   );
 
   // Resources: every document is addressable context at capsid://<namespace>/<path>.

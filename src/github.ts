@@ -636,3 +636,78 @@ export async function managePr(
   const data = (await resp.json()) as { number: number; state: string; html_url: string };
   return { repo: `${owner}/${repo}`, number: data.number, action: "close", state: data.state, url: data.html_url };
 }
+
+// Recent CI workflow runs for a namespace's repo, via the GitHub App. Read-only.
+// For the most recent failed run it also returns the failing jobs/steps and a
+// bounded log tail, so a green-or-not verdict is reachable from claude.ai without
+// opening the Actions tab. Needs the App's Actions: Read permission; a 403 is
+// surfaced as a clear, actionable error rather than an opaque failure.
+export async function ciStatus(env: Env, namespace: string, repoSelector?: string, opts: { limit?: number } = {}) {
+  const { owner, repo, full } = await resolveRepo(env, namespace, repoSelector);
+  const limit = opts.limit && opts.limit > 0 ? Math.min(opts.limit, 20) : 10;
+  const resp = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/actions/runs?per_page=${limit}`);
+  if (resp.status === 403) {
+    throw new Error(
+      "ci_status: the capsid-repo-access GitHub App lacks Actions: Read. Add that permission in the App settings and accept the installation prompt, then retry."
+    );
+  }
+  if (!resp.ok) throw new Error(`ci_status failed (${resp.status}): ${await resp.text()}`);
+  const data = (await resp.json()) as {
+    workflow_runs: Array<{
+      id: number;
+      name: string;
+      head_sha: string;
+      status: string;
+      conclusion: string | null;
+      event: string;
+      created_at: string;
+      html_url: string;
+    }>;
+  };
+  const runs = data.workflow_runs.map((r) => ({
+    name: r.name,
+    head_sha: r.head_sha?.slice(0, 7),
+    status: r.status,
+    conclusion: r.conclusion,
+    event: r.event,
+    created_at: r.created_at,
+    url: r.html_url,
+  }));
+
+  const result: {
+    repo: string;
+    runs: typeof runs;
+    failed_run?: unknown;
+  } = { repo: full, runs };
+
+  // Drill into the most recent failed run so the caller sees why, not just that.
+  const failed = data.workflow_runs.find((r) => r.conclusion === "failure");
+  if (failed) {
+    const jobsResp = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/actions/runs/${failed.id}/jobs`);
+    if (jobsResp.ok) {
+      const jobsData = (await jobsResp.json()) as {
+        jobs: Array<{ id: number; name: string; conclusion: string | null; steps?: Array<{ name: string; conclusion: string | null }> }>;
+      };
+      const failingJobs = jobsData.jobs
+        .filter((j) => j.conclusion === "failure")
+        .map((j) => ({
+          name: j.name,
+          failed_steps: (j.steps ?? []).filter((s) => s.conclusion === "failure").map((s) => s.name),
+        }));
+      let logTail: string | undefined;
+      const firstFailedJob = jobsData.jobs.find((j) => j.conclusion === "failure");
+      if (firstFailedJob) {
+        const logResp = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/actions/jobs/${firstFailedJob.id}/logs`);
+        if (logResp.ok) logTail = (await logResp.text()).slice(-2000);
+      }
+      result.failed_run = {
+        name: failed.name,
+        head_sha: failed.head_sha?.slice(0, 7),
+        url: failed.html_url,
+        jobs: failingJobs,
+        ...(logTail ? { log_tail: logTail } : {}),
+      };
+    }
+  }
+  return result;
+}
