@@ -13,7 +13,9 @@ import {
   listRepoTree,
   managePr,
   openPr,
+  parseReposList,
   readRepoFile,
+  REPO_SHAPE,
   searchCode,
   writeRepoFile,
 } from "./github";
@@ -362,7 +364,6 @@ export function buildServer(env: Env, operator: boolean): McpServer {
   // the namespaces list read. Writing documents to a new namespace label does not
   // create it, so without this a namespace was a raw D1 insert (how bsw shipped).
   // Create-only: it will not overwrite an existing mapping. Requires operator key.
-  const REPO_SHAPE = /^[^/\s]+\/[^/\s]+$/;
   server.registerTool(
     "register_namespace",
     {
@@ -381,20 +382,9 @@ export function buildServer(env: Env, operator: boolean): McpServer {
       if (!ns) return fail("namespace is required");
       let list: Array<{ repo: string; label: string }>;
       if (repos) {
-        try {
-          const parsed = JSON.parse(repos);
-          if (!Array.isArray(parsed) || parsed.length === 0) {
-            return fail("repos must be a non-empty JSON array of { repo, label } entries");
-          }
-          for (const r of parsed) {
-            if (!r || typeof r.repo !== "string" || !REPO_SHAPE.test(r.repo)) {
-              return fail(`each repos entry needs a "repo" of the form owner/name (got ${JSON.stringify(r)})`);
-            }
-          }
-          list = parsed.map((r) => ({ repo: r.repo, label: typeof r.label === "string" && r.label.trim() ? r.label.trim() : "primary" }));
-        } catch (err) {
-          return fail(`invalid repos JSON: ${err instanceof Error ? err.message : String(err)}`);
-        }
+        const parsed = parseReposList(repos);
+        if ("error" in parsed) return fail(parsed.error);
+        list = parsed.list;
       } else {
         if (!repo || !REPO_SHAPE.test(repo)) {
           return fail('provide repo as "owner/name", or pass a repos JSON array');
@@ -432,21 +422,9 @@ export function buildServer(env: Env, operator: boolean): McpServer {
       if (!operator) return fail(DENIED);
       const ns = namespace.trim();
       if (!ns) return fail("namespace is required");
-      let list: Array<{ repo: string; label: string }>;
-      try {
-        const parsed = JSON.parse(repos);
-        if (!Array.isArray(parsed) || parsed.length === 0) {
-          return fail("repos must be a non-empty JSON array of { repo, label } entries");
-        }
-        for (const r of parsed) {
-          if (!r || typeof r.repo !== "string" || !REPO_SHAPE.test(r.repo)) {
-            return fail(`each repos entry needs a "repo" of the form owner/name (got ${JSON.stringify(r)})`);
-          }
-        }
-        list = parsed.map((r) => ({ repo: r.repo, label: typeof r.label === "string" && r.label.trim() ? r.label.trim() : "primary" }));
-      } catch (err) {
-        return fail(`invalid repos JSON: ${err instanceof Error ? err.message : String(err)}`);
-      }
+      const parsed = parseReposList(repos);
+      if ("error" in parsed) return fail(parsed.error);
+      const list = parsed.list;
       const primaries = list.filter((r) => r.label === "primary").length;
       if (primaries !== 1) {
         return fail(`repos must have exactly one entry labeled "primary" (found ${primaries})`);

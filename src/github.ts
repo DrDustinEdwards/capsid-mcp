@@ -151,6 +151,39 @@ async function cachedGet(env: Env, owner: string, repo: string, path: string): P
 
 // ---- repo resolution ---------------------------------------------------------
 
+// The shape of a single repos entry: "owner/name" with no spaces or extra slashes.
+export const REPO_SHAPE = /^[^/\s]+\/[^/\s]+$/;
+
+export interface RepoEntry {
+  repo: string;
+  label: string;
+}
+
+// Parse and validate a repos JSON array, shared by register_namespace and
+// update_namespace: a non-empty array of { repo: "owner/name", label? } with
+// label defaulting to "primary". Returns the normalized list or a caller-facing
+// error string. It does NOT enforce a single primary; update_namespace layers
+// that check on top.
+export function parseReposList(reposJson: string): { list: RepoEntry[] } | { error: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(reposJson);
+  } catch (err) {
+    return { error: `invalid repos JSON: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    return { error: "repos must be a non-empty JSON array of { repo, label } entries" };
+  }
+  const list: RepoEntry[] = [];
+  for (const r of parsed) {
+    if (!r || typeof r.repo !== "string" || !REPO_SHAPE.test(r.repo)) {
+      return { error: `each repos entry needs a "repo" of the form owner/name (got ${JSON.stringify(r)})` };
+    }
+    list.push({ repo: r.repo, label: typeof r.label === "string" && r.label.trim() ? r.label.trim() : "primary" });
+  }
+  return { list };
+}
+
 // Resolve a namespace to one of its mapped repos. `selector` is the optional
 // `repo` tool argument: a label from the namespace's repos array ("primary",
 // "legacy") or a full "owner/name" that MUST appear in that array. The namespace
