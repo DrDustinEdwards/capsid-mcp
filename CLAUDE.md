@@ -54,7 +54,12 @@ Restore gotcha: `wrangler d1 export` fails outright on this database because of 
 - `delete_repo_file` removes a repo file (PR or direct mode), so deprecating a file no longer means leaving a stub.
 - `manage_pr` merges or closes a PR from Capsid, so claude.ai can now land a PR without the hosted GitHub connector (which 404s on private repos). Merging can trigger CI deploys (foxhound), so prefer PR mode plus `manage_pr` for anything touching live behavior, and gate by blast radius.
 - New tools require a connector reconnect or a new chat to appear: MCP tool lists cache at connect time (see the constraint above).
-- The MCP spec ships breaking changes on 2026-07-28: stateless core, Multi Round-Trip Requests replacing server-initiated elicitation, auth hardening, Sampling deprecated. The stateless design and `confirm: true` fallback already match the direction, but a compliance pass is due once the Agents SDK updates.
+- MCP spec 2026-07-28 readiness (audited 2026-07-18): the SDK has NOT shipped the breaking changes yet. Installed `@modelcontextprotocol/sdk` 1.29.0 is the latest on npm (released 2026-03-30; no `next`/`beta` dist-tag carries the new spec), and `agents` 0.17.4 is a patch. Do not adapt the handler against an unreleased spec. When the SDK ships the update, the change list is:
+  - Stateless core: already satisfied. `createMcpHandler` is stateless and holds no per-session state; no change expected.
+  - Multi Round-Trip Requests replace server-initiated elicitation: `confirmDestructive` (src/server.ts) calls `server.elicitInput` for overwrite/delete confirmation. When server-initiated elicitation is dropped, remove that call; the existing `confirm: true` fallback already lands the same confirmation without a server-initiated request, so behavior is preserved.
+  - Auth hardening: OAuth 2.1 + PKCE + DCR via `workers-oauth-provider` ^0.8.1, with operator keys as a separate bearer scheme on `/ops/mcp`. Re-review token audience and resource-indicator handling against the hardened spec when the provider updates.
+  - Sampling deprecated: not used. The worker makes no MCP sampling calls (the lint loop does all reasoning client-side), so no change.
+  Waiting on: a `@modelcontextprotocol/sdk` release above 1.29.0 that implements the 2026-07-28 spec.
 
 ## Commands
 
