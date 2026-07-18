@@ -21,6 +21,7 @@ import {
   writeRepoFile,
 } from "./github";
 import { normalizeDashes } from "./normalize";
+import { parseLinks } from "./links";
 
 export interface Env {
   DB: D1Database;
@@ -140,7 +141,7 @@ export function buildServer(env: Env, operator: boolean): McpServer {
   server.registerTool(
     "write",
     {
-      description: "Create or update a document. Snapshots the prior version and writes an audit log entry. Overwriting an existing document needs confirmation: the server elicits it when the client supports elicitation, otherwise pass confirm: true.",
+      description: "Create or update a document. Snapshots the prior version and writes an audit log entry. Overwriting an existing document needs confirmation: the server elicits it when the client supports elicitation, otherwise pass confirm: true. Optional links: a JSON array of typed outgoing edges [{\"type\":\"references\",\"to_path\":\"decisions.md\",\"to_ns\":\"capsid\"}] (types: governs, references, supersedes, replaces, depends-on; to_ns defaults to this namespace). When provided it replaces this document's outgoing edges; omit it to leave edges untouched; pass [] to clear them. Read edges with backlinks.",
       inputSchema: {
         namespace: z.string(),
         path: z.string(),
@@ -150,15 +151,18 @@ export function buildServer(env: Env, operator: boolean): McpServer {
         tags: z.string().optional(),
         status: z.string().optional(),
         confirm: z.boolean().optional(),
+        links: z.string().optional(),
       },
     },
-    async ({ namespace, path, title, body, type, tags, status, confirm }) => {
+    async ({ namespace, path, title, body, type, tags, status, confirm, links }) => {
       if (!operator) return fail(DENIED);
       if (type && !DOC_TYPES.has(type)) {
         return fail(
           `unknown type '${type}'; valid types: ${[...DOC_TYPES].join(", ")}. Session logs and handoffs are 'episodic'.`
         );
       }
+      const parsedLinks = links === undefined ? null : parseLinks(links, namespace);
+      if (parsedLinks && "error" in parsedLinks) return fail(parsedLinks.error);
       // Normalize wide dashes server-side so no client can store an em dash,
       // regardless of whether the Claude Code hook ran. See ./normalize.
       title = normalizeDashes(title, "title");
@@ -209,8 +213,59 @@ export function buildServer(env: Env, operator: boolean): McpServer {
           .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES ('operator', 'write', ?1, ?2, ?3)")
           .bind(namespace, path, JSON.stringify({ title, type, tags, status, updated: Boolean(prior) }))
       );
+      // links replaces this document's outgoing edges when provided. Left
+      // untouched when omitted, so a routine body edit never drops edges.
+      if (parsedLinks && "edges" in parsedLinks) {
+        statements.push(
+          db.prepare("DELETE FROM document_links WHERE from_ns = ?1 AND from_path = ?2").bind(namespace, path)
+        );
+        for (const edge of parsedLinks.edges) {
+          statements.push(
+            db
+              .prepare(
+                "INSERT OR IGNORE INTO document_links (from_ns, from_path, type, to_ns, to_path) VALUES (?1, ?2, ?3, ?4, ?5)"
+              )
+              .bind(namespace, path, edge.type, edge.to_ns, edge.to_path)
+          );
+        }
+        statements.push(
+          db
+            .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES ('operator', 'links', ?1, ?2, ?3)")
+            .bind(namespace, path, JSON.stringify({ edges: parsedLinks.edges.length }))
+        );
+      }
       await db.batch(statements);
-      return ok({ namespace, path, action: prior ? "updated" : "created", snapshotted: Boolean(prior) });
+      return ok({
+        namespace,
+        path,
+        action: prior ? "updated" : "created",
+        snapshotted: Boolean(prior),
+        ...(parsedLinks && "edges" in parsedLinks ? { links: parsedLinks.edges.length } : {}),
+      });
+    }
+  );
+
+  server.registerTool(
+    "backlinks",
+    {
+      description:
+        "Return the typed edges touching a document: outgoing (declared on this doc) and incoming (other docs pointing here). Edges are asserted via the write tool's links param. Read-only. Endpoints may be Capsid documents or repo files addressed as namespace/path.",
+      inputSchema: { namespace: z.string(), path: z.string() },
+    },
+    async ({ namespace, path }) => {
+      const outgoing = await db
+        .prepare(
+          "SELECT type, to_ns, to_path FROM document_links WHERE from_ns = ?1 AND from_path = ?2 ORDER BY type, to_ns, to_path"
+        )
+        .bind(namespace, path)
+        .all();
+      const incoming = await db
+        .prepare(
+          "SELECT type, from_ns, from_path FROM document_links WHERE to_ns = ?1 AND to_path = ?2 ORDER BY type, from_ns, from_path"
+        )
+        .bind(namespace, path)
+        .all();
+      return ok({ namespace, path, outgoing: outgoing.results, incoming: incoming.results });
     }
   );
 

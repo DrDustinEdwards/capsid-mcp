@@ -9,7 +9,7 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "check": "tsc --noEmit",
-    "test": "node --test test/normalize.test.ts test/auth.test.ts test/repo-tools.test.ts"
+    "test": "node --test test/normalize.test.ts test/auth.test.ts test/repo-tools.test.ts test/links.test.ts"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260702.1",
