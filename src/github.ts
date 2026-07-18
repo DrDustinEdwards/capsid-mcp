@@ -476,3 +476,88 @@ export async function writeRepoFile(
     pr: { number: pr.number, url: pr.url },
   };
 }
+
+// Delete a file from a namespace's repo. PR mode (default) commits the deletion
+// to a work branch and opens a PR; direct mode deletes on the default branch.
+// GitHub's contents DELETE needs the current file sha, so a missing file errors.
+export async function deleteRepoFile(
+  env: Env,
+  namespace: string,
+  path: string,
+  message: string,
+  mode: "pr" | "direct" = "pr",
+  branch?: string,
+  repoSelector?: string
+) {
+  const { owner, repo } = await resolveRepo(env, namespace, repoSelector);
+  const defaultBranch = await getDefaultBranch(env, owner, repo);
+  const target =
+    mode === "direct" ? branch || defaultBranch : branch || `capsid/rm-${branchSlug(path)}-${Date.now().toString(36)}`;
+
+  if (mode === "pr") {
+    const headSha = await getRefSha(env, owner, repo, defaultBranch);
+    const created = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/git/refs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ref: `refs/heads/${target}`, sha: headSha }),
+    });
+    if (!created.ok && created.status !== 422) {
+      throw new Error(`branch create failed (${created.status}): ${await created.text()}`);
+    }
+  }
+
+  const sha = await getFileSha(env, owner, repo, path, target);
+  if (!sha) throw new Error(`delete_repo_file: ${path} does not exist on ${owner}/${repo}@${target}`);
+  const resp = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/contents/${encodePath(path)}`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message, sha, branch: target }),
+  });
+  if (!resp.ok) throw new Error(`delete failed (${resp.status}): ${await resp.text()}`);
+  const data = (await resp.json()) as { commit: { sha: string } };
+
+  if (mode === "direct") {
+    return { repo: `${owner}/${repo}`, mode: "direct", branch: target, path, commitSha: data.commit.sha };
+  }
+  const title = message.split("\n")[0] || `Delete ${path}`;
+  const pr = await openPr(env, namespace, title, target, defaultBranch, `Delete \`${path}\` via Capsid.`, `${owner}/${repo}`);
+  return {
+    repo: `${owner}/${repo}`,
+    mode: "pr",
+    branch: target,
+    path,
+    commitSha: data.commit.sha,
+    pr: { number: pr.number, url: pr.url },
+  };
+}
+
+// Merge or close an open pull request. Merging can trigger CI deploys in repos
+// with deploy workflows, so callers gate by blast radius (see conventions).
+export async function managePr(
+  env: Env,
+  namespace: string,
+  number: number,
+  action: "merge" | "close",
+  mergeMethod: "merge" | "squash" | "rebase" = "squash",
+  repoSelector?: string
+) {
+  const { owner, repo } = await resolveRepo(env, namespace, repoSelector);
+  if (action === "merge") {
+    const resp = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/pulls/${number}/merge`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ merge_method: mergeMethod }),
+    });
+    if (!resp.ok) throw new Error(`merge failed (${resp.status}): ${await resp.text()}`);
+    const data = (await resp.json()) as { sha: string; merged: boolean; message: string };
+    return { repo: `${owner}/${repo}`, number, action: "merge", merged: data.merged, sha: data.sha, message: data.message };
+  }
+  const resp = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/pulls/${number}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ state: "closed" }),
+  });
+  if (!resp.ok) throw new Error(`close failed (${resp.status}): ${await resp.text()}`);
+  const data = (await resp.json()) as { number: number; state: string; html_url: string };
+  return { repo: `${owner}/${repo}`, number: data.number, action: "close", state: data.state, url: data.html_url };
+}

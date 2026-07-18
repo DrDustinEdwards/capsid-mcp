@@ -24,7 +24,7 @@ End: write a `session-YYYY-MM-DD.md` episodic (type `episodic`, under ~2KB) to t
 
 ## Hard rules
 
-1. Keep the worker lean. Few tools, no dead code, no speculative abstractions. The tool surface is deliberately small (16 tools) and should stay that way.
+1. Keep the worker lean. Few tools, no dead code, no speculative abstractions. The tool surface is deliberately small (19 tools) and should stay that way.
 2. The operator key is stored only as a sha256 hash in a Worker secret (OPERATOR_KEY_HASH). Never commit wrangler.jsonc, .dev.vars, or .env.
 3. No real vault content in any seed or fixture. Sample data must be obviously fake (example.com, lorem-style bodies, namespace "sample").
 4. The lint loop never calls an LLM from the Worker. The driving client does all reasoning with ordinary read and write tools. Gather is read-only; finalize archives, never deletes.
@@ -51,8 +51,9 @@ Restore gotcha: `wrangler d1 export` fails outright on this database because of 
 - `search_code` walks the repo tree and greps blobs server-side rather than calling GitHub's code-search API, which returns empty 200s for these private repos over an App installation token (verified 2026-07-17). Scope large repos with `path_prefix`; it refuses trees over 5,000 blobs.
 - Repo tools take an optional `repo` argument (a label like "primary"/"legacy" or a mapped "owner/name") to address multi-repo namespaces (recova -> foxhound primary + recova legacy). Omit it for the primary repo. An unmapped selector is rejected with the valid values; the namespace mapping is the authorization boundary. Repo writes are audit-logged with the resolved repo.
 - `register_namespace` creates a namespace; `update_namespace` remaps an existing one's repos (operator-gated, audit-logged, snapshots the prior mapping). Neither renames a namespace: a rename touches document keys, versions, and audit history and is a separate task.
-- GAP: no `delete_repo_file`, so deprecating a repo file can only overwrite it with a stub.
-- GAP: no `merge_pr`. Combined with the hosted GitHub connector 404ing on private repos, nothing reachable from claude.ai can merge a PR. On a phone-only workflow this makes `mode: "direct"` the only way to land a change without the owner tapping Merge in the GitHub app. Prefer PR mode for anything touching live behavior regardless.
+- `delete_repo_file` removes a repo file (PR or direct mode), so deprecating a file no longer means leaving a stub.
+- `manage_pr` merges or closes a PR from Capsid, so claude.ai can now land a PR without the hosted GitHub connector (which 404s on private repos). Merging can trigger CI deploys (foxhound), so prefer PR mode plus `manage_pr` for anything touching live behavior, and gate by blast radius.
+- New tools require a connector reconnect or a new chat to appear: MCP tool lists cache at connect time (see the constraint above).
 - The MCP spec ships breaking changes on 2026-07-28: stateless core, Multi Round-Trip Requests replacing server-initiated elicitation, auth hardening, Sampling deprecated. The stateless design and `confirm: true` fallback already match the direction, but a compliance pass is due once the Agents SDK updates.
 
 ## Commands

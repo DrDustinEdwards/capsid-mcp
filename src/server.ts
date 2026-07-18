@@ -9,7 +9,9 @@ import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { z } from "zod";
 import {
   createBranch,
+  deleteRepoFile,
   listRepoTree,
+  managePr,
   openPr,
   readRepoFile,
   searchCode,
@@ -692,6 +694,41 @@ export function buildServer(env: Env, operator: boolean): McpServer {
     },
     ({ namespace, title, head, base, body, repo }) =>
       guardedWrite("open_pr", namespace, null, () => openPr(env, namespace, title, head, base, body, repo))
+  );
+
+  server.registerTool(
+    "delete_repo_file",
+    {
+      description:
+        "Delete a file from a namespace's GitHub repo. mode 'pr' (default) commits the deletion to a new branch and opens a PR; mode 'direct' deletes on the default branch. The file must exist. Requires operator key.",
+      inputSchema: {
+        namespace: z.string(),
+        path: z.string(),
+        message: z.string(),
+        mode: z.enum(["pr", "direct"]).optional(),
+        branch: z.string().optional(),
+        repo: z.string().optional().describe(REPO_ARG),
+      },
+    },
+    ({ namespace, path, message, mode, branch, repo }) =>
+      guardedWrite("delete_repo_file", namespace, path, () => deleteRepoFile(env, namespace, path, message, mode ?? "pr", branch, repo))
+  );
+
+  server.registerTool(
+    "manage_pr",
+    {
+      description:
+        "Merge or close an open pull request in a namespace's repo. action 'merge' uses merge_method (default 'squash'); action 'close' just closes it. Merging can trigger CI deploys in repos with deploy workflows (foxhound): prefer PR mode plus manage_pr for anything touching live behavior, per conventions. Requires operator key.",
+      inputSchema: {
+        namespace: z.string(),
+        number: z.number().int().positive(),
+        action: z.enum(["merge", "close"]),
+        merge_method: z.enum(["merge", "squash", "rebase"]).optional(),
+        repo: z.string().optional().describe(REPO_ARG),
+      },
+    },
+    ({ namespace, number, action, merge_method, repo }) =>
+      guardedWrite("manage_pr", namespace, null, () => managePr(env, namespace, number, action, merge_method ?? "squash", repo))
   );
 
   // Resources: every document is addressable context at capsid://<namespace>/<path>.
