@@ -9,7 +9,19 @@ const PUT_CONCURRENCY = 20;
 const VERSION_RETENTION_DAYS = 90;
 const AUDIT_RETENTION_DAYS = 180;
 
-const TABLES = ["documents", "namespaces", "document_versions", "audit_log"] as const;
+// Every real table in the schema. Kept in sync with migrations/ by
+// test/backup.test.ts, which fails if a migration adds a table that is missing
+// here (document_links was added by 0002 and went unbacked-up until 2026-07-27).
+// Deliberately excluded: documents_fts and its documents_fts_* shadow tables,
+// which FTS5 derives from documents and the sync triggers rebuild on import,
+// and sqlite_sequence, which SQLite maintains for AUTOINCREMENT.
+export const TABLES = [
+  "documents",
+  "namespaces",
+  "document_versions",
+  "audit_log",
+  "document_links",
+] as const;
 
 export interface BackupSummary {
   json_key: string;

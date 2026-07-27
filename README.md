@@ -86,7 +86,7 @@ D1 Time Travel already provides 30-day point-in-time recovery, so backups here a
 
 A daily Cron Trigger (09:00 UTC) exports the whole database to the `MEDIA` R2 bucket:
 
-- `backups/json/<timestamp>.json` a full JSON dump of all four tables (documents, namespaces, document_versions, audit_log). The 14 most recent dumps are kept; older ones are pruned automatically.
+- `backups/json/<timestamp>.json` a full JSON dump of all five tables (documents, namespaces, document_versions, audit_log, document_links). The 14 most recent dumps are kept; older ones are pruned automatically.
 - `backups/markdown/<namespace>/<path>` a plain-markdown mirror of every document body, verbatim, one file per document. This mirror tracks the current state (files for deleted documents are pruned), so the knowledge base stays readable and portable with no Capsid dependency.
 
 After each export the history tables are pruned in D1: `document_versions` rows older than 90 days and `audit_log` rows older than 180 days. Pruning runs after the export, so every pruned row exists in at least one retained JSON dump.
@@ -99,17 +99,19 @@ curl -X POST https://capsid.<your-subdomain>.workers.dev/ops/backup -H "Authoriz
 
 ## Restore
 
-Three paths, in the order to try them. Path 2 has been executed end to end against a scratch database: all four table counts matched the source and search worked on the restored copy.
+Three paths, in the order to try them. Path 2 has been executed end to end against a scratch database: all table counts matched the source and search worked on the restored copy. That test predates `document_links` (migration 0002), so the five-table form below has not itself been rehearsed end to end.
 
 1. **D1 Time Travel** (last 30 days, fastest), for fat-finger recovery or a bad bulk change. `wrangler d1 time-travel info capsid`, then `wrangler d1 time-travel restore capsid --bookmark=<bookmark>`. This rewinds the live database in place, so take a fresh bookmark first to keep the restore itself reversible.
 
-2. **Table-scoped export and import**, for rebuilding into a new database (migration, region move, corruption). Note that `wrangler d1 export` fails outright on this database, because D1 cannot export databases with FTS5 virtual tables. Export the four real tables individually and data-only, taking the schema from the migration instead:
+2. **Table-scoped export and import**, for rebuilding into a new database (migration, region move, corruption). Note that `wrangler d1 export` fails outright on this database, because D1 cannot export databases with FTS5 virtual tables. Export the five real tables individually and data-only, taking the schema from the migrations instead:
 
    ```
    wrangler d1 export capsid --remote --no-schema --table <table> --output export-<table>.sql
    ```
 
-   Create the new database, apply `migrations/0001_init.sql`, then execute the four exports with `documents` first. Importing `documents` fires the FTS sync triggers, so `documents_fts` rebuilds itself and needs no separate step. Verify with count queries against both databases and one MATCH query on the new one, then point `wrangler.jsonc` at the new `database_id` and deploy.
+   The five tables are `documents`, `namespaces`, `document_versions`, `audit_log`, and `document_links`. Never export `documents_fts` or its `documents_fts_*` shadow tables: FTS5 derives them from `documents`, and they are what makes a whole-database export fail.
+
+   Create the new database, apply **every** migration in `migrations/` in order (`0001_init.sql` then `0002_document_links.sql`; applying only 0001 leaves no `document_links` table for the import to land in), then execute the five exports with `documents` first. Importing `documents` fires the FTS sync triggers, so `documents_fts` rebuilds itself and needs no separate step. `document_links` has no triggers and no foreign keys, so its import order does not matter. Verify with count queries against both databases and one MATCH query on the new one, then point `wrangler.jsonc` at the new `database_id` and deploy.
 
 3. **The R2 JSON dump**, for anything beyond the 30-day Time Travel window. Wrangler cannot list R2 objects, so get the exact key from the Cloudflare dashboard or from the `json_key` field of a `/ops/backup` response, then `wrangler r2 object get capsid-media/backups/json/<key>.json --file dump.json`. Convert each table in `dump.tables` to INSERT statements and follow path 2 from the create step. The `backups/markdown/` mirror is the last-resort human-readable copy: bodies only, no metadata.
 
