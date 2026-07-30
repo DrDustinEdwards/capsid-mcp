@@ -23,6 +23,7 @@ import {
 } from "./github";
 import { normalizeDashes } from "./normalize";
 import { parseLinks } from "./links";
+import { validateDocStatus, validateDocType } from "./doc-meta";
 
 export interface Env {
   DB: D1Database;
@@ -59,14 +60,6 @@ function fail(message: string) {
 }
 
 const DENIED = "unauthorized: this tool requires a write-grant operator key; read-only (ro:) keys can only use the read tools";
-
-// The memory model's document types (capsid/schema.md). Validated on write so
-// off-schema types cannot silently escape the lint loop again (docs stored as
-// type "session" or "handoff" were invisible to gather and the counts).
-const DOC_TYPES = new Set([
-  "core", "concept", "semantic", "note", "decision", "spec", "task", "protocol",
-  "post", "episodic", "procedural", "source", "prompt", "reference",
-]);
 
 type ConfirmVerdict = "accepted" | "declined" | "unsupported";
 
@@ -249,11 +242,10 @@ export function buildServer(env: Env, operator: boolean): McpServer {
     },
     async ({ namespace, path, title, body, type, tags, status, confirm, links }) => {
       if (!operator) return fail(DENIED);
-      if (type && !DOC_TYPES.has(type)) {
-        return fail(
-          `unknown type '${type}'; valid types: ${[...DOC_TYPES].join(", ")}. Session logs and handoffs are 'episodic'.`
-        );
-      }
+      const typeError = type === undefined ? null : validateDocType(type);
+      if (typeError) return fail(typeError);
+      const statusError = status === undefined ? null : validateDocStatus(status);
+      if (statusError) return fail(statusError);
       const parsedLinks = links === undefined ? null : parseLinks(links, namespace);
       if (parsedLinks && "error" in parsedLinks) return fail(parsedLinks.error);
       // Normalize wide dashes server-side so no client can store an em dash,
@@ -494,14 +486,18 @@ export function buildServer(env: Env, operator: boolean): McpServer {
       inputSchema: {},
     },
     async () => {
-      // unconsolidated = published episodic/source docs not yet archived by the
-      // lint loop; surfaced here so every session sees which namespaces need a run.
+      // unconsolidated = episodic/source docs not yet archived by the lint loop;
+      // surfaced here so every session sees which namespaces need a run.
+      // Deliberately NOT filtered on status: this counted only status
+      // 'published' until 2026-07-30 and so read 2 for recova against a real
+      // backlog of 24, because 22 episodics had been written as 'active'.
+      // The archive/ prefix is the only thing that takes a doc out of the loop.
       const { results } = await db
         .prepare(
           `SELECT n.namespace, n.repos, n.created_at,
                   (SELECT COUNT(*) FROM documents d
                    WHERE d.namespace = n.namespace AND d.type IN ('episodic', 'source')
-                     AND d.status = 'published' AND d.path NOT LIKE 'archive/%') AS unconsolidated
+                     AND d.path NOT LIKE 'archive/%') AS unconsolidated
            FROM namespaces n ORDER BY n.namespace`
         )
         .all();
@@ -621,12 +617,16 @@ export function buildServer(env: Env, operator: boolean): McpServer {
           )
           .bind(namespace)
           .all();
+        // Not filtered on status, and it must stay that way: see the note on the
+        // unconsolidated counter. A doc written with any status is consolidatable;
+        // only the archive/ prefix removes it, which is what keeps gather
+        // idempotent after finalize.
         const raw = await db
           .prepare(
             `SELECT namespace, path, title, type, status, tags, body, created_at, updated_at
              FROM documents
              WHERE namespace = ?1 AND type IN ('episodic', 'source')
-               AND status = 'published' AND path NOT LIKE 'archive/%'
+               AND path NOT LIKE 'archive/%'
              ORDER BY created_at`
           )
           .bind(namespace)
