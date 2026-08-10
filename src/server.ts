@@ -154,10 +154,15 @@ export function buildServer(env: Env, operator: boolean): McpServer {
         doc("capsid", "repo-structure.md"),
         doc(namespace, "core.md"),
       ]);
+      // Not filtered on status, and it must stay that way: same ruling as the
+      // unconsolidated counter and the gather query (2aefceb). status records
+      // editorial state, it does not mark a task done, so filtering on
+      // 'published' here hid 21 of 32 non-archived task docs, including every
+      // 'active' and 'ready' one. archive/ is the only exclusion.
       const openTasks = (
         await db
           .prepare(
-            "SELECT namespace, path, title, type, body, updated_at FROM documents WHERE namespace = ?1 AND type = 'task' AND status = 'published' AND path NOT LIKE 'archive/%' ORDER BY updated_at DESC"
+            "SELECT namespace, path, title, type, body, updated_at FROM documents WHERE namespace = ?1 AND type = 'task' AND path NOT LIKE 'archive/%' ORDER BY updated_at DESC"
           )
           .bind(namespace)
           .all<{ namespace: string; path: string; title: string | null; type: string | null; body: string | null; updated_at: string }>()
