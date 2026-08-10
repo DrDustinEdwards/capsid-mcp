@@ -51,7 +51,15 @@ try:
 except Exception:
     sys.exit(4)
 cmd = str((d.get("tool_input") or {}).get("command") or "")
-for m in re.finditer(r"git\s+add\s+([^|;&]*)", cmd):
+# Only inspect segments that START a command: string start, or immediately
+# after a shell separator. The previous version scanned the whole string with
+# finditer, so prose that merely MENTIONED an add anywhere in a heredoc commit
+# message tripped it. That fired on 2026-08-09 while committing this hook, on a
+# message describing these very test cases.
+for seg in re.split(r"[\n;&|]+", cmd):
+    m = re.match(r"\s*git\s+add\s+(.*)$", seg)
+    if not m:
+        continue
     toks = m.group(1).split()
     if any(t in ("-A", "--all", ".", "./") for t in toks):
         sys.exit(3)

@@ -1,0 +1,30 @@
+# Normalize line endings so a file's bytes, and therefore its sha256, are the
+# same on every host. Without this, core.autocrlf=true on the Windows dev box
+# writes CRLF into the worktree on checkout, which silently changes the hash of
+# the hook scripts. Those hashes are recorded in the portfolio remediation table
+# to assert the hooks are byte identical across repos, so an unpinned line
+# ending makes that table meaningless.
+#
+# Measured 2026-08-09 with "git ls-files --eol": all 30 tracked files are text
+# and git considered none of them binary, so no exception was required at the
+# time. The binary list below is forward looking, not measured necessary. Add to
+# it before committing any asset of a new type.
+* text=auto eol=lf
+
+# Shell scripts must be LF regardless: the hooks run under bash and a CR would
+# ride along into the shebang line and into the checker's exit codes.
+*.sh text eol=lf
+
+# Forward looking. Nothing matching these is tracked today.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.woff binary
+*.woff2 binary
+*.wasm binary
