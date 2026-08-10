@@ -384,18 +384,45 @@ export function buildServer(env: Env, operator: boolean): McpServer {
           );
         }
       }
+      // Edges cascade in BOTH directions. document_links stores paths, not ids,
+      // so deleting only the row left every edge touching this document behind:
+      // outgoing edges orphaned from a source that no longer exists, and
+      // incoming edges dangling at a target that no longer exists. backlinks and
+      // brief served those happily. Measured 2026-08-09 before this fix: 6 of 98
+      // live edges were already dangling this way.
+      //
+      // document_versions snapshots only title and body, so the removed edges
+      // would otherwise be unrecoverable. They are recorded in the audit_log
+      // params instead, which is the only place they survive a delete.
+      const { results: removedEdges } = await db
+        .prepare(
+          "SELECT from_ns, from_path, type, to_ns, to_path FROM document_links WHERE (from_ns = ?1 AND from_path = ?2) OR (to_ns = ?1 AND to_path = ?2)"
+        )
+        .bind(namespace, path)
+        .all();
       await db.batch([
         db
           .prepare(
             "INSERT INTO document_versions (document_id, namespace, path, title, body) VALUES (?1, ?2, ?3, ?4, ?5)"
           )
           .bind(prior.id, namespace, path, prior.title, prior.body),
+        db
+          .prepare(
+            "DELETE FROM document_links WHERE (from_ns = ?1 AND from_path = ?2) OR (to_ns = ?1 AND to_path = ?2)"
+          )
+          .bind(namespace, path),
         db.prepare("DELETE FROM documents WHERE id = ?1").bind(prior.id),
         db
-          .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES ('operator', 'delete', ?1, ?2, NULL)")
-          .bind(namespace, path),
+          .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES ('operator', 'delete', ?1, ?2, ?3)")
+          .bind(namespace, path, JSON.stringify({ edges_removed: removedEdges })),
       ]);
-      return ok({ namespace, path, action: "deleted", snapshotted: true });
+      return ok({
+        namespace,
+        path,
+        action: "deleted",
+        snapshotted: true,
+        edges_removed: removedEdges.length,
+      });
     }
   );
 
@@ -416,11 +443,25 @@ export function buildServer(env: Env, operator: boolean): McpServer {
       } catch (err) {
         return fail(`move failed (target may already exist): ${err instanceof Error ? err.message : String(err)}`);
       }
+      // Repoint edges in BOTH directions. document_links stores paths, not ids,
+      // so a move that touched only documents.path left this document's outgoing
+      // edges orphaned at the old from_path and every inbound edge dangling at
+      // the old to_path, while the document itself moved cleanly. Same root
+      // cause as the delete cascade above.
+      const [outgoing, incoming] = await db.batch([
+        db
+          .prepare("UPDATE document_links SET from_path = ?3 WHERE from_ns = ?1 AND from_path = ?2")
+          .bind(namespace, path, new_path),
+        db
+          .prepare("UPDATE document_links SET to_path = ?3 WHERE to_ns = ?1 AND to_path = ?2")
+          .bind(namespace, path, new_path),
+      ]);
+      const repointed = (outgoing.meta.changes ?? 0) + (incoming.meta.changes ?? 0);
       await db
         .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES ('operator', 'move', ?1, ?2, ?3)")
-        .bind(namespace, path, JSON.stringify({ new_path }))
+        .bind(namespace, path, JSON.stringify({ new_path, edges_repointed: repointed }))
         .run();
-      return ok({ namespace, path, new_path, action: "moved" });
+      return ok({ namespace, path, new_path, action: "moved", edges_repointed: repointed });
     }
   );
 
@@ -639,6 +680,26 @@ export function buildServer(env: Env, operator: boolean): McpServer {
         const rules = await db
           .prepare("SELECT namespace, path, title, body FROM documents WHERE namespace = 'capsid' AND path IN ('schema.md', 'conventions.md') ORDER BY path")
           .all();
+        // Typed edges whose endpoint no longer exists. Gather is read-only and
+        // the client judges, so these are reported, never auto-repaired: a
+        // dangling edge usually means the target was renamed by hand or removed
+        // before delete cascaded, and which of those it was decides whether the
+        // fix is repointing the edge or dropping it. Both endpoints are checked,
+        // since a source can go missing as easily as a target.
+        const danglingEdges = await db
+          .prepare(
+            `SELECT l.from_ns, l.from_path, l.type, l.to_ns, l.to_path,
+                    CASE WHEN f.id IS NULL THEN 1 ELSE 0 END AS source_missing,
+                    CASE WHEN t.id IS NULL THEN 1 ELSE 0 END AS target_missing
+             FROM document_links l
+             LEFT JOIN documents f ON f.namespace = l.from_ns AND f.path = l.from_path
+             LEFT JOIN documents t ON t.namespace = l.to_ns AND t.path = l.to_path
+             WHERE (f.id IS NULL OR t.id IS NULL)
+               AND (l.from_ns = ?1 OR l.to_ns = ?1)
+             ORDER BY l.from_ns, l.from_path, l.type`
+          )
+          .bind(namespace)
+          .all();
         // Rough packet size so a driving LLM knows when a gather will not fit
         // its context and it should consolidate in batches instead.
         const packetChars = [core, ...wiki.results, ...raw.results, ...rules.results].reduce(
@@ -652,6 +713,7 @@ export function buildServer(env: Env, operator: boolean): McpServer {
           wiki: wiki.results,
           unconsolidated: raw.results,
           rules: rules.results,
+          dangling_edges: danglingEdges.results,
           packet_chars: packetChars,
           ...(packetChars > 150_000
             ? { warning: "large packet: consider consolidating the oldest unconsolidated docs first, in batches, using read on individual paths" }
@@ -677,11 +739,21 @@ export function buildServer(env: Env, operator: boolean): McpServer {
         }
       }
       if (problems.length > 0) return fail(`finalize aborted, nothing archived:\n${problems.join("\n")}`);
-      const statements = paths.map((path) =>
+      // Archiving is a move by another name, so it repoints edges for the same
+      // reason move does. This was the third site of the same defect: delete
+      // cascades, move repoints, and finalize archives, and all three stored
+      // paths rather than ids. Enumerated together deliberately.
+      const statements = paths.flatMap((path) => [
         db
           .prepare("UPDATE documents SET path = 'archive/' || path, updated_at = datetime('now') WHERE namespace = ?1 AND path = ?2")
-          .bind(namespace, path)
-      );
+          .bind(namespace, path),
+        db
+          .prepare("UPDATE document_links SET from_path = 'archive/' || from_path WHERE from_ns = ?1 AND from_path = ?2")
+          .bind(namespace, path),
+        db
+          .prepare("UPDATE document_links SET to_path = 'archive/' || to_path WHERE to_ns = ?1 AND to_path = ?2")
+          .bind(namespace, path),
+      ]);
       statements.push(
         db
           .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES ('operator', 'lint', ?1, NULL, ?2)")
