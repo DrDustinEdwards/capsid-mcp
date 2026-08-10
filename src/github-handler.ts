@@ -122,8 +122,27 @@ button { background: #1a7f37; color: #fff; border: 0; border-radius: 6px; paddin
     headers: {
       "Content-Type": "text/html;charset=utf-8",
       // The dialog has an inline <style> and posts a form back to /authorize.
-      // No scripts, images, or third-party origins, so lock everything else down.
-      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+      // No scripts or images, so lock everything else down.
+      //
+      // form-action is deliberately absent. Approving submits this form into a
+      // four hop redirect chain: POST /authorize, 302 to github.com, 302 back
+      // to /callback, 302 out to the client's registered redirect_uri. Chrome
+      // enforces form-action against every hop, not just the first, and a
+      // blocked hop aborts the navigation silently while that response's
+      // Set-Cookie still lands. The terminal hop is a dynamically registered
+      // client redirect_uri, and any client may register one via /register, so
+      // no static allowlist can be correct here. Adding github.com and
+      // claude.ai alongside 'self' was considered and rejected: it works only
+      // until the next client registers, then fails this same way again.
+      //
+      // History: this shipped as "form-action 'self'" in 423bbd6, where the
+      // headline was dash normalization, and broke hop two for 26 days. It went
+      // undetected because the approvedClients fast path 302s straight out of
+      // the GET and never submits a form. Allowing github.com fixed hop two and
+      // revealed hop four, measured as a callback_entry carrying a valid code
+      // with no callback_fail following it, and the consent page still on
+      // screen 3 seconds later.
+      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
       "X-Content-Type-Options": "nosniff",
       "Referrer-Policy": "no-referrer",
       "X-Frame-Options": "DENY",
