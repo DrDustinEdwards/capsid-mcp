@@ -61,6 +61,67 @@ function fail(message: string) {
 
 const DENIED = "unauthorized: this tool requires a write-grant operator key; read-only (ro:) keys can only use the read tools";
 
+// PATH_MUTATION_HELPER_START
+// The ONLY place in this worker that mutates documents.path or removes a
+// documents row. Every such operation drags document_links with it, because
+// document_links stores (ns, path) strings rather than documents.id and the
+// table carries no foreign key, so nothing at the database level keeps them in
+// step. test/path-mutation.test.ts asserts this helper stays the only site.
+//
+// It exists because the same defect shipped three times: delete removed the row
+// and orphaned every edge touching it, move renamed the document and left its
+// edges on the old path, and lint finalize archived with an inline
+// "UPDATE ... SET path = 'archive/' || path" that was a move by another name.
+// All three are now callers.
+//
+// newPath null means delete. Otherwise the document is renamed to newPath and
+// edges are repointed on both sides.
+//
+// Statement order is part of the contract, because callers read counts off the
+// batch results positionally:
+//   rename: [0] documents, [1] document_links.from_path, [2] document_links.to_path
+//   delete: [0] document_links (both directions), [1] documents
+function pathMutation(
+  db: D1Database,
+  namespace: string,
+  path: string,
+  newPath: string | null
+): D1PreparedStatement[] {
+  if (newPath === null) {
+    return [
+      db
+        .prepare(
+          "DELETE FROM document_links WHERE (from_ns = ?1 AND from_path = ?2) OR (to_ns = ?1 AND to_path = ?2)"
+        )
+        .bind(namespace, path),
+      db.prepare("DELETE FROM documents WHERE namespace = ?1 AND path = ?2").bind(namespace, path),
+    ];
+  }
+  return [
+    db
+      .prepare("UPDATE documents SET path = ?3, updated_at = datetime('now') WHERE namespace = ?1 AND path = ?2")
+      .bind(namespace, path, newPath),
+    db
+      .prepare("UPDATE document_links SET from_path = ?3 WHERE from_ns = ?1 AND from_path = ?2")
+      .bind(namespace, path, newPath),
+    db
+      .prepare("UPDATE document_links SET to_path = ?3 WHERE to_ns = ?1 AND to_path = ?2")
+      .bind(namespace, path, newPath),
+  ];
+}
+
+// Edges touching a document, read before a mutation so the caller can record
+// them. document_versions snapshots only title and body, so for a delete this
+// is the only place the edges survive.
+function edgesTouching(db: D1Database, namespace: string, path: string): D1PreparedStatement {
+  return db
+    .prepare(
+      "SELECT from_ns, from_path, type, to_ns, to_path FROM document_links WHERE (from_ns = ?1 AND from_path = ?2) OR (to_ns = ?1 AND to_path = ?2)"
+    )
+    .bind(namespace, path);
+}
+// PATH_MUTATION_HELPER_END
+
 type ConfirmVerdict = "accepted" | "declined" | "unsupported";
 
 // Asks the connected client to confirm a destructive action via MCP elicitation.
@@ -384,34 +445,17 @@ export function buildServer(env: Env, operator: boolean): McpServer {
           );
         }
       }
-      // Edges cascade in BOTH directions. document_links stores paths, not ids,
-      // so deleting only the row left every edge touching this document behind:
-      // outgoing edges orphaned from a source that no longer exists, and
-      // incoming edges dangling at a target that no longer exists. backlinks and
-      // brief served those happily. Measured 2026-08-09 before this fix: 6 of 98
-      // live edges were already dangling this way.
-      //
-      // document_versions snapshots only title and body, so the removed edges
-      // would otherwise be unrecoverable. They are recorded in the audit_log
-      // params instead, which is the only place they survive a delete.
-      const { results: removedEdges } = await db
-        .prepare(
-          "SELECT from_ns, from_path, type, to_ns, to_path FROM document_links WHERE (from_ns = ?1 AND from_path = ?2) OR (to_ns = ?1 AND to_path = ?2)"
-        )
-        .bind(namespace, path)
-        .all();
+      // Read the edges before pathMutation removes them: the audit row is the
+      // only place they survive, since document_versions holds title and body
+      // only.
+      const { results: removedEdges } = await edgesTouching(db, namespace, path).all();
       await db.batch([
         db
           .prepare(
             "INSERT INTO document_versions (document_id, namespace, path, title, body) VALUES (?1, ?2, ?3, ?4, ?5)"
           )
           .bind(prior.id, namespace, path, prior.title, prior.body),
-        db
-          .prepare(
-            "DELETE FROM document_links WHERE (from_ns = ?1 AND from_path = ?2) OR (to_ns = ?1 AND to_path = ?2)"
-          )
-          .bind(namespace, path),
-        db.prepare("DELETE FROM documents WHERE id = ?1").bind(prior.id),
+        ...pathMutation(db, namespace, path, null),
         db
           .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES ('operator', 'delete', ?1, ?2, ?3)")
           .bind(namespace, path, JSON.stringify({ edges_removed: removedEdges })),
@@ -434,29 +478,25 @@ export function buildServer(env: Env, operator: boolean): McpServer {
     },
     async ({ namespace, path, new_path }) => {
       if (!operator) return fail(DENIED);
+      // Existence and the edge count are both read BEFORE the batch, deliberately.
+      // D1's meta.changes cannot be used for either here: documents carries FTS5
+      // sync triggers, so an UPDATE on it reports the trigger's row changes too,
+      // and in a batch those accumulate across statements. Measured 2026-08-10,
+      // when deriving the count from the batch reported 5 edges repointed for a
+      // single edge. The repointing itself was correct; only the number lied.
+      const exists = await db
+        .prepare("SELECT 1 AS ok FROM documents WHERE namespace = ?1 AND path = ?2")
+        .bind(namespace, path)
+        .first<{ ok: number }>();
+      if (!exists) return fail(`not found: ${namespace}/${path}`);
+      const { results: movingEdges } = await edgesTouching(db, namespace, path).all();
+      const repointed = movingEdges.length;
+      // One batch, so the rename and its edge repointing cannot half-land.
       try {
-        const result = await db
-          .prepare("UPDATE documents SET path = ?3, updated_at = datetime('now') WHERE namespace = ?1 AND path = ?2")
-          .bind(namespace, path, new_path)
-          .run();
-        if (result.meta.changes === 0) return fail(`not found: ${namespace}/${path}`);
+        await db.batch(pathMutation(db, namespace, path, new_path));
       } catch (err) {
         return fail(`move failed (target may already exist): ${err instanceof Error ? err.message : String(err)}`);
       }
-      // Repoint edges in BOTH directions. document_links stores paths, not ids,
-      // so a move that touched only documents.path left this document's outgoing
-      // edges orphaned at the old from_path and every inbound edge dangling at
-      // the old to_path, while the document itself moved cleanly. Same root
-      // cause as the delete cascade above.
-      const [outgoing, incoming] = await db.batch([
-        db
-          .prepare("UPDATE document_links SET from_path = ?3 WHERE from_ns = ?1 AND from_path = ?2")
-          .bind(namespace, path, new_path),
-        db
-          .prepare("UPDATE document_links SET to_path = ?3 WHERE to_ns = ?1 AND to_path = ?2")
-          .bind(namespace, path, new_path),
-      ]);
-      const repointed = (outgoing.meta.changes ?? 0) + (incoming.meta.changes ?? 0);
       await db
         .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES ('operator', 'move', ?1, ?2, ?3)")
         .bind(namespace, path, JSON.stringify({ new_path, edges_repointed: repointed }))
@@ -739,21 +779,9 @@ export function buildServer(env: Env, operator: boolean): McpServer {
         }
       }
       if (problems.length > 0) return fail(`finalize aborted, nothing archived:\n${problems.join("\n")}`);
-      // Archiving is a move by another name, so it repoints edges for the same
-      // reason move does. This was the third site of the same defect: delete
-      // cascades, move repoints, and finalize archives, and all three stored
-      // paths rather than ids. Enumerated together deliberately.
-      const statements = paths.flatMap((path) => [
-        db
-          .prepare("UPDATE documents SET path = 'archive/' || path, updated_at = datetime('now') WHERE namespace = ?1 AND path = ?2")
-          .bind(namespace, path),
-        db
-          .prepare("UPDATE document_links SET from_path = 'archive/' || from_path WHERE from_ns = ?1 AND from_path = ?2")
-          .bind(namespace, path),
-        db
-          .prepare("UPDATE document_links SET to_path = 'archive/' || to_path WHERE to_ns = ?1 AND to_path = ?2")
-          .bind(namespace, path),
-      ]);
+      // Archiving is a rename to archive/<path>, so it goes through the same
+      // helper as move and drags its edges along for the same reason.
+      const statements = paths.flatMap((path) => pathMutation(db, namespace, path, `archive/${path}`));
       statements.push(
         db
           .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES ('operator', 'lint', ?1, NULL, ?2)")
