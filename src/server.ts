@@ -386,12 +386,37 @@ export function buildServer(env: Env, operator: boolean): McpServer {
         );
       }
       await db.batch(statements);
+      // Warn, do not reject, when an edge points at a document that does not
+      // exist. Rejecting would block the legitimate case of asserting an edge
+      // before its target is written, and edges may also address repo files
+      // rather than Capsid documents. But a silent dangling edge is how 23 of
+      // them accumulated unnoticed before 2026-08-10, so the write says so.
+      // The lint loop reports these per namespace; this is the same check at
+      // the moment the edge is created.
+      let danglingTargets: string[] = [];
+      if (parsedLinks && "edges" in parsedLinks && parsedLinks.edges.length > 0) {
+        const checks = await db.batch(
+          parsedLinks.edges.map((edge) =>
+            db
+              .prepare("SELECT 1 AS ok FROM documents WHERE namespace = ?1 AND path = ?2")
+              .bind(edge.to_ns, edge.to_path)
+          )
+        );
+        danglingTargets = parsedLinks.edges
+          .filter((_, i) => (checks[i].results?.length ?? 0) === 0)
+          .map((edge) => `${edge.to_ns}/${edge.to_path}`);
+      }
       return ok({
         namespace,
         path,
         action: prior ? "updated" : "created",
         snapshotted: Boolean(prior),
         ...(parsedLinks && "edges" in parsedLinks ? { links: parsedLinks.edges.length } : {}),
+        ...(danglingTargets.length
+          ? {
+              warning: `${danglingTargets.length} link target(s) do not exist as Capsid documents: ${danglingTargets.join(", ")}. The edge was still written. This is fine if the target is a repo file or is about to be created; otherwise it is a dangling edge and the lint loop will report it.`,
+            }
+          : {}),
       });
     }
   );
