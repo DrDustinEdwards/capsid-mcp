@@ -299,6 +299,15 @@ const SEARCH_EXCLUDE_EXTS = new Set([
 const SEARCH_BLOB_LIMIT = 200 * 1024; // skip blobs over 200KB
 const SEARCH_TREE_LIMIT = 5000; // refuse to scan a tree bigger than this whole
 
+// Statuses that mean the scan itself is compromised rather than one file being
+// unavailable. 401 and 403 cover token expiry, revoked installation access, and
+// GitHub's primary and secondary rate limits (both of which answer 403); 429 is
+// the explicit rate-limit status. None of them are per-file conditions, so a
+// scan that keeps going past one is reporting on a repository it did not read.
+function isScanAbortingStatus(status: number): boolean {
+  return status === 401 || status === 403 || status === 429;
+}
+
 export async function searchCode(
   env: Env,
   namespace: string | undefined,
@@ -343,6 +352,9 @@ export async function searchCode(
 
   const needle = query.toLowerCase();
   const items: Array<{ path: string; line: number; text: string }> = [];
+  // Blobs that returned a survivable error. Reported so a caller can see that a
+  // zero-result scan did not actually read everything it counted.
+  const unreadable: string[] = [];
   let filesScanned = 0;
   let index = start;
   let stoppedAtFileCap = false;
@@ -356,7 +368,33 @@ export async function searchCode(
     filesScanned++;
     const c = candidates[index];
     const blob = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/git/blobs/${c.sha}`);
-    if (!blob.ok) continue;
+    if (!blob.ok) {
+      // A blob this scan could not read is NOT the same as a blob with no match,
+      // and conflating the two is how this tool lied. On 2026-08-10 a scan for
+      // EMAIL_QUEUE across foxhound returned total_results 0 with
+      // truncated=false while that string sat on three lines of one file: the
+      // installation's rate limit was exhausted, every blob fetch 403'd, and
+      // each one hit the bare `continue` that used to be here. The caller could
+      // not distinguish "not present" from "not checked", which is the exact
+      // fail-open capsid/conventions.md rules against for guards.
+      //
+      // Quota and auth failures abort the whole scan, because they do not
+      // apply to one file: once the limit is hit every subsequent fetch fails
+      // the same way, so continuing produces a confidently empty answer over an
+      // unread repository. Everything else (a 404 on a raced deletion, a 5xx on
+      // one blob) is survivable, so it is counted and reported instead.
+      if (isScanAbortingStatus(blob.status)) {
+        throw new Error(
+          `search_code aborted at ${filesScanned} of ${candidates.length} candidate files: GitHub returned ${blob.status} fetching ${c.path}. ` +
+            `This is NOT an empty result. The scan could not read the repository, so no conclusion about whether "${query}" is present is available. ` +
+            (blob.status === 429 || blob.status === 403
+              ? "The App installation's rate limit is the usual cause; a full-tree scan costs one request per candidate file. Wait for the window to reset, narrow with path_prefix, or verify against a local checkout."
+              : "Check the App installation's permissions for this repo.")
+        );
+      }
+      unreadable.push(c.path);
+      continue;
+    }
     const blobData = (await blob.json()) as { content?: string; encoding?: string };
     if (blobData.encoding !== "base64" || !blobData.content) continue;
     let text: string;
@@ -391,6 +429,8 @@ export async function searchCode(
     truncated: boolean;
     next_start?: number;
     note?: string;
+    unreadable_files?: number;
+    unreadable_sample?: string[];
     items: typeof items;
   } = {
     repo: full,
@@ -403,6 +443,13 @@ export async function searchCode(
     truncated: false,
     items,
   };
+
+  // Surfaced rather than swallowed: "0 results over 200 files, 12 of which were
+  // unreadable" is a different claim from "0 results over 200 files".
+  if (unreadable.length > 0) {
+    result.unreadable_files = unreadable.length;
+    result.unreadable_sample = unreadable.slice(0, 10);
+  }
 
   // A boolean alone is not actionable: say WHY it stopped and what to do next.
   if (stoppedAtFileCap && remaining > 0) {
