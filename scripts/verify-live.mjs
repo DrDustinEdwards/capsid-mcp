@@ -36,12 +36,30 @@ function record(gate, passed, detail) {
   console.log(`${passed ? "PASS" : "FAIL"}  ${gate}\n      ${detail}`);
 }
 
-// Gate 1: liveness.
+// Gate 1: liveness, and deploy provenance. /health returns the git sha stamped
+// at deploy time, so this also reports WHICH commit is live. An expected sha can
+// be passed to assert it, which is what makes "the deployed worker is this
+// commit" checkable instead of inferred from a clean working tree.
 async function gateHealth() {
-  const resp = await fetch(`${ORIGIN}/health`);
-  const body = (await resp.text()).trim();
-  const passed = resp.status === 200 && body === "ok";
-  record("1 health", passed, `status=${resp.status} body=${JSON.stringify(body)}`);
+  const expected = process.env.EXPECT_SHA;
+  let data = null;
+  let attempt = 0;
+  for (attempt = 1; attempt <= POLL_ATTEMPTS; attempt++) {
+    const resp = await fetch(`${ORIGIN}/health`, { headers: { "Cache-Control": "no-cache" } });
+    data = await resp.json().catch(() => null);
+    if (resp.status !== 200 || !data || data.status !== "ok") break;
+    // Poll, never single-fetch. A read one second after a deploy returned the
+    // PREVIOUS version four separate times on 2026-08-11.
+    if (!expected || data.sha === expected) break;
+    if (attempt < POLL_ATTEMPTS) await sleep(POLL_INTERVAL_MS);
+  }
+  const live = data?.status === "ok";
+  const shaOk = !expected || data?.sha === expected;
+  const passed = live && shaOk;
+  const detail = `status=${data?.status ?? "?"} sha=${(data?.sha ?? "?").slice(0, 8)} dirty=${data?.dirty} polls=${attempt}` +
+    (expected ? ` expected=${expected.slice(0, 8)}${shaOk ? " MATCH" : " MISMATCH"}` : "");
+  record("1 health + provenance", passed, detail);
+  if (data?.dirty) console.log("      NOTE: deployed from a dirty tree; the bytes are not exactly that commit.");
 }
 
 // Gate 2: dynamic client registration. Returns a client id never seen before,

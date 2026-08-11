@@ -313,7 +313,18 @@ async function handleBackup(request: Request, env: Env): Promise<Response> {
 export const defaultHandler = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname === "/health") return new Response("ok");
+    // /health carries deploy provenance so "the deployed worker is this commit"
+    // is a readable fact rather than an inference from a clean tree. The vars
+    // are stamped at deploy time by scripts/deploy.mjs. dirty=true means the
+    // deployed bytes are NOT the named commit.
+    if (url.pathname === "/health") {
+      return Response.json({
+        status: "ok",
+        sha: env.BUILD_SHA ?? "unknown",
+        dirty: env.BUILD_DIRTY === "true",
+        builtAt: env.BUILT_AT ?? null,
+      });
+    }
     if (url.pathname === "/ops/mcp") return handleOperatorMcp(request, env, ctx);
     if (url.pathname === "/ops/backup" && request.method === "POST") return handleBackup(request, env);
     if (url.pathname === "/authorize" && request.method === "GET") return handleAuthorizeGet(request, env);

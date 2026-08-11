@@ -41,6 +41,11 @@ export interface Env {
   GITHUB_APP_CLIENT_ID: string;
   GITHUB_APP_PRIVATE_KEY: string;
   GITHUB_APP_INSTALLATION_ID?: string;
+  // Deploy provenance, stamped by scripts/deploy.mjs at deploy time (--var),
+  // not committed. Absent when deployed by bare wrangler.
+  BUILD_SHA?: string;
+  BUILD_DIRTY?: string;
+  BUILT_AT?: string;
 }
 
 export interface Props extends Record<string, unknown> {
