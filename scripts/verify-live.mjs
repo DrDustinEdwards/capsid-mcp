@@ -47,10 +47,14 @@ async function gateHealth() {
   for (attempt = 1; attempt <= POLL_ATTEMPTS; attempt++) {
     const resp = await fetch(`${ORIGIN}/health`, { headers: { "Cache-Control": "no-cache" } });
     data = await resp.json().catch(() => null);
-    if (resp.status !== 200 || !data || data.status !== "ok") break;
-    // Poll, never single-fetch. A read one second after a deploy returned the
-    // PREVIOUS version four separate times on 2026-08-11.
-    if (!expected || data.sha === expected) break;
+    // Keep polling through EVERY not-yet-converged state, including a response
+    // that is not JSON at all: immediately after a deploy the previous version
+    // is still serving, and before this commit that version answered /health
+    // with the plain text "ok". An earlier draft of this loop broke out on a
+    // null parse, which defeated the polling it exists for and failed the gate
+    // against a deploy that was in fact correct.
+    const converged = resp.status === 200 && data?.status === "ok" && (!expected || data.sha === expected);
+    if (converged) break;
     if (attempt < POLL_ATTEMPTS) await sleep(POLL_INTERVAL_MS);
   }
   const live = data?.status === "ok";
