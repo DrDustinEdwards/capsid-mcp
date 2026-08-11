@@ -13,20 +13,42 @@ export async function sha256Hex(input: string): Promise<string> {
 // original single-hash secret still parses as one write entry.
 export type OperatorGrant = "write" | "read" | null;
 
-export async function operatorGrant(
+// The identity behind an operator-key request: which grant, and WHICH KEY.
+//
+// The fingerprint is the first 12 hex chars of the presented key's sha256. That
+// is enough to tell several keys apart in the audit log (an agent key from the
+// cron key from a laptop key) and it is not the key. It is deliberately a
+// PREFIX rather than the whole digest: the full digest is the value stored in
+// OPERATOR_KEY_HASH, so writing it into audit_log would copy the verifier into
+// the database that the audit log is meant to hold to account.
+export interface OperatorIdentity {
+  grant: OperatorGrant;
+  fingerprint: string | null;
+}
+
+export async function operatorIdentity(
   request: Request,
   env: { OPERATOR_KEY_HASH?: string }
-): Promise<OperatorGrant> {
+): Promise<OperatorIdentity> {
   const auth = request.headers.get("Authorization");
-  if (!auth || !auth.startsWith("Bearer ") || !env.OPERATOR_KEY_HASH) return null;
+  if (!auth || !auth.startsWith("Bearer ") || !env.OPERATOR_KEY_HASH) return { grant: null, fingerprint: null };
   const hash = await sha256Hex(auth.slice("Bearer ".length).trim());
   for (const raw of env.OPERATOR_KEY_HASH.split(",")) {
     const entry = raw.trim().toLowerCase();
     if (!entry) continue;
     const readonly = entry.startsWith("ro:");
-    if ((readonly ? entry.slice(3) : entry) === hash) return readonly ? "read" : "write";
+    if ((readonly ? entry.slice(3) : entry) === hash) {
+      return { grant: readonly ? "read" : "write", fingerprint: hash.slice(0, 12) };
+    }
   }
-  return null;
+  return { grant: null, fingerprint: null };
+}
+
+export async function operatorGrant(
+  request: Request,
+  env: { OPERATOR_KEY_HASH?: string }
+): Promise<OperatorGrant> {
+  return (await operatorIdentity(request, env)).grant;
 }
 
 export function isAdminUser(

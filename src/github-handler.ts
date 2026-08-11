@@ -1,6 +1,6 @@
 import type { AuthRequest } from "@cloudflare/workers-oauth-provider";
 import { createMcpHandler } from "agents/mcp";
-import { isAdminUser, operatorGrant, sha256Hex } from "./auth";
+import { isAdminUser, operatorGrant, operatorIdentity, sha256Hex } from "./auth";
 import { runBackup } from "./backup";
 import { buildServer, type Env } from "./server";
 
@@ -281,14 +281,22 @@ async function handleCallback(request: Request, env: Env): Promise<Response> {
 async function handleOperatorMcp(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   // "write" keys get the full tool set; "ro:" keys get operator=false, so the
   // per-tool write gate is a live boundary for them.
-  const grant = await operatorGrant(request, env);
+  const { grant, fingerprint } = await operatorIdentity(request, env);
   if (!grant) {
     return new Response("unauthorized: valid operator key required", {
       status: 401,
       headers: { "WWW-Authenticate": 'Bearer realm="capsid-operator"' },
     });
   }
-  return createMcpHandler(buildServer(env, grant === "write"), { route: "/ops/mcp" })(request, env, ctx);
+  // Which key, not just that a key was valid. Several keys are in use (an agent
+  // key, the cron key, a laptop key) and the audit log could not previously tell
+  // them apart. The fingerprint is a 12-char prefix of the key's sha256; the
+  // full digest is the stored verifier and deliberately stays out of the log.
+  return createMcpHandler(buildServer(env, grant === "write", `opkey:${fingerprint}`), { route: "/ops/mcp" })(
+    request,
+    env,
+    ctx
+  );
 }
 
 async function handleBackup(request: Request, env: Env): Promise<Response> {

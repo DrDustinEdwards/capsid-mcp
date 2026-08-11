@@ -150,7 +150,19 @@ async function confirmDestructive(server: McpServer, message: string): Promise<C
   }
 }
 
-export function buildServer(env: Env, operator: boolean): McpServer {
+// `actor` is the principal that will be recorded on every audit_log row this
+// server writes. It replaces a hardcoded 'operator' string that every one of the
+// eight audit write sites used, which meant the column answered "what happened"
+// and never "who did it". Establishing who deleted three parity documents on
+// 2026-08-10 took the Workers Observability 7-day window plus prose in two
+// session docs, because the audit log itself could not say.
+//
+// Shape: "github:<login>" for an OAuth session on /mcp, "opkey:<fingerprint>"
+// for an operator key on /ops/mcp, where the fingerprint is a 12-char prefix of
+// the key's sha256 and not the key. The 1,631 rows written before 2026-08-11
+// keep their literal 'operator' value; there is no backfill, because inventing
+// an attribution for them would be worse than an honest unknown.
+export function buildServer(env: Env, operator: boolean, actor: string): McpServer {
   const server = new McpServer(SERVER_INFO);
   const db = env.DB;
 
@@ -361,8 +373,8 @@ export function buildServer(env: Env, operator: boolean): McpServer {
       );
       statements.push(
         db
-          .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES ('operator', 'write', ?1, ?2, ?3)")
-          .bind(namespace, path, JSON.stringify({ title, type, tags, status, updated: Boolean(prior) }))
+          .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES (?1, 'write', ?2, ?3, ?4)")
+          .bind(actor, namespace, path, JSON.stringify({ title, type, tags, status, updated: Boolean(prior) }))
       );
       // links replaces this document's outgoing edges when provided. Left
       // untouched when omitted, so a routine body edit never drops edges.
@@ -381,8 +393,8 @@ export function buildServer(env: Env, operator: boolean): McpServer {
         }
         statements.push(
           db
-            .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES ('operator', 'links', ?1, ?2, ?3)")
-            .bind(namespace, path, JSON.stringify({ edges: parsedLinks.edges.length }))
+            .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES (?1, 'links', ?2, ?3, ?4)")
+            .bind(actor, namespace, path, JSON.stringify({ edges: parsedLinks.edges.length }))
         );
       }
       await db.batch(statements);
@@ -482,8 +494,8 @@ export function buildServer(env: Env, operator: boolean): McpServer {
           .bind(prior.id, namespace, path, prior.title, prior.body),
         ...pathMutation(db, namespace, path, null),
         db
-          .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES ('operator', 'delete', ?1, ?2, ?3)")
-          .bind(namespace, path, JSON.stringify({ edges_removed: removedEdges })),
+          .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES (?1, 'delete', ?2, ?3, ?4)")
+          .bind(actor, namespace, path, JSON.stringify({ edges_removed: removedEdges })),
       ]);
       return ok({
         namespace,
@@ -523,8 +535,8 @@ export function buildServer(env: Env, operator: boolean): McpServer {
         return fail(`move failed (target may already exist): ${err instanceof Error ? err.message : String(err)}`);
       }
       await db
-        .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES ('operator', 'move', ?1, ?2, ?3)")
-        .bind(namespace, path, JSON.stringify({ new_path, edges_repointed: repointed }))
+        .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES (?1, 'move', ?2, ?3, ?4)")
+        .bind(actor, namespace, path, JSON.stringify({ new_path, edges_repointed: repointed }))
         .run();
       return ok({ namespace, path, new_path, action: "moved", edges_repointed: repointed });
     }
@@ -655,8 +667,8 @@ export function buildServer(env: Env, operator: boolean): McpServer {
       await db.batch([
         db.prepare("INSERT INTO namespaces (namespace, repos) VALUES (?1, ?2)").bind(ns, reposJson),
         db
-          .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES ('operator', 'register_namespace', ?1, NULL, ?2)")
-          .bind(ns, reposJson),
+          .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES (?1, 'register_namespace', ?2, NULL, ?3)")
+          .bind(actor, ns, reposJson),
       ]);
       return ok({ namespace: ns, repos: list, action: "registered" });
     }
@@ -692,8 +704,8 @@ export function buildServer(env: Env, operator: boolean): McpServer {
       await db.batch([
         db.prepare("UPDATE namespaces SET repos = ?2 WHERE namespace = ?1").bind(ns, reposJson),
         db
-          .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES ('operator', 'update_namespace', ?1, NULL, ?2)")
-          .bind(ns, JSON.stringify({ old: existing.repos, new: reposJson })),
+          .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES (?1, 'update_namespace', ?2, NULL, ?3)")
+          .bind(actor, ns, JSON.stringify({ old: existing.repos, new: reposJson })),
       ]);
       return ok({ namespace: ns, repos: list, action: "updated", previous: existing.repos });
     }
@@ -809,8 +821,8 @@ export function buildServer(env: Env, operator: boolean): McpServer {
       const statements = paths.flatMap((path) => pathMutation(db, namespace, path, `archive/${path}`));
       statements.push(
         db
-          .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES ('operator', 'lint', ?1, NULL, ?2)")
-          .bind(namespace, JSON.stringify({ consolidated: paths.length, consumed: paths }))
+          .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES (?1, 'lint', ?2, NULL, ?3)")
+          .bind(actor, namespace, JSON.stringify({ consolidated: paths.length, consumed: paths }))
       );
       try {
         await db.batch(statements);
@@ -854,8 +866,8 @@ export function buildServer(env: Env, operator: boolean): McpServer {
       return fail(err instanceof Error ? err.message : String(err));
     }
     await db
-      .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES ('operator', ?1, ?2, ?3, ?4)")
-      .bind(action, namespace, path, JSON.stringify(result))
+      .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES (?1, ?2, ?3, ?4, ?5)")
+      .bind(actor, action, namespace, path, JSON.stringify(result))
       .run();
     return ok(result);
   };
