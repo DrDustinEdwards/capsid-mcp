@@ -21,9 +21,11 @@ import {
   searchCode,
   writeRepoFile,
 } from "./github";
+import { sha256Hex } from "./auth";
 import { normalizeDashes } from "./normalize";
 import { parseLinks } from "./links";
 import { validateDocStatus, validateDocType } from "./doc-meta";
+import { assembleBody } from "./write-modes";
 
 export interface Env {
   DB: D1Database;
@@ -310,12 +312,21 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
   server.registerTool(
     "write",
     {
-      description: "Create or update a document. Snapshots the prior version and writes an audit log entry. Overwriting an existing document needs confirmation: the server elicits it when the client supports elicitation, otherwise pass confirm: true. Optional links: a JSON array of typed outgoing edges [{\"type\":\"references\",\"to_path\":\"decisions.md\",\"to_ns\":\"capsid\"}] (types: governs, references, supersedes, replaces, depends-on; to_ns defaults to this namespace). When provided it replaces this document's outgoing edges; omit it to leave edges untouched; pass [] to clear them. Read edges with backlinks.",
+      description:
+        "Create or update a document. Snapshots the prior version and writes an audit log entry. mode selects how body is applied: 'replace' (default, full body, needs title and body), 'append' (body is added to the end of the existing document, no title needed, no confirmation needed because nothing is overwritten), or 'patch' (replace an anchored region: needs find and replace_with, and find must occur EXACTLY ONCE or the write is refused). append and patch exist so amending a large document does not mean retranscribing it. Every response carries sha256 and bytes of the resulting body, so a write can be verified without reading the document back. Overwriting with replace or patch needs confirmation: the server elicits it when the client supports elicitation, otherwise pass confirm: true. Optional links: a JSON array of typed outgoing edges [{\"type\":\"references\",\"to_path\":\"decisions.md\",\"to_ns\":\"capsid\"}] (types: governs, references, supersedes, replaces, depends-on; to_ns defaults to this namespace). When provided it replaces this document's outgoing edges; omit it to leave edges untouched; pass [] to clear them. Read edges with backlinks.",
       inputSchema: {
         namespace: z.string(),
         path: z.string(),
-        title: z.string(),
-        body: z.string(),
+        // title and body are required for mode 'replace' and validated as such
+        // below. They are optional in the schema because append needs no title
+        // and patch needs neither: making them required here would force a
+        // caller to resupply a title it is not changing, which is the
+        // retranscription this mode exists to remove.
+        title: z.string().optional(),
+        body: z.string().optional(),
+        mode: z.enum(["replace", "append", "patch"]).optional(),
+        find: z.string().optional(),
+        replace_with: z.string().optional(),
         type: z.string().optional(),
         tags: z.string().optional(),
         status: z.string().optional(),
@@ -323,23 +334,52 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
         links: z.string().optional(),
       },
     },
-    async ({ namespace, path, title, body, type, tags, status, confirm, links }) => {
+    async ({ namespace, path, title, body, mode, find, replace_with, type, tags, status, confirm, links }) => {
       if (!operator) return fail(DENIED);
+      const writeMode = mode ?? "replace";
       const typeError = type === undefined ? null : validateDocType(type);
       if (typeError) return fail(typeError);
       const statusError = status === undefined ? null : validateDocStatus(status);
       if (statusError) return fail(statusError);
       const parsedLinks = links === undefined ? null : parseLinks(links, namespace);
       if (parsedLinks && "error" in parsedLinks) return fail(parsedLinks.error);
-      // Normalize wide dashes server-side so no client can store an em dash,
-      // regardless of whether the Claude Code hook ran. See ./normalize.
-      title = normalizeDashes(title, "title");
-      body = normalizeDashes(body, "prose");
+
       const prior = await db
         .prepare("SELECT id, title, body FROM documents WHERE namespace = ?1 AND path = ?2")
         .bind(namespace, path)
         .first<{ id: number; title: string | null; body: string | null }>();
-      if (prior && confirm !== true) {
+
+      // Body assembly, per mode. Pure and unit-tested in ./write-modes. Every
+      // mode returns the FULL new body, so the write path below is unchanged and
+      // both invariants (version snapshot, audit row) apply identically to all
+      // three.
+      const assembled = assembleBody({
+        mode: writeMode,
+        exists: Boolean(prior),
+        priorBody: prior?.body ?? null,
+        title,
+        body,
+        find,
+        replace_with,
+      });
+      if ("error" in assembled) return fail(`${assembled.error} (${namespace}/${path})`);
+      body = assembled.body;
+
+      // Normalize wide dashes server-side so no client can store an em dash,
+      // regardless of whether the Claude Code hook ran. See ./normalize. This
+      // runs AFTER assembly so append and patch content is normalized too,
+      // which is the gap the hand-run SQL splice had: normalization did not run
+      // on that path at all.
+      if (title !== undefined) title = normalizeDashes(title, "title");
+      body = normalizeDashes(body as string, "prose");
+      // append is exempt from confirmation, deliberately. Confirmation exists to
+      // stop an accidental clobber of existing text, and an append cannot
+      // destroy any: the prior body is still snapshotted, and the addition goes
+      // after it. Requiring a confirm here would make the cheap, safe operation
+      // more ceremonious than the dangerous one, and callers would go back to
+      // full-body rewrites. patch and replace both mutate existing text and are
+      // NOT exempt.
+      if (prior && confirm !== true && writeMode !== "append") {
         const verdict = await confirmDestructive(
           server,
           `Overwrite ${namespace}/${path}? The current version will be snapshotted to document_versions first.`
@@ -367,14 +407,14 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
             `INSERT INTO documents (namespace, path, title, body, type, tags, status)
              VALUES (?1, ?2, ?3, ?4, COALESCE(?5, 'note'), ?6, COALESCE(?7, 'published'))
              ON CONFLICT(namespace, path) DO UPDATE SET
-               title = excluded.title,
+               title = COALESCE(?3, documents.title),
                body = excluded.body,
                type = COALESCE(?5, documents.type),
                tags = COALESCE(?6, documents.tags),
                status = COALESCE(?7, documents.status),
                updated_at = datetime('now')`
           )
-          .bind(namespace, path, title, body, type ?? null, tags ?? null, status ?? null)
+          .bind(namespace, path, title ?? null, body, type ?? null, tags ?? null, status ?? null)
       );
       statements.push(
         db
@@ -423,10 +463,29 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
           .filter((_, i) => (checks[i].results?.length ?? 0) === 0)
           .map((edge) => `${edge.to_ns}/${edge.to_path}`);
       }
+      // The read-back. sha256 and byte length of the body that is now stored, so
+      // a caller can verify the write landed exactly as intended WITHOUT
+      // fetching the document and comparing it by eye. That second read was
+      // itself a transcription, and the correlated-transcription risk fired
+      // twice on 2026-08-07 because verifying a write meant re-reading and
+      // re-writing the same 30KB.
+      //
+      // Hash the assembled body rather than re-selecting it: re-selecting would
+      // prove the round trip but would also be the extra read this is meant to
+      // avoid, and D1 returns exactly what was bound.
+      const bodySha = await sha256Hex(body);
+      const bodyBytes = new TextEncoder().encode(body).length;
+
       return ok({
         namespace,
         path,
         action: prior ? "updated" : "created",
+        mode: writeMode,
+        sha256: bodySha,
+        bytes: bodyBytes,
+        ...(writeMode !== "replace" && prior
+          ? { bytes_before: new TextEncoder().encode(prior.body ?? "").length }
+          : {}),
         snapshotted: Boolean(prior),
         ...(parsedLinks && "edges" in parsedLinks ? { links: parsedLinks.edges.length } : {}),
         ...(danglingTargets.length
