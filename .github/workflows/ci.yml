@@ -12,14 +12,16 @@ name: CI
 # Nothing invoked it, so it was not yet a gate. What this workflow adds is that
 # the live gate runs at all, on every push and every six hours.
 #
-# THE TESTED ARTIFACT IS NOT THE SHIPPED ARTIFACT. foxhound's ci.yml records
-# this gap because its verify and deploy jobs each run their own npm ci, so it
-# ships a rebuild of the tested commit rather than the tested bytes. capsid has
-# it worse and should say so: the deploy happens on Dustin's machine, from a
-# working tree this workflow never saw. Accepted, because the mitigation is
-# already live and independent of CI: scripts/deploy.mjs stamps BUILD_SHA and
-# BUILD_DIRTY at deploy time and /health reports both, so a deploy from a dirty
-# tree is visible rather than implied.
+# THE TESTED ARTIFACT IS NOT THE SHIPPED ARTIFACT. Accepted, and recorded rather
+# than glossed. checks and deploy run on separate runners and each does its own
+# npm ci, so what ships is a REBUILD of the tested commit, not the bytes that
+# passed. This is the same gap foxhound's ci.yml records; closing it means
+# uploading the build from checks and downloading it in deploy.
+#
+# It is materially better than session 2, where the deploy happened on Dustin's
+# machine from a working tree CI never saw. Two mitigations now stand: the runner
+# checks out clean, so BUILD_DIRTY=false actually means something here, and the
+# live job asserts /health reports this exact commit before the run goes green.
 
 on:
   push:
@@ -67,12 +69,60 @@ jobs:
       - name: Tests
         run: npm test
 
+  # Ordered after checks, exactly the foxhound shape that has proved itself
+  # twice: a failing typecheck or test never reaches production. No
+  # continue-on-error, and deliberately no `if: secrets.X != ''` guard. A job
+  # that skips when its credentials are missing makes "deployed" and "could not
+  # deploy" indistinguishable, which is the fail-open shape
+  # capsid/conventions.md rules against. If the secrets are absent this job
+  # fails loudly, which is the correct signal.
+  deploy:
+    name: deploy
+    needs: checks
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # wrangler.jsonc is gitignored, so a runner has no deployable config.
+      # scripts/ci-config.mjs rebuilds it: every binding is resolved by NAME
+      # against the account, then checked against an id pinned in the script,
+      # and any disagreement is a hard failure. Resolving by name alone is the
+      # trap that would silently rebind this Worker to the wrong database.
+      - name: Reconstruct wrangler.jsonc
+        run: node scripts/ci-config.mjs
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      # scripts/deploy.mjs stamps BUILD_SHA, BUILD_DIRTY and BUILT_AT as
+      # deploy-time vars. On a runner the tree is a clean checkout, so
+      # dirty=false is meaningful here in a way it is not on a laptop.
+      - name: Deploy
+        run: npm run deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
   live:
     name: live gate
-    needs: checks
+    needs: [checks, deploy]
     # Never on pull_request. A PR head sha is not deployed and never will be, so
     # asserting anything about production from one is meaningless.
-    if: github.event_name != 'pull_request'
+    #
+    # !failure() && !cancelled() rather than always(): on a schedule run the
+    # deploy job is SKIPPED, and a plain `needs: deploy` would skip this job too,
+    # silently retiring the six-hourly check that exists to cap time-to-detect.
+    # This form runs when a dependency was skipped but not when one failed.
+    if: github.event_name != 'pull_request' && !failure() && !cancelled()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -85,45 +135,23 @@ jobs:
       # runs on global fetch, so it needs no node_modules. Keeping it
       # dependency-free is what lets the live gate run even if install is broken.
 
-      # Health-only: every gate the script has, against whatever is currently
-      # deployed. Deliberately NOT asserting that /health reports this commit.
+      # THE SHA-EQUALITY GATE. EXPECT_SHA is set only when the deploy job in
+      # THIS run actually succeeded, so gate 1 polls /health until it reports
+      # this exact commit. That closes the last gap in "the deployed worker is
+      # this commit": provenance made it readable (ac88c99), and this makes it
+      # asserted on every push.
       #
-      # EXPECT_SHA is supported by the script (it is why deploy provenance was
-      # built in ac88c99) and is left unset here on purpose. Deploy is a manual
-      # step today, so a sha-equality assertion on push would fail on every push
-      # until the deploy that follows it, which is a red build for a reason that
-      # is not a defect. The sha-equality gate lands WITH the deploy job, not
-      # before it, because only then is there something in CI that makes the
-      # pushed sha live.
+      # On a schedule run the deploy job is skipped, needs.deploy.result is
+      # 'skipped', and EXPECT_SHA resolves to the empty string, which the script
+      # treats as falsy. The six-hourly run then asserts the live surface without
+      # claiming anything about which commit is on it, which is correct: nothing
+      # was deployed.
+      #
+      # The poll budget is raised well above the 10 x 3s default because this is
+      # waiting on a rollout that started seconds ago. 40 x 3s gives two minutes.
       - name: verify:live
+        env:
+          EXPECT_SHA: ${{ needs.deploy.result == 'success' && github.sha || '' }}
+          VERIFY_POLL_ATTEMPTS: "40"
         run: npm run verify:live
 
-# CARRIED: the deploy job. Not written as a skipped or guarded stub, because a
-# job that skips when its credentials are missing is exactly the fail-open shape
-# capsid/conventions.md rules against: green would mean "deployed" and "could
-# not deploy" indistinguishably. Absent and documented beats present and
-# silently skipped.
-#
-# Two independent blockers, both measured 2026-08-11:
-#
-#   1. NO ACTIONS SECRETS. `gh secret list -R DrDustinEdwards/capsid-mcp`
-#      returns empty, where foxhound carries CLOUDFLARE_API_TOKEN and
-#      CLOUDFLARE_ACCOUNT_ID. Setting them is Dustin's task and is gated; no
-#      session writes them.
-#
-#   2. NO DEPLOYABLE CONFIG ON A RUNNER. wrangler.jsonc is gitignored under the
-#      public-repo hygiene rule, so a checkout carries only
-#      wrangler.jsonc.example with placeholder D1, KV and R2 ids. A deploy from
-#      here would target nothing, or something else.
-#
-#      DO NOT CLOSE THIS BY COMMITTING wrangler.jsonc. The committed copies in
-#      foxhound, germomics, txasm and bsw are the deviation, not the norm, and
-#      capsid/core.md already records them as a convention violation. capsid is
-#      a public MIT repo. When the deploy job is built, the config has to be
-#      reconstructed on the runner from repo secrets or variables, not checked
-#      in.
-#
-# When both are resolved, the job goes after `checks` with `needs: checks` and
-# `if: github.event_name == 'push' && github.ref == 'refs/heads/master'`, the
-# foxhound ordering that has proved itself twice, and the live job then moves to
-# `needs: deploy` and gains EXPECT_SHA: ${{ github.sha }}.

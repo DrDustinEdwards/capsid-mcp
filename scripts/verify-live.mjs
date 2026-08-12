@@ -25,8 +25,12 @@
 //      Cloudflare propagation is not instant. Gate 4 polls to an expected value.
 
 const ORIGIN = (process.argv[2] ?? "https://capsid.dustin-edwards.workers.dev").replace(/\/$/, "");
-const POLL_ATTEMPTS = 10;
-const POLL_INTERVAL_MS = 3000;
+// Overridable because CI needs a longer budget than an interactive run: the sha
+// gate there is waiting on a rollout that has only just been triggered, and a
+// budget that expires early would report a correct deploy as a failure. That is
+// the same trap as a single fetch, just with more steps.
+const POLL_ATTEMPTS = Number(process.env.VERIFY_POLL_ATTEMPTS ?? 10);
+const POLL_INTERVAL_MS = Number(process.env.VERIFY_POLL_INTERVAL_MS ?? 3000);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
