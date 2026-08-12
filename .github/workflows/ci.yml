@@ -1,0 +1,129 @@
+name: CI
+
+# capsid had no .github/workflows at all until 2026-08-11. That is batch-two
+# item 1, and it matters more here than in a leaf project: capsid is the
+# dependency of every other repo in the portfolio.
+#
+# Be honest about what this buys. Offline checks would NOT have caught the
+# outage that motivated the whole audit: a "form-action 'self'" CSP landed in
+# 423bbd6, type-checked perfectly, passed every unit test, and broke the OAuth
+# consent flow for 26 days. tsc and node --test never touch a live surface.
+# Only scripts/verify-live.mjs catches that class, and it already existed.
+# Nothing invoked it, so it was not yet a gate. What this workflow adds is that
+# the live gate runs at all, on every push and every six hours.
+#
+# THE TESTED ARTIFACT IS NOT THE SHIPPED ARTIFACT. foxhound's ci.yml records
+# this gap because its verify and deploy jobs each run their own npm ci, so it
+# ships a rebuild of the tested commit rather than the tested bytes. capsid has
+# it worse and should say so: the deploy happens on Dustin's machine, from a
+# working tree this workflow never saw. Accepted, because the mitigation is
+# already live and independent of CI: scripts/deploy.mjs stamps BUILD_SHA and
+# BUILD_DIRTY at deploy time and /health reports both, so a deploy from a dirty
+# tree is visible rather than implied.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  # Every six hours. The outage ran 26 days; a six hour ceiling on
+  # time-to-detect is the point of the schedule, not the offline checks.
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+# Nothing here sets continue-on-error, and nothing should. A step that fails
+# fails its job, and the live job does not run unless checks passed.
+jobs:
+  checks:
+    name: checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      # Verified on a fresh clone 2026-08-11 before this workflow was written:
+      # npm ci, npm run check and npm test all succeed with no wrangler.jsonc
+      # present, because tsconfig pulls its types from @cloudflare/workers-types
+      # in node_modules rather than from generated bindings. That is why the
+      # checks job needs no config and no secrets.
+      - name: Install dependencies
+        run: npm ci
+
+      # tsc --noEmit is the safe form here: a conventional single-project config
+      # with an explicit include of ["src"]. See capsid/conventions.md on why
+      # `tsc -b` is required elsewhere in the portfolio.
+      #
+      # Known coverage gap, recorded not fixed: test/ is not type-checked, so
+      # test/backup.test.ts (the guard that keeps the backup table list honest)
+      # is itself unguarded. Batched into the 2026-07-28 migration item.
+      - name: Typecheck
+        run: npm run check
+
+      - name: Tests
+        run: npm test
+
+  live:
+    name: live gate
+    needs: checks
+    # Never on pull_request. A PR head sha is not deployed and never will be, so
+    # asserting anything about production from one is meaningless.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+
+      # No npm ci on purpose: scripts/verify-live.mjs imports nothing at all and
+      # runs on global fetch, so it needs no node_modules. Keeping it
+      # dependency-free is what lets the live gate run even if install is broken.
+
+      # Health-only: every gate the script has, against whatever is currently
+      # deployed. Deliberately NOT asserting that /health reports this commit.
+      #
+      # EXPECT_SHA is supported by the script (it is why deploy provenance was
+      # built in ac88c99) and is left unset here on purpose. Deploy is a manual
+      # step today, so a sha-equality assertion on push would fail on every push
+      # until the deploy that follows it, which is a red build for a reason that
+      # is not a defect. The sha-equality gate lands WITH the deploy job, not
+      # before it, because only then is there something in CI that makes the
+      # pushed sha live.
+      - name: verify:live
+        run: npm run verify:live
+
+# CARRIED: the deploy job. Not written as a skipped or guarded stub, because a
+# job that skips when its credentials are missing is exactly the fail-open shape
+# capsid/conventions.md rules against: green would mean "deployed" and "could
+# not deploy" indistinguishably. Absent and documented beats present and
+# silently skipped.
+#
+# Two independent blockers, both measured 2026-08-11:
+#
+#   1. NO ACTIONS SECRETS. `gh secret list -R DrDustinEdwards/capsid-mcp`
+#      returns empty, where foxhound carries CLOUDFLARE_API_TOKEN and
+#      CLOUDFLARE_ACCOUNT_ID. Setting them is Dustin's task and is gated; no
+#      session writes them.
+#
+#   2. NO DEPLOYABLE CONFIG ON A RUNNER. wrangler.jsonc is gitignored under the
+#      public-repo hygiene rule, so a checkout carries only
+#      wrangler.jsonc.example with placeholder D1, KV and R2 ids. A deploy from
+#      here would target nothing, or something else.
+#
+#      DO NOT CLOSE THIS BY COMMITTING wrangler.jsonc. The committed copies in
+#      foxhound, germomics, txasm and bsw are the deviation, not the norm, and
+#      capsid/core.md already records them as a convention violation. capsid is
+#      a public MIT repo. When the deploy job is built, the config has to be
+#      reconstructed on the runner from repo secrets or variables, not checked
+#      in.
+#
+# When both are resolved, the job goes after `checks` with `needs: checks` and
+# `if: github.event_name == 'push' && github.ref == 'refs/heads/master'`, the
+# foxhound ordering that has proved itself twice, and the live job then moves to
+# `needs: deploy` and gains EXPECT_SHA: ${{ github.sha }}.
