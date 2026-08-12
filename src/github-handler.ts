@@ -2,6 +2,7 @@ import type { AuthRequest } from "@cloudflare/workers-oauth-provider";
 import { createMcpHandler } from "agents/mcp";
 import { isAdminUser, operatorGrant, operatorIdentity, sha256Hex } from "./auth";
 import { runBackup } from "./backup";
+import { REPORT_PATH } from "./headers";
 import { buildServer, type Env } from "./server";
 
 const GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize";
@@ -310,6 +311,95 @@ async function handleBackup(request: Request, env: Env): Promise<Response> {
   return Response.json(summary);
 }
 
+// Item 9 report sink. Unauthenticated by necessity: a browser posts a violation
+// report with no credentials and will not retry.
+//
+// R2 IS THE RECORD, THE LOG IS THE CONVENIENCE. Ruled 2026-08-12. Workers
+// Observability alone was rejected because its retention is 7 days and that
+// ceiling has already bitten once: the 2026-08-10 actor investigation cleared
+// only because the window happened to still be open. This surface fails
+// sparsely by nature, since the approved-client fast path means the consent form
+// rarely renders, which is exactly how a total outage hid for 26 days. A
+// promotion ruling for the CSP and COOP trials needs the whole soak record, not
+// a rolling week. The console.log is so a live tail still shows a violation the
+// moment it lands.
+//
+// Bounded on purpose: this is a public unauthenticated write path with no rate
+// limit in front of it, so an oversized body is refused rather than stored, and
+// the key is one object per ray id rather than per report.
+const CSP_REPORT_MAX_BYTES = 16384;
+const CSP_REPORT_PREFIX = "reports/csp/";
+
+function summarizeReport(parsed: unknown): { directive: string; blocked: string; document: string } {
+  // Two wire formats reach here. report-uri sends {"csp-report": {...}} with
+  // hyphenated keys; the Reporting API (report-to) sends an array of
+  // {type, body} with camelCase keys, and COOP reports arrive that way too.
+  const legacy = (parsed as { "csp-report"?: Record<string, unknown> } | null)?.["csp-report"];
+  if (legacy) {
+    return {
+      directive: String(legacy["effective-directive"] ?? legacy["violated-directive"] ?? "?"),
+      blocked: String(legacy["blocked-uri"] ?? "?"),
+      document: String(legacy["document-uri"] ?? "?"),
+    };
+  }
+  const first = Array.isArray(parsed) ? (parsed[0] as { type?: string; body?: Record<string, unknown> }) : null;
+  if (first?.body) {
+    return {
+      directive: String(first.body.effectiveDirective ?? first.type ?? "?"),
+      blocked: String(first.body.blockedURL ?? "?"),
+      document: String(first.body.documentURL ?? "?"),
+    };
+  }
+  return { directive: "?", blocked: "?", document: "?" };
+}
+
+async function handleCspReport(request: Request, env: Env): Promise<Response> {
+  const raw = await request.text();
+  if (raw.length > CSP_REPORT_MAX_BYTES) return new Response(null, { status: 413 });
+
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    // Keep the raw body rather than dropping it: an unparseable report still
+    // says a violation fired, and the shape is worth seeing.
+  }
+
+  const now = new Date();
+  const ray = request.headers.get("cf-ray") ?? crypto.randomUUID();
+  const key = `${CSP_REPORT_PREFIX}${now.toISOString().slice(0, 10)}/${ray}.json`;
+  const summary = summarizeReport(parsed);
+
+  console.log(
+    JSON.stringify({
+      kind: "csp-violation",
+      key,
+      directive: summary.directive,
+      blocked: summary.blocked,
+      document: summary.document,
+    })
+  );
+
+  await env.MEDIA.put(
+    key,
+    JSON.stringify(
+      {
+        received_at: now.toISOString(),
+        ray,
+        content_type: request.headers.get("Content-Type"),
+        user_agent: request.headers.get("User-Agent"),
+        summary,
+        report: parsed ?? raw,
+      },
+      null,
+      2
+    ),
+    { httpMetadata: { contentType: "application/json" } }
+  );
+
+  return new Response(null, { status: 204 });
+}
+
 export const defaultHandler = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -325,6 +415,7 @@ export const defaultHandler = {
         builtAt: env.BUILT_AT ?? null,
       });
     }
+    if (url.pathname === REPORT_PATH && request.method === "POST") return handleCspReport(request, env);
     if (url.pathname === "/ops/mcp") return handleOperatorMcp(request, env, ctx);
     if (url.pathname === "/ops/backup" && request.method === "POST") return handleBackup(request, env);
     if (url.pathname === "/authorize" && request.method === "GET") return handleAuthorizeGet(request, env);

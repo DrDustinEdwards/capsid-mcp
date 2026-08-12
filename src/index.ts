@@ -3,6 +3,7 @@ import { createMcpHandler } from "agents/mcp";
 import { isAdminUser } from "./auth";
 import { runBackup } from "./backup";
 import { defaultHandler } from "./github-handler";
+import { withSecurityHeaders } from "./headers";
 import { buildServer, type Env, type Props } from "./server";
 
 const apiHandler = {
@@ -58,7 +59,12 @@ const provider = new OAuthProvider({
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const response = await provider.fetch(request, env, ctx);
-    return withCacheDefault(response, new URL(request.url).pathname);
+    // Both wrappers sit here, at the only point that sees every response: this
+    // handler's own, everything github-handler returns, and everything
+    // workers-oauth-provider generates for /token, /register and .well-known.
+    // Security headers go outside Cache-Control so they are applied to the
+    // rebuilt response rather than to one that is about to be replaced.
+    return withSecurityHeaders(withCacheDefault(response, new URL(request.url).pathname));
   },
   scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
     ctx.waitUntil(runBackup(env));
