@@ -313,7 +313,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
     "write",
     {
       description:
-        "Create or update a document. Snapshots the prior version and writes an audit log entry. mode selects how body is applied: 'replace' (default, full body, needs title and body), 'append' (body is added to the end of the existing document, no title needed, no confirmation needed because nothing is overwritten), or 'patch' (replace an anchored region: needs find and replace_with, and find must occur EXACTLY ONCE or the write is refused). append and patch exist so amending a large document does not mean retranscribing it. Every response carries sha256 and bytes of the resulting body, so a write can be verified without reading the document back. Overwriting with replace or patch needs confirmation: the server elicits it when the client supports elicitation, otherwise pass confirm: true. Optional links: a JSON array of typed outgoing edges [{\"type\":\"references\",\"to_path\":\"decisions.md\",\"to_ns\":\"capsid\"}] (types: governs, references, supersedes, replaces, depends-on; to_ns defaults to this namespace). When provided it replaces this document's outgoing edges; omit it to leave edges untouched; pass [] to clear them. Read edges with backlinks.",
+        "Create or update a document. Snapshots the prior version and writes an audit log entry. mode selects how body is applied: 'replace' (default, full body, needs title and body), 'append' (body is added to the end of the existing document, no title needed, no confirmation needed because nothing is overwritten), 'patch' (replace an anchored region: needs find and replace_with, and find must occur EXACTLY ONCE or the write is refused), or 'meta' (change type, tags, status or title and leave the body untouched; use this to close a task or correct a document's type). append, patch and meta exist so amending a large document does not mean retranscribing it. Every response carries sha256 and bytes of the resulting body, so a write can be verified without reading the document back. Overwriting with replace or patch needs confirmation: the server elicits it when the client supports elicitation, otherwise pass confirm: true. Optional links: a JSON array of typed outgoing edges [{\"type\":\"references\",\"to_path\":\"decisions.md\",\"to_ns\":\"capsid\"}] (types: governs, references, supersedes, replaces, depends-on; to_ns defaults to this namespace). When provided it replaces this document's outgoing edges; omit it to leave edges untouched; pass [] to clear them. Read edges with backlinks.",
       inputSchema: {
         namespace: z.string(),
         path: z.string(),
@@ -324,7 +324,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
         // retranscription this mode exists to remove.
         title: z.string().optional(),
         body: z.string().optional(),
-        mode: z.enum(["replace", "append", "patch"]).optional(),
+        mode: z.enum(["replace", "append", "patch", "meta"]).optional(),
         find: z.string().optional(),
         replace_with: z.string().optional(),
         type: z.string().optional(),
@@ -364,6 +364,9 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       });
       if ("error" in assembled) return fail(`${assembled.error} (${namespace}/${path})`);
       body = assembled.body;
+      if (writeMode === "meta" && title === undefined && type === undefined && tags === undefined && status === undefined) {
+        return fail(`mode 'meta' needs at least one of title, type, tags or status to change (${namespace}/${path}).`);
+      }
 
       // Normalize wide dashes server-side so no client can store an em dash,
       // regardless of whether the Claude Code hook ran. See ./normalize. This
@@ -379,7 +382,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       // more ceremonious than the dangerous one, and callers would go back to
       // full-body rewrites. patch and replace both mutate existing text and are
       // NOT exempt.
-      if (prior && confirm !== true && writeMode !== "append") {
+      if (prior && confirm !== true && writeMode !== "append" && writeMode !== "meta") {
         const verdict = await confirmDestructive(
           server,
           `Overwrite ${namespace}/${path}? The current version will be snapshotted to document_versions first.`

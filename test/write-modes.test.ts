@@ -22,11 +22,35 @@ test("replace needs both title and body", () => {
   });
 });
 
-test("append and patch refuse a document that does not exist", () => {
-  for (const mode of ["append", "patch"] as const) {
-    const r = assembleBody({ mode, exists: false, priorBody: null, body: "x", find: "a", replace_with: "b" });
+test("append, patch and meta refuse a document that does not exist", () => {
+  for (const mode of ["append", "patch", "meta"] as const) {
+    const r = assembleBody({ mode, exists: false, priorBody: null, find: "a", replace_with: "b" });
     assert.match((r as { error: string }).error, /does not exist/);
   }
+});
+
+test("meta leaves the body byte-identical", () => {
+  // The whole point: closing a task or fixing a mistyped document must not cost
+  // a full-body retranscription.
+  const body = "# Doc\n\nFirst section.\n";
+  const r = assembleBody({ exists: true, priorBody: body, mode: "meta" });
+  assert.deepEqual(r, { body });
+});
+
+test("meta refuses body, find and replace_with", () => {
+  assert.match(
+    (assembleBody({ ...existing, mode: "meta", body: "x" }) as { error: string }).error,
+    /does not take body/
+  );
+  assert.match(
+    (assembleBody({ ...existing, mode: "meta", find: "a", replace_with: "b" }) as { error: string }).error,
+    /belong to mode 'patch'/
+  );
+});
+
+test("meta preserves an empty body rather than inventing one", () => {
+  const r = assembleBody({ exists: true, priorBody: null, mode: "meta" });
+  assert.deepEqual(r, { body: "" });
 });
 
 test("append puts exactly one blank line between the old body and the addition", () => {

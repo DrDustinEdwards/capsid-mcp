@@ -13,7 +13,7 @@
 // path: a separate one is how a rule like "always snapshot the prior version"
 // gets skipped for the new case.
 
-export type WriteMode = "replace" | "append" | "patch";
+export type WriteMode = "replace" | "append" | "patch" | "meta";
 
 export interface AssembleInput {
   mode: WriteMode;
@@ -45,6 +45,23 @@ export function assembleBody(input: AssembleInput): AssembleResult {
   }
 
   const current = priorBody ?? "";
+
+  // meta changes type, tags, status or title and leaves the body byte-identical.
+  //
+  // This mode is not a convenience. Without it, marking a task closed (batch-two
+  // item 5) or correcting a mistyped document (item 7) means resupplying the
+  // entire body, which for a 45KB decisions.md is the exact retranscription this
+  // whole item exists to remove. A closure workflow that costs a full rewrite is
+  // a closure workflow nobody uses.
+  if (mode === "meta") {
+    if (body !== undefined) {
+      return { error: "mode 'meta' changes type, tags, status or title only, and does not take body." };
+    }
+    if (find !== undefined || replace_with !== undefined) {
+      return { error: "find and replace_with belong to mode 'patch', not 'meta'." };
+    }
+    return { body: current };
+  }
 
   if (mode === "append") {
     if (body === undefined) {
