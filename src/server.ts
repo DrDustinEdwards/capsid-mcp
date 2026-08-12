@@ -25,6 +25,7 @@ import { sha256Hex } from "./auth";
 import { normalizeDashes } from "./normalize";
 import { parseLinks } from "./links";
 import { validateDocStatus, validateDocType } from "./doc-meta";
+import { AUTHORITATIVE, scanCountClaims } from "./counts";
 import { assembleBody } from "./write-modes";
 
 export interface Env {
@@ -850,6 +851,19 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
           (sum, row) => sum + String((row as { body?: unknown } | null)?.body ?? "").length,
           0
         );
+        // Batch-two item 10: prose counts checked against the artifacts they
+        // describe. Standing docs only; episodics record history and their
+        // numbers were right when written. FLAG, never correct: the claims come
+        // back for a human to judge, and nothing here rewrites a document.
+        const standing = await db
+          .prepare(
+            `SELECT path, type, body FROM documents
+             WHERE namespace = ?1 AND path NOT LIKE 'archive/%'`
+          )
+          .bind(namespace)
+          .all<{ path: string; type: string | null; body: string | null }>();
+        const countClaims = scanCountClaims(standing.results);
+
         return ok({
           mode: "gather",
           namespace,
@@ -858,6 +872,8 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
           unconsolidated: raw.results,
           rules: rules.results,
           dangling_edges: danglingEdges.results,
+          authoritative_counts: AUTHORITATIVE,
+          count_claims: countClaims,
           packet_chars: packetChars,
           ...(packetChars > 150_000
             ? { warning: "large packet: consider consolidating the oldest unconsolidated docs first, in batches, using read on individual paths" }
