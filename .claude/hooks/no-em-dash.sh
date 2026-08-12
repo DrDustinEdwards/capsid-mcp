@@ -24,9 +24,30 @@
 # script stays clean under its own rule and cannot be broken by the source
 # encoding of the -c argument.
 #
-# Only content and new_string are checked, deliberately: old_string must be
-# allowed to contain a dash, otherwise an edit that fixes one can never run.
-# Valid JSON with neither field present is a clean pass, not an error.
+# Three fields are checked: content and new_string (Write and Edit), and command
+# (Bash). old_string is deliberately NOT checked: it must be allowed to contain a
+# dash, otherwise an edit that fixes one can never run. Valid JSON with none of
+# the checked fields present is a clean pass, not an error.
+#
+# BASH WAS ADDED 2026-08-12 (batch-two item 6). It was the third enforcement site
+# and the only one still open. The rule has three sites, not two: the D1 write
+# path normalizes wide dashes server-side, this hook covered Write and Edit, and
+# Bash was matched only by scoped-git-add.sh. So `git commit -m` carrying a wide
+# dash in the message, and any heredoc writing a file, went straight through.
+# Both are squarely in scope of the canon rule, which names commit messages
+# explicitly.
+#
+# The WHOLE command string is checked, with no carve-out for a command that means
+# to search for a dash. Where a shell command genuinely needs the literal
+# character, write it as an ANSI-C quoted escape, a dollar sign followed by the
+# backslash-u form in single quotes, exactly as source code writes \uXXXX under
+# the same rule. A carve-out is what let this rule rot at the other two sites.
+#
+# Still NOT covered, and this is a fourth site rather than a gap in this hook:
+# capsid's own write_repo_file tool passes repo content through verbatim, so a
+# wide dash can reach a repo that way without touching Write, Edit or Bash. That
+# is recorded in capsid-mcp/CLAUDE.md and is how em dashes reached foxhound's
+# docs copies.
 # Notes carried forward from the repo-local copies that had diverged, so this
 # file can stay byte identical everywhere:
 #   Where a repo also runs a server-side normalizer (capsid-mcp's
@@ -64,9 +85,12 @@ try:
 except Exception:
     sys.exit(4)
 ti = d.get("tool_input") or {}
-text = "".join(str(ti.get(k) or "") for k in ("content", "new_string"))
+text = "".join(str(ti.get(k) or "") for k in ("content", "new_string", "command"))
 if "\u2014" in text or "\u2013" in text:
-    print(str(ti.get("file_path") or "this file"))
+    label = ti.get("file_path")
+    if not label:
+        label = "the Bash command" if ti.get("command") else "this file"
+    print(str(label))
     sys.exit(3)
 sys.exit(0)
 ')
@@ -81,6 +105,7 @@ case "$rc" in
       echo "Blocked: an em dash or en dash is present in the content for $result."
       echo "Canon (capsid/conventions.md): no em dashes anywhere, including code, copy, comments, and commit messages."
       echo "Use a comma, a colon, parentheses, or split the sentence. Then retry the write."
+      echo "If this is a Bash command that must carry the literal character (a search, a normalizer), write it as an ANSI-C quoted escape instead: a dollar sign, then the backslash-u form in single quotes."
     } >&2
     exit 2
     ;;
