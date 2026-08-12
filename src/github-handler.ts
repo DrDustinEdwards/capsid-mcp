@@ -366,6 +366,12 @@ async function handleCspReport(request: Request, env: Env): Promise<Response> {
   }
 
   const now = new Date();
+  // NOTE for anyone looking a report up later: the REQUEST's cf-ray has no colo
+  // suffix, while the RESPONSE's cf-ray does. So a report posted from a colo in
+  // Dallas keys as "a29fb43b4ac66c31.json", not "a29fb43b4ac66c31-DFW.json".
+  // Reading the ray off the response and pasting it into an R2 lookup returns
+  // "The specified key does not exist" against an object that is present, which
+  // is exactly what happened while verifying this endpoint on 2026-08-12.
   const ray = request.headers.get("cf-ray") ?? crypto.randomUUID();
   const key = `${CSP_REPORT_PREFIX}${now.toISOString().slice(0, 10)}/${ray}.json`;
   const summary = summarizeReport(parsed);
