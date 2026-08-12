@@ -99,8 +99,18 @@ export function scanCountClaims(docs: ScannableDoc[]): CountClaim[] {
     // implies one is stale by construction. "all seven" is called out by name
     // because it is the exact phrase batch-two item 8 was written with, and it
     // is now wrong: six are enforced and the seventh is on trial.
+    //
+    // SCOPED TO HEADER CONTEXT, and this is not fussiness. Measured across the
+    // live corpus 2026-08-12: "all seven" appears in 25 documents and almost
+    // none are about headers. Seven ROWS files, seven manifest fields, seven
+    // migrations, seven width probes. An unscoped match would have flagged all
+    // of them, and a lint that cries wolf 24 times out of 25 is a lint nobody
+    // reads. Only a match whose neighbourhood also talks about headers counts.
+    const HEADER_CONTEXT = /header|security-policy|\bCSP\b|\bHSTS\b|nosniff|Referrer-Policy|X-Frame-Options|Permissions-Policy|COOP/i;
     const sevenForm = /all seven\b[^.\n]*/gi;
     while ((m = sevenForm.exec(body)) !== null) {
+      const neighbourhood = body.slice(Math.max(0, m.index - 200), Math.min(body.length, m.index + m[0].length + 200));
+      if (!HEADER_CONTEXT.test(neighbourhood)) continue;
       claims.push({
         path: doc.path,
         type,

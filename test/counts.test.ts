@@ -85,13 +85,29 @@ test("the 'N of M gates' form is judged on the TOTAL, not the numerator", () => 
   assert.equal(stale[0].authoritative, "8");
 });
 
-test("'all seven' is flagged wherever it appears in a standing doc", () => {
+test("'all seven' is flagged when it is about headers", () => {
   const claims = scanCountClaims([
     { path: "decisions.md", type: "decision", body: "Propose HTML gets all seven, JSON gets nosniff." },
   ]);
   assert.equal(claims.length, 1);
   assert.equal(claims[0].noun, "security headers");
   assert.match(claims[0].authoritative, /6 enforced plus 1 Report-Only/);
+});
+
+test("'all seven' about anything else is NOT flagged", () => {
+  // Measured against the live corpus 2026-08-12: "all seven" appears in 25
+  // documents and almost none are about headers. Seven ROWS files, seven
+  // manifest fields, seven migrations, seven width probes. An unscoped match
+  // flagged every one of them, which is a lint nobody would read twice.
+  const decoys = [
+    "PARITY-ROWS split seven ways. All seven written BEFORE the index cited them.",
+    "buildNotificationSettingsUpdate exists with all seven fields and a passing unit test.",
+    "All seven migrations were applied and the schema is reproduced.",
+    "Zero pixel change on all seven, the classes moved unaltered.",
+  ];
+  for (const body of decoys) {
+    assert.deepEqual(scanCountClaims([{ path: "parity/notes.md", type: "reference", body }]), [], `false positive on: ${body}`);
+  }
 });
 
 test("the scan never returns a rewritten body, only a flag", () => {
