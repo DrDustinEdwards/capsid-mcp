@@ -155,3 +155,23 @@ jobs:
           VERIFY_POLL_ATTEMPTS: "40"
         run: npm run verify:live
 
+      # Gate 2 registers a fresh client every run, and it must: reusing one would
+      # take the approved-client fast path that hid the 26-day outage, and the
+      # run would prove nothing. So the registrations are cleaned up here instead,
+      # AFTER the gate has finished with its client. 44 had accumulated by
+      # 2026-08-12 and nothing was removing them.
+      #
+      # Runs even when verify:live failed (always()), because a failed gate still
+      # registered a client and leaving it behind would make the leak worse on
+      # exactly the runs that get retried. It does not mask a failure: this step
+      # cannot turn the job green, and its own failure still fails the job.
+      #
+      # No npm ci needed here either; the script uses global fetch against the KV
+      # REST API precisely so this job stays install-free.
+      - name: Reap probe client registrations
+        if: always()
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: node scripts/reap-probe-clients.mjs --apply
+
