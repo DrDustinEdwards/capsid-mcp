@@ -25,7 +25,7 @@ import { sha256Hex } from "./auth";
 import { normalizeDashes } from "./normalize";
 import { parseLinks } from "./links";
 import { validateDocStatus, validateDocType } from "./doc-meta";
-import { AUTHORITATIVE, scanCountClaims } from "./counts";
+import { authoritativeFor, scanCountClaims } from "./counts";
 import { assembleBody } from "./write-modes";
 
 export interface Env {
@@ -1188,7 +1188,9 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
           )
           .bind(namespace)
           .all<{ path: string; type: string | null; body: string | null }>();
-        const countClaims = scanCountClaims(standing.results);
+        // Namespace-scoped: a namespace with no authoritative numbers of its own
+        // gets no claims, rather than being measured against capsid's.
+        const countClaims = scanCountClaims(standing.results, namespace);
 
         return ok({
           mode: "gather",
@@ -1198,7 +1200,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
           unconsolidated: raw.results,
           rules: rules.results,
           dangling_edges: danglingEdges.results,
-          authoritative_counts: AUTHORITATIVE,
+          authoritative_counts: authoritativeFor(namespace),
           count_claims: countClaims,
           packet_chars: packetChars,
           ...(packetChars > 150_000

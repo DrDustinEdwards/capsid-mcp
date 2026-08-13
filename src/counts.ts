@@ -26,12 +26,44 @@
 //
 // liveGates moved 8 to 9 the same day: /health gained a D1 and FTS probe, so a
 // deploy that unbinds the store now goes red.
-export const AUTHORITATIVE = {
-  tools: 24,
-  liveGates: 9,
-  htmlEnforcedHeaders: 6,
-  htmlReportOnlyHeaders: 1,
+// KEYED BY NAMESPACE, and that is the whole point rather than a formality. These
+// numbers are derived from CAPSID'S artifacts: registerTool calls in src/server.ts,
+// record() labels in scripts/verify-live.mjs, the header sets in src/headers.ts. They
+// describe capsid and nothing else.
+//
+// Until 2026-08-14 there was one global object and the scan ran over every namespace,
+// so dustinedwards's own 24-gate suite was compared against capsid's 9 live gates and
+// the operator wrapper's 5 tools against capsid's 24. Measured that day: 16 claims
+// flagged portfolio-wide and 14 of them were this. A lint that is wrong 14 times out
+// of 16 is a lint nobody reads, which is the same failure the "all seven" scoping fix
+// addressed two days earlier.
+//
+// A namespace with no entry here gets NO count claims. That is correct rather than a
+// gap: another project's counts are guarded by that project's own gates, against its
+// own artifacts, and this module cannot see them.
+export interface AuthoritativeCounts {
+  tools: number;
+  liveGates: number;
+  htmlEnforcedHeaders: number;
+  htmlReportOnlyHeaders: number;
+}
+
+export const AUTHORITATIVE: Record<string, AuthoritativeCounts> = {
+  capsid: {
+    tools: 24,
+    liveGates: 9,
+    htmlEnforcedHeaders: 6,
+    htmlReportOnlyHeaders: 1,
+  },
 };
+
+export function authoritativeFor(namespace: string): AuthoritativeCounts | null {
+  return AUTHORITATIVE[namespace] ?? null;
+}
+
+// A four-digit year is never a count. `tool surface[^.\n]*?\b(\d+)\b` matched the 2026
+// in "the 2026-07-28 migration" and reported it as a claim that capsid has 2026 tools.
+const YEAR = /^(?:19|20)\d{2}$/;
 
 // Episodics are EXEMPT, deliberately. A session doc saying "6 of 6 gates passed"
 // is an accurate record of a run that happened, not a stale claim, and flagging
@@ -61,8 +93,11 @@ function quoteAround(body: string, index: number, length: number): string {
   return `${start > 0 ? "..." : ""}${body.slice(start, end).replace(/\s+/g, " ")}${end < body.length ? "..." : ""}`;
 }
 
-export function scanCountClaims(docs: ScannableDoc[]): CountClaim[] {
+export function scanCountClaims(docs: ScannableDoc[], namespace: string): CountClaim[] {
   const claims: CountClaim[] = [];
+  const authoritative = authoritativeFor(namespace);
+  // No authoritative numbers for this namespace means no claims. See AUTHORITATIVE.
+  if (!authoritative) return claims;
 
   for (const doc of docs) {
     const body = doc.body ?? "";
@@ -70,24 +105,42 @@ export function scanCountClaims(docs: ScannableDoc[]): CountClaim[] {
     if (!LINTED_TYPES.has(type)) continue;
     if (doc.path.startsWith("archive/")) continue;
 
-    const flag = (noun: string, match: RegExpExecArray, states: string, authoritative: string, note?: string) => {
-      if (states === authoritative) return;
-      claims.push({
+    // AN APPEND-ONLY LOG RECORDS HISTORY, and history is not staleness.
+    //
+    // capsid/decisions.md says the tool surface went "16 to 19 to 22", which was true
+    // when each was written and is the whole point of an append-only ruling log. The
+    // scan flagged all three as stale claims that the surface is 16, 19 and 22.
+    //
+    // So for a `decision` document, only the LAST claim of each noun is checked: the
+    // most recent statement is the one asserting current state, and everything above
+    // it is the record of how it got there. Any other type states current fact
+    // throughout, so every match is checked.
+    const historyOnly = type === "decision";
+    const pending = new Map<string, CountClaim[]>();
+
+    const flag = (noun: string, match: RegExpExecArray, states: string, auth: string, note?: string) => {
+      const claim: CountClaim = {
         path: doc.path,
         type,
         noun,
         quote: quoteAround(body, match.index, match[0].length),
         states,
-        authoritative,
+        authoritative: auth,
         ...(note ? { note } : {}),
-      });
+      };
+      // Collected even when it agrees, because a later agreeing claim is what makes
+      // an earlier disagreeing one history rather than an error.
+      const list = pending.get(noun) ?? [];
+      list.push(claim);
+      pending.set(noun, list);
     };
 
     // "22 tools", "tool surface at 22", "surface is 22"
     for (const re of [/(\d+)\s+tools\b/gi, /tool surface[^.\n]*?\b(\d+)\b/gi]) {
       let m: RegExpExecArray | null;
       while ((m = re.exec(body)) !== null) {
-        flag("tools", m, m[1], String(AUTHORITATIVE.tools));
+        if (YEAR.test(m[1])) continue;
+        flag("tools", m, m[1], String(authoritative.tools));
       }
     }
 
@@ -96,11 +149,13 @@ export function scanCountClaims(docs: ScannableDoc[]): CountClaim[] {
     let m: RegExpExecArray | null;
     const ofForm = /(\d+)\s*(?:of|\/)\s*(\d+)\s+gates?\b/gi;
     while ((m = ofForm.exec(body)) !== null) {
-      flag("live gates", m, m[2], String(AUTHORITATIVE.liveGates), "the total, not the number that passed");
+      if (YEAR.test(m[2])) continue;
+      flag("live gates", m, m[2], String(authoritative.liveGates), "the total, not the number that passed");
     }
     const plainForm = /\b(\d+)\s+(?:live\s+)?gates\b(?!\s*(?:passed|failed))/gi;
     while ((m = plainForm.exec(body)) !== null) {
-      flag("live gates", m, m[1], String(AUTHORITATIVE.liveGates));
+      if (YEAR.test(m[1])) continue;
+      flag("live gates", m, m[1], String(authoritative.liveGates));
     }
 
     // The header count is no longer a single number, so any phrasing that
@@ -119,15 +174,22 @@ export function scanCountClaims(docs: ScannableDoc[]): CountClaim[] {
     while ((m = sevenForm.exec(body)) !== null) {
       const neighbourhood = body.slice(Math.max(0, m.index - 200), Math.min(body.length, m.index + m[0].length + 200));
       if (!HEADER_CONTEXT.test(neighbourhood)) continue;
-      claims.push({
-        path: doc.path,
-        type,
-        noun: "security headers",
-        quote: quoteAround(body, m.index, m[0].length),
-        states: "all seven",
-        authoritative: `${AUTHORITATIVE.htmlEnforcedHeaders} enforced plus ${AUTHORITATIVE.htmlReportOnlyHeaders} Report-Only`,
-        note: "COOP ships Report-Only pending a demonstrated case and a ruling, so 'all seven enforced' overstates what is live",
-      });
+      flag(
+        "security headers",
+        m,
+        "all seven",
+        `${authoritative.htmlEnforcedHeaders} enforced plus ${authoritative.htmlReportOnlyHeaders} Report-Only`,
+        "COOP ships Report-Only pending a demonstrated case and a ruling, so 'all seven enforced' overstates what is live"
+      );
+    }
+
+    // Resolve what was collected. For an append-only log only the newest claim per
+    // noun is a statement about now; for everything else, every claim is.
+    for (const list of pending.values()) {
+      const checked = historyOnly ? list.slice(-1) : list;
+      for (const claim of checked) {
+        if (claim.states !== claim.authoritative) claims.push(claim);
+      }
     }
   }
 
