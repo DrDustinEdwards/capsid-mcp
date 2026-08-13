@@ -27,12 +27,13 @@ interface Recorded {
 interface FakeOptions {
   namespaceExists?: boolean;
   body?: string;
+  updatedAt?: string;
 }
 
 function fakeDb(opts: FakeOptions = {}) {
-  const { namespaceExists = true, body: priorBody = "prior body" } = opts;
+  const { namespaceExists = true, body: priorBody = "prior body", updatedAt = "2020-01-01 00:00:00" } = opts;
   const recorded: Recorded[] = [];
-  const doc = { id: 7, title: "Prior title", body: priorBody, type: "note", status: "published", tags: "a,b" };
+  const doc = { id: 7, title: "Prior title", body: priorBody, type: "note", status: "published", tags: "a,b", updated_at: updatedAt };
 
   const answer = (sql: string) => {
     if (/FROM namespaces/i.test(sql)) return namespaceExists ? { namespace: "capsid" } : null;
@@ -223,4 +224,69 @@ test("mode meta leaves the body byte-identical, wide dash and all", async () => 
   // carry type, status or tags.
   const audit = recorded.find((r) => /INSERT INTO audit_log/i.test(r.sql));
   assert.match(JSON.stringify(audit?.params), /prior_meta/);
+});
+
+// PHASE 0, 2026-08-14: the overwrite warning. Motivating incident is
+// dustinedwards/core.md, where one session's 2,253-byte consolidation was replaced by
+// another session 44 minutes later from a stale read, with a clean response either
+// side and the loss found days after the fact (snapshot document_versions 1142).
+
+const recently = (minutesAgo: number) =>
+  new Date(Date.now() - minutesAgo * 60_000).toISOString().slice(0, 19).replace("T", " ");
+
+async function writeAndRead(opts: Record<string, unknown>, args: Record<string, unknown> = {}) {
+  const { client, close } = await connect(true, opts);
+  const result = (await client.callTool({
+    name: "write",
+    arguments: { namespace: "capsid", path: "doc.md", title: "New", body: "new body", confirm: true, ...args },
+  })) as { isError?: boolean; content: Array<{ text: string }> };
+  await close();
+  return JSON.parse(result.content[0].text) as { concurrency_warning?: string };
+}
+
+test("overwriting a document touched in the last hour WARNS", async () => {
+  const out = await writeAndRead({ updatedAt: recently(10) });
+  assert.ok(out.concurrency_warning, "no warning on a document written 10 minutes ago");
+  assert.match(out.concurrency_warning, /possible concurrent edit/);
+  assert.match(out.concurrency_warning, /pass if_match/i);
+  // The warning names WHEN, because "recently" is not actionable and a timestamp is.
+  assert.match(out.concurrency_warning, /\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/);
+});
+
+test("overwriting an older document does NOT warn", async () => {
+  // The other side. Without this the warning could fire on every write and the test
+  // above would still pass, which is a warning nobody reads within a week.
+  assert.equal((await writeAndRead({ updatedAt: recently(61) })).concurrency_warning, undefined);
+  assert.equal((await writeAndRead({ updatedAt: "2020-01-01 00:00:00" })).concurrency_warning, undefined);
+});
+
+test("a guarded write never warns, however recent", async () => {
+  const { createHash } = await import("node:crypto");
+  const sha = createHash("sha256").update("prior body").digest("hex");
+  const out = await writeAndRead({ updatedAt: recently(1) }, { if_match: sha });
+  assert.equal(out.concurrency_warning, undefined, "if_match already guards this write; warning is noise");
+});
+
+test("the warning NEVER refuses the write", async () => {
+  const { client, recorded, close } = await connect(true, { updatedAt: recently(5) });
+  const result = (await client.callTool({
+    name: "write",
+    arguments: { namespace: "capsid", path: "doc.md", title: "New", body: "new body", confirm: true },
+  })) as { isError?: boolean };
+  await close();
+  assert.ok(!result.isError, "the warning turned into a refusal");
+  assert.match(sqlFor(recorded), /INSERT INTO documents/, "the write did not land");
+});
+
+test("a UTC timestamp is not read as local time", async () => {
+  // D1 stores datetime('now') in UTC with no zone marker. Parsing it as local time
+  // would silence the warning west of UTC and fire it constantly east of it, and the
+  // bug would be invisible on a machine sitting on UTC.
+  const { concurrentEditWarning } = await import("../src/server.ts");
+  const now = Date.parse("2026-08-14T12:00:00Z");
+  assert.ok(concurrentEditWarning("2026-08-14 11:30:00", now), "30 minutes ago should warn");
+  assert.equal(concurrentEditWarning("2026-08-14 10:00:00", now), null, "2 hours ago should not");
+  // A future timestamp is not a concurrent edit, it is a clock problem.
+  assert.equal(concurrentEditWarning("2026-08-14 13:00:00", now), null);
+  assert.equal(concurrentEditWarning(null, now), null);
 });

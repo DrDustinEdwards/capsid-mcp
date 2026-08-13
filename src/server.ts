@@ -190,6 +190,43 @@ async function requireRegisteredNamespace(db: D1Database, namespace: string): Pr
   );
 }
 
+// A write that overwrites a document touched in the last hour, WITHOUT if_match, gets
+// a warning on the response. It is never refused.
+//
+// MOTIVATING INCIDENT, 2026-08-14: dustinedwards/core.md. One session patched it at
+// 13:29 and a second session rewrote it at 14:13 from a body it had read earlier,
+// dropping 2,253 bytes of consolidation work. The prior body survives only because
+// every overwrite snapshots (document_versions 1142). Nothing anywhere said anything
+// was wrong: the write succeeded, the response was clean, and the loss was found days
+// later by someone re-reading the document for an unrelated reason.
+//
+// if_match already prevents this, and it could not have prevented THAT: it is opt-in,
+// so it protects only the caller who passes it, and the overwriting client's cached
+// tool schema predated the parameter entirely. A warning reaches the client that did
+// not know to ask.
+//
+// WARN, NEVER REFUSE, and the asymmetry is deliberate. Refusing would break every
+// legitimate rapid edit, and the common case for two writes inside an hour is one
+// agent working. The warning costs a caller nothing and tells the one who is about to
+// lose someone else's work that there is someone else.
+const CONCURRENT_EDIT_WINDOW_MS = 60 * 60 * 1000;
+
+export function concurrentEditWarning(updatedAt: string | null | undefined, now: number): string | null {
+  if (!updatedAt) return null;
+  // D1 stores datetime('now') as "YYYY-MM-DD HH:MM:SS" in UTC, which Date.parse reads
+  // as LOCAL time unless the zone is made explicit. Getting that wrong would silence
+  // the warning on a machine behind UTC and fire it constantly on one ahead.
+  const parsed = Date.parse(`${updatedAt.replace(" ", "T")}Z`);
+  if (Number.isNaN(parsed)) return null;
+  const age = now - parsed;
+  if (age < 0 || age > CONCURRENT_EDIT_WINDOW_MS) return null;
+  return (
+    `possible concurrent edit: this document was last written at ${updatedAt} UTC, within the last hour, and no if_match was passed. ` +
+    `The write went through and the prior body was snapshotted to document_versions, so nothing is lost, but if another session is working on this document your write may have just replaced its changes. ` +
+    `Pass if_match (the sha256 this response returns) on the next write to make that a refusal instead of a warning.`
+  );
+}
+
 type ConfirmVerdict = "accepted" | "declined" | "unsupported";
 
 // Asks the connected client to confirm a destructive action via MCP elicitation.
@@ -429,9 +466,9 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       if (nsError) return fail(nsError);
 
       const prior = await db
-        .prepare("SELECT id, title, body, type, status, tags FROM documents WHERE namespace = ?1 AND path = ?2")
+        .prepare("SELECT id, title, body, type, status, tags, updated_at FROM documents WHERE namespace = ?1 AND path = ?2")
         .bind(namespace, path)
-        .first<{ id: number; title: string | null; body: string | null; type: string | null; status: string | null; tags: string | null }>();
+        .first<{ id: number; title: string | null; body: string | null; type: string | null; status: string | null; tags: string | null; updated_at: string }>();
 
       // OPTIMISTIC CONCURRENCY. if_match is the sha256 of the body the caller
       // believes is stored, which is exactly the value every write already
@@ -643,6 +680,13 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
           ? { bytes_before: new TextEncoder().encode(prior.body ?? "").length }
           : {}),
         snapshotted: Boolean(prior),
+        // Only when the caller did not already guard the write.
+        ...(prior && if_match === undefined
+          ? (() => {
+              const warning = concurrentEditWarning(prior.updated_at, Date.now());
+              return warning ? { concurrency_warning: warning } : {};
+            })()
+          : {}),
         ...(parsedLinks && "edges" in parsedLinks ? { links: parsedLinks.edges.length } : {}),
         ...(danglingTargets.length
           ? {
