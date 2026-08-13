@@ -319,8 +319,17 @@ export async function searchCode(
   }
   const { owner, repo, full } = await resolveRepo(env, namespace, opts.repoSelector);
   const ref = opts.ref || (await getDefaultBranch(env, owner, repo));
-  const maxResults = opts.maxResults && opts.maxResults > 0 ? opts.maxResults : 20;
-  const maxFiles = opts.maxFiles && opts.maxFiles > 0 ? opts.maxFiles : 200;
+  // Capped server-side, the same shape ci_status already uses for its limit. The
+  // schema only said "positive", so a caller could pass max_files: 100000 and the
+  // walk would fetch one blob per candidate file: a single call that burns the App
+  // installation's hourly quota and leaves every later search_code, and every
+  // other repo tool, answering errors. The 5,000-blob tree refusal does not cover
+  // it, because the cost is per file FETCHED, not per candidate listed. Over the
+  // cap it clamps rather than refusing, because the result already reports
+  // truncation honestly and carries a next_start to resume from.
+  const MAX_SCAN_CAP = 200;
+  const maxResults = Math.min(opts.maxResults && opts.maxResults > 0 ? opts.maxResults : 20, MAX_SCAN_CAP);
+  const maxFiles = Math.min(opts.maxFiles && opts.maxFiles > 0 ? opts.maxFiles : 200, MAX_SCAN_CAP);
   const start = opts.start && opts.start > 0 ? Math.floor(opts.start) : 0;
   const pathPrefix = (opts.pathPrefix ?? "").replace(/^\/+/, "");
 
@@ -689,7 +698,21 @@ export async function managePr(
 // bounded log tail, so a green-or-not verdict is reachable from claude.ai without
 // opening the Actions tab. Needs the App's Actions: Read permission; a 403 is
 // surfaced as a clear, actionable error rather than an opaque failure.
-export async function ciStatus(env: Env, namespace: string, repoSelector?: string, opts: { limit?: number } = {}) {
+//
+// THE LOG TAIL IS GATED OFF READ-ONLY KEYS. Ruled 2026-08-13. Run metadata (name,
+// sha, conclusion) is inert; raw job logs are not the same class of data. A build
+// log carries whatever the workflow echoed: resolved binding ids, account ids,
+// wrangler output, and the contents of any variable a step printed by accident. An
+// `ro:` key exists so an agent can read the knowledge base, and handing it the
+// deploy logs of every repo in the portfolio is a wider grant than that. The
+// runs list stays open to ro: keys, because the green-or-not verdict is the part
+// they need.
+export async function ciStatus(
+  env: Env,
+  namespace: string,
+  repoSelector?: string,
+  opts: { limit?: number; logTail?: boolean } = {}
+) {
   const { owner, repo, full } = await resolveRepo(env, namespace, repoSelector);
   const limit = opts.limit && opts.limit > 0 ? Math.min(opts.limit, 20) : 10;
   const resp = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/actions/runs?per_page=${limit}`);
@@ -743,7 +766,7 @@ export async function ciStatus(env: Env, namespace: string, repoSelector?: strin
         }));
       let logTail: string | undefined;
       const firstFailedJob = jobsData.jobs.find((j) => j.conclusion === "failure");
-      if (firstFailedJob) {
+      if (opts.logTail && firstFailedJob) {
         const logResp = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/actions/jobs/${firstFailedJob.id}/logs`);
         if (logResp.ok) logTail = (await logResp.text()).slice(-2000);
       }
@@ -752,7 +775,11 @@ export async function ciStatus(env: Env, namespace: string, repoSelector?: strin
         head_sha: failed.head_sha?.slice(0, 7),
         url: failed.html_url,
         jobs: failingJobs,
-        ...(logTail ? { log_tail: logTail } : {}),
+        ...(logTail
+          ? { log_tail: logTail }
+          : opts.logTail
+            ? {}
+            : { log_tail_withheld: "read-only key: run metadata only. A write-grant key returns the failing job's log tail." }),
       };
     }
   }
