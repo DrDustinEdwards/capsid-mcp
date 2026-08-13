@@ -89,7 +89,7 @@ test("the 'N of M gates' form is judged on the TOTAL, not the numerator", () => 
 
 test("'all seven' is flagged when it is about headers", () => {
   const claims = scanCountClaims([
-    { path: "decisions.md", type: "decision", body: "Propose HTML gets all seven, JSON gets nosniff." },
+    { path: "security-headers.md", type: "concept", body: "Propose HTML gets all seven, JSON gets nosniff." },
   ], "capsid");
   assert.equal(claims.length, 1);
   assert.equal(claims[0].noun, "security headers");
@@ -141,27 +141,21 @@ test("a namespace with no authoritative numbers gets NO claims", () => {
   assert.ok(scanCountClaims(docs, "capsid").length > 0, "capsid's own numbers must still be checked");
 });
 
-test("an append-only decisions log records history, and history is not staleness", () => {
-  // capsid/decisions.md says the surface went 16 to 19 to 22 to 24. Every figure was
-  // true when written; only the newest asserts what is true now.
+test("a decisions log is EXEMPT outright: it is history by construction", () => {
+  // Ruled 2026-08-15. Three finer carve-outs each revealed another shape behind them,
+  // so the family is retired: a ruling log states what was true on a date, never what
+  // is true now, and the lint has no jurisdiction there.
   const log = {
     path: "decisions.md",
     type: "decision",
     body: [
       "2026-07-17: the surface went from 16 tools to 19 tools.",
-      "2026-07-18: backlinks, brief and ci_status take it to 22 tools.",
-      "2026-08-13: history and restore take it to 24 tools.",
+      "2026-07-18: Expansion layer, tool surface 19 to 22.",
+      "core.md said 19 tools when server.ts registers 22.",
+      "The server exposes 11 tools.",
     ].join("\n\n"),
   };
-  assert.deepEqual(scanCountClaims([log], "capsid"), [], "historical counts in an append-only log were flagged as stale");
-
-  // The newest claim IS checked, so a decisions log that has actually gone stale
-  // still fires. Without this the exemption would be a blanket amnesty.
-  const stale = { ...log, body: log.body.replace("to 24 tools.", "to 23 tools.") };
-  const claims = scanCountClaims([stale], "capsid");
-  assert.equal(claims.length, 1);
-  assert.equal(claims[0].states, "23");
-  assert.equal(claims[0].authoritative, "24");
+  assert.deepEqual(scanCountClaims([log], "capsid"), [], "a decision doc produced claims");
 });
 
 test("every claim is checked in a document that is not an append-only log", () => {
@@ -209,14 +203,13 @@ test("a transition states the RESULTING count, not the pre-state", () => {
   assert.deepEqual(scanCountClaims([{ ...doc, body: "the surface went 22 to 24 tools" }], "capsid"), []);
 });
 
-test("a transition inside an append-only log is history, not a claim", () => {
-  // A ruling log's genre IS the record of changes. capsid/decisions.md's newest tools
-  // mention is a dated heading saying the surface went 19 to 22 in July.
-  const log = { path: "decisions.md", type: "decision", body: "## 2026-07-18: Expansion layer, tool surface 19 to 22 (links, brief, ci_status)" };
-  assert.deepEqual(scanCountClaims([log], "capsid"), []);
-  // A flat assertion of a stale total in the same log still fires.
-  const stale = { path: "decisions.md", type: "decision", body: "The server exposes 19 tools." };
-  assert.equal(scanCountClaims([stale], "capsid").length, 1);
+test("a transition in a LIVE-STATE doc reports the resulting count", () => {
+  // The decisions-log half of this moved to the outright exemption above. What
+  // remains is the rule for documents that do assert current state.
+  const doc = { path: "core.md", type: "core", body: "Expansion layer, tool surface 19 to 22." };
+  const claims = scanCountClaims([doc], "capsid");
+  assert.equal(claims.length, 1);
+  assert.equal(claims[0].states, "22");
 });
 
 test("a subset count is not a total", () => {

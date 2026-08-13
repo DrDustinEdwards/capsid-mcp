@@ -69,7 +69,23 @@ const YEAR = /^(?:19|20)\d{2}$/;
 // is an accurate record of a run that happened, not a stale claim, and flagging
 // it would bury the real findings in noise. Only documents that make STANDING
 // claims are linted.
-const LINTED_TYPES = new Set(["core", "concept", "semantic", "procedural", "decision", "spec", "reference", "protocol"]);
+//
+// `decision` IS EXEMPT, ruled 2026-08-15, and this retires a whole family of false
+// positives rather than patching one more. An append-only ruling log is HISTORY BY
+// CONSTRUCTION: every entry is dated, every entry records what was true when it was
+// written, and none of them asserts current state. Three separate patterns tried to
+// carve the exemption finer and each one revealed another shape behind it:
+//
+//   1. "check only the latest claim per noun" left the latest dated entry flagged;
+//   2. exempting transitions ("19 to 22") unmasked a quoted past state behind it
+//      ("core.md said 19 tools when server.ts registers 22"), which had been hidden
+//      by rule 1 rather than handled by it;
+//   3. and there is no reason to believe a fourth shape does not exist.
+//
+// The lint's jurisdiction is documents that assert what is true NOW: core, concept,
+// reference and their siblings. A ruling log is not one of those, and linting it was a
+// category error that produced only noise.
+const LINTED_TYPES = new Set(["core", "concept", "semantic", "procedural", "spec", "reference", "protocol"]);
 
 export interface CountClaim {
   path: string;
@@ -105,21 +121,9 @@ export function scanCountClaims(docs: ScannableDoc[], namespace: string): CountC
     if (!LINTED_TYPES.has(type)) continue;
     if (doc.path.startsWith("archive/")) continue;
 
-    // AN APPEND-ONLY LOG RECORDS HISTORY, and history is not staleness.
-    //
-    // capsid/decisions.md says the tool surface went "16 to 19 to 22", which was true
-    // when each was written and is the whole point of an append-only ruling log. The
-    // scan flagged all three as stale claims that the surface is 16, 19 and 22.
-    //
-    // So for a `decision` document, only the LAST claim of each noun is checked: the
-    // most recent statement is the one asserting current state, and everything above
-    // it is the record of how it got there. Any other type states current fact
-    // throughout, so every match is checked.
-    const historyOnly = type === "decision";
-    const pending = new Map<string, CountClaim[]>();
-
     const flag = (noun: string, match: RegExpExecArray, states: string, auth: string, note?: string) => {
-      const claim: CountClaim = {
+      if (states === auth) return;
+      claims.push({
         path: doc.path,
         type,
         noun,
@@ -127,12 +131,7 @@ export function scanCountClaims(docs: ScannableDoc[], namespace: string): CountC
         states,
         authoritative: auth,
         ...(note ? { note } : {}),
-      };
-      // Collected even when it agrees, because a later agreeing claim is what makes
-      // an earlier disagreeing one history rather than an error.
-      const list = pending.get(noun) ?? [];
-      list.push(claim);
-      pending.set(noun, list);
+      });
     };
 
     // Tool-count mentions, CLASSIFIED before they are compared. A bare number next to
@@ -172,7 +171,6 @@ export function scanCountClaims(docs: ScannableDoc[], namespace: string): CountC
       let m: RegExpExecArray | null;
       while ((m = re.exec(body)) !== null) {
         consume(m);
-        if (historyOnly) continue;
         const resulting = m[2];
         if (!YEAR.test(resulting)) flag("tools", m, resulting, String(authoritative.tools));
       }
@@ -232,14 +230,6 @@ export function scanCountClaims(docs: ScannableDoc[], namespace: string): CountC
       );
     }
 
-    // Resolve what was collected. For an append-only log only the newest claim per
-    // noun is a statement about now; for everything else, every claim is.
-    for (const list of pending.values()) {
-      const checked = historyOnly ? list.slice(-1) : list;
-      for (const claim of checked) {
-        if (claim.states !== claim.authoritative) claims.push(claim);
-      }
-    }
   }
 
   return claims;
