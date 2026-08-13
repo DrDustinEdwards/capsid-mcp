@@ -220,7 +220,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
     "brief",
     {
       description:
-        "One-call session start for a namespace. Returns capsid/conventions.md, capsid/repo-structure.md, the namespace core.md, its open (non-archived) task docs, the 3 most recent episodics, and the typed edges on core.md, each with updated_at so staleness shows. Read-only assembly, no reasoning. Size-bounded near 40KB; if trimmed, the `trimmed` field lists what was dropped to metadata. Doing the start-ritual reads by hand stays a valid fallback.",
+        "One-call session start for a namespace. Returns capsid/conventions.md, capsid/repo-structure.md, the namespace core.md, its open task docs (non-archived and not status closed), the 3 most recent episodics, and the typed edges on core.md, each with updated_at so staleness shows. Read-only assembly, no reasoning. Size-bounded near 40KB; if trimmed, the `trimmed` field lists what was dropped to metadata. Doing the start-ritual reads by hand stays a valid fallback.",
       inputSchema: { namespace: z.string() },
     },
     async ({ namespace }) => {
@@ -243,7 +243,19 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       const openTasks = (
         await db
           .prepare(
-            "SELECT namespace, path, title, type, body, updated_at FROM documents WHERE namespace = ?1 AND type = 'task' AND path NOT LIKE 'archive/%' ORDER BY updated_at DESC"
+            // The closure predicate below is the ONLY status filter in this
+            // query, and it is not a return of the bug 94b8528 fixed. That one
+            // filtered on status = published and hid 21 of 32 task docs whose
+            // status happened to be something else. This excludes exactly one
+            // value, set deliberately to mean finished, and a doc with any
+            // other status still appears. SQL note: status is NOT NULL, so the
+            // comparison cannot swallow a row via NULL semantics.
+            //
+            // test/doc-meta.test.ts asserts this predicate appears exactly ONCE
+            // in this file, so the lint loop can never grow one. A closed task
+            // is finished, not forgotten, and only the archive/ prefix takes a
+            // document out of memory.
+            "SELECT namespace, path, title, type, body, updated_at FROM documents WHERE namespace = ?1 AND type = 'task' AND status != 'closed' AND path NOT LIKE 'archive/%' ORDER BY updated_at DESC"
           )
           .bind(namespace)
           .all<{ namespace: string; path: string; title: string | null; type: string | null; body: string | null; updated_at: string }>()

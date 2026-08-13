@@ -15,10 +15,21 @@ export const DOC_TYPES = new Set([
   "post", "episodic", "procedural", "source", "prompt", "reference",
 ]);
 
-// The five statuses in live use. Status records a document's editorial state. It
+// The six statuses in live use. Status records a document's editorial state. It
 // does NOT decide whether the lint loop can see the document.
+//
+// "closed" was added 2026-08-12 (batch-two item 5). Task closure had been
+// unrepresentable: nothing distinguished a task still to do from one finished,
+// so closure was written into bodies as prose and brief returned every
+// non-archived task doc forever. Ruled a status value rather than a new column,
+// and it needed NO migration: this column is TEXT with no CHECK constraint, so
+// the vocabulary is exactly this set and nothing else.
+//
+// Closure is set GOING FORWARD. Existing documents keep the status they have,
+// deliberately: backfilling would mean inventing an editorial judgement about
+// work nobody reviewed.
 export const DOC_STATUSES = new Set([
-  "draft", "ready", "active", "published", "superseded",
+  "draft", "ready", "active", "published", "superseded", "closed",
 ]);
 
 export function validateDocType(type: string): string | null {
