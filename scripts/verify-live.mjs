@@ -24,6 +24,8 @@
 //      read returned the previous CSP and would have produced a false pass.
 //      Cloudflare propagation is not instant. Gate 4 polls to an expected value.
 
+import { writeFileSync } from "node:fs";
+
 const ORIGIN = (process.argv[2] ?? "https://capsid.dustin-edwards.workers.dev").replace(/\/$/, "");
 // Overridable because CI needs a longer budget than an interactive run: the sha
 // gate there is waiting on a rollout that has only just been triggered, and a
@@ -88,7 +90,43 @@ async function gateRegister() {
   const clientId = data.client_id;
   const passed = resp.ok && typeof clientId === "string" && clientId.length > 0;
   record("2 register (fresh client)", passed, `status=${resp.status} client_id=${clientId ?? "(none)"}`);
+  // Hand the id to whatever cleans up after this run. scripts/reap-probe-clients.mjs
+  // deletes exactly this key and has no other way to find it: it does not list the
+  // namespace and does not match on client names. Written the moment the id exists,
+  // BEFORE any later gate can fail, so a failed run still gets cleaned up.
+  if (passed && process.env.PROBE_CLIENT_FILE) {
+    writeFileSync(process.env.PROBE_CLIENT_FILE, clientId, "utf8");
+  }
   return passed ? clientId : null;
+}
+
+// Gate 1b: the store is bound and the FTS index is intact.
+//
+// Provenance proves WHICH commit is live. It cannot prove the deployed Worker can
+// reach its data, and that is a live failure mode rather than a hypothetical one:
+// every binding is resolved by name at deploy time, so a Worker deployed against a
+// stale or hand-edited wrangler.jsonc starts happily with DB pointing at nothing,
+// answers /health with ok, and then errors on every single read tool. Nothing else
+// in the gate family would notice. tsc passes, the tests are offline, and gates 2
+// through 7 exercise the OAuth surface, which never touches D1.
+//
+// The FTS half is separate because it fails separately, and it has failed: DELETE
+// FROM documents_fts corrupts the index, COUNT(*) on an external-content table reads
+// through to the content table and so cannot detect drift, and integrity-check
+// passes on an emptied index. /health's probe is a MATCH pinned to one document, so
+// an empty index cannot satisfy it.
+async function gateStore() {
+  let data = null;
+  let attempt = 0;
+  for (attempt = 1; attempt <= POLL_ATTEMPTS; attempt++) {
+    const resp = await fetch(`${ORIGIN}/health`, { headers: { "Cache-Control": "no-cache" } });
+    data = await resp.json().catch(() => null);
+    if (data?.store?.d1 === "ok" && data?.store?.fts === "ok") break;
+    if (attempt < POLL_ATTEMPTS) await sleep(POLL_INTERVAL_MS);
+  }
+  const d1 = data?.store?.d1 ?? "(absent)";
+  const fts = data?.store?.fts ?? "(absent)";
+  record("1b store bound (D1 + FTS)", d1 === "ok" && fts === "ok", `polls=${attempt} d1=${d1} fts=${fts}`);
 }
 
 function authorizeUrl(clientId) {
@@ -270,6 +308,7 @@ async function gateGithubRedirect(clientId, form) {
 
 const clientId = await (async () => {
   await gateHealth();
+  await gateStore();
   return gateRegister();
 })();
 

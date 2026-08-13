@@ -327,8 +327,43 @@ async function handleBackup(request: Request, env: Env): Promise<Response> {
 // Bounded on purpose: this is a public unauthenticated write path with no rate
 // limit in front of it, so an oversized body is refused rather than stored, and
 // the key is one object per ray id rather than per report.
+// Bounded and TYPED. This is a public, unauthenticated write path into R2 with no
+// rate limit in front of it, so what it accepts is the whole of its defence:
+//
+//   size  - an oversized body is refused rather than stored.
+//   type  - the two content types browsers actually send for these reports, and
+//           nothing else. A plain POST of arbitrary JSON is refused with 415.
+//   shape - the body must parse AND look like a report: {"csp-report": {...}} from
+//           report-uri, or a non-empty array of {type, body} from the Reporting
+//           API. This replaces "keep the raw body even if it does not parse",
+//           which was the right instinct (an unparseable report still says a
+//           violation fired) applied to the wrong surface: on an endpoint anyone
+//           can post to, accept-anything means the soak record that a promotion
+//           ruling depends on can be filled with whatever a stranger sends.
+//   key   - one object per ray id, so a flood of reports from one request cannot
+//           fan out into many objects.
+//
+// STILL OPEN, and Dustin's task in the dashboard rather than a code change: a WAF
+// rate-limiting rule on this path. Everything above bounds what one request can
+// store; none of it bounds how many requests arrive. That belongs at the edge.
 const CSP_REPORT_MAX_BYTES = 16384;
 const CSP_REPORT_PREFIX = "reports/csp/";
+// application/csp-report is the legacy report-uri type; application/reports+json is
+// the Reporting API type, which is what the COOP trial sends.
+const CSP_REPORT_TYPES = ["application/csp-report", "application/reports+json"];
+
+// A report, or not. Deliberately structural rather than a schema: the two wire
+// formats disagree on every key name, and browsers add fields.
+function looksLikeReport(parsed: unknown): boolean {
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    const legacy = (parsed as { "csp-report"?: unknown })["csp-report"];
+    return Boolean(legacy) && typeof legacy === "object";
+  }
+  if (Array.isArray(parsed)) {
+    return parsed.length > 0 && parsed.every((entry) => Boolean(entry) && typeof entry === "object" && "body" in (entry as object));
+  }
+  return false;
+}
 
 function summarizeReport(parsed: unknown): { directive: string; blocked: string; document: string } {
   // Two wire formats reach here. report-uri sends {"csp-report": {...}} with
@@ -354,6 +389,14 @@ function summarizeReport(parsed: unknown): { directive: string; blocked: string;
 }
 
 async function handleCspReport(request: Request, env: Env): Promise<Response> {
+  // Content-Type first, before the body is even read.
+  const contentType = (request.headers.get("Content-Type") ?? "").split(";")[0].trim().toLowerCase();
+  if (!CSP_REPORT_TYPES.includes(contentType)) {
+    return new Response(`unsupported content type: expected one of ${CSP_REPORT_TYPES.join(", ")}`, {
+      status: 415,
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+    });
+  }
   const raw = await request.text();
   if (raw.length > CSP_REPORT_MAX_BYTES) return new Response(null, { status: 413 });
 
@@ -361,8 +404,13 @@ async function handleCspReport(request: Request, env: Env): Promise<Response> {
   try {
     parsed = JSON.parse(raw);
   } catch {
-    // Keep the raw body rather than dropping it: an unparseable report still
-    // says a violation fired, and the shape is worth seeing.
+    return new Response("body is not JSON", { status: 400, headers: { "Content-Type": "text/plain;charset=utf-8" } });
+  }
+  if (!looksLikeReport(parsed)) {
+    return new Response('body is not a violation report: expected {"csp-report": {...}} or a non-empty array of {type, body}', {
+      status: 400,
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+    });
   }
 
   const now = new Date();
@@ -395,7 +443,7 @@ async function handleCspReport(request: Request, env: Env): Promise<Response> {
         content_type: request.headers.get("Content-Type"),
         user_agent: request.headers.get("User-Agent"),
         summary,
-        report: parsed ?? raw,
+        report: parsed,
       },
       null,
       2
@@ -406,21 +454,79 @@ async function handleCspReport(request: Request, env: Env): Promise<Response> {
   return new Response(null, { status: 204 });
 }
 
+// /health carries deploy provenance so "the deployed worker is this commit" is a
+// readable fact rather than an inference from a clean tree. The vars are stamped at
+// deploy time by scripts/deploy.mjs; dirty=true means the deployed bytes are NOT
+// the named commit.
+//
+// IT ALSO PROBES THE STORE, because provenance alone cannot see the failure that
+// matters most here. Every binding in this Worker is resolved by NAME at deploy
+// time, and a Worker whose DB binding is missing, or pointed at an empty database,
+// starts perfectly and answers /health with a cheerful ok. Every read tool then
+// errors and every write is refused, and nothing in the gate family would have
+// gone red: tsc passes, the tests are offline, and the OAuth gates never touch D1.
+// scripts/ci-config.mjs pins the binding ids for exactly this reason, but that only
+// guards the CI deploy path, not a hand-run wrangler deploy against a stale config.
+//
+// Two probes, because they fail separately:
+//   d1  - SELECT 1. The binding exists and the database answers.
+//   fts - a MATCH that must return one PINNED document. This is the one that
+//         catches index damage, and index damage is real here rather than
+//         theoretical: DELETE FROM documents_fts corrupts the index, COUNT(*) on
+//         an external-content FTS5 table reads through to the content table so it
+//         cannot detect drift, and integrity-check passes on an emptied index
+//         (all three measured 2026-07-27). A MATCH that has to find a specific
+//         row is the only cheap check that fails when the index is empty.
+//
+// A failed probe returns 503 with status "degraded", so a deploy that unbinds the
+// store goes RED rather than green-with-a-detail-nobody-reads.
+const HEALTH_PROBE_NS = "capsid";
+const HEALTH_PROBE_PATH = "conventions.md";
+const HEALTH_PROBE_TERM = "conventions";
+
+async function handleHealth(env: Env): Promise<Response> {
+  const provenance = {
+    sha: env.BUILD_SHA ?? "unknown",
+    dirty: env.BUILD_DIRTY === "true",
+    builtAt: env.BUILT_AT ?? null,
+  };
+
+  let d1 = "unbound";
+  let fts = "skipped";
+  try {
+    const one = await env.DB.prepare("SELECT 1 AS ok").first<{ ok: number }>();
+    d1 = one?.ok === 1 ? "ok" : `unexpected: ${JSON.stringify(one)}`;
+  } catch (err) {
+    d1 = `error: ${(err instanceof Error ? err.message : String(err)).slice(0, 120)}`;
+  }
+  if (d1 === "ok") {
+    try {
+      // Pinned to one document: an empty or rebuilt-wrong index cannot satisfy it.
+      const hit = await env.DB.prepare(
+        `SELECT d.path FROM documents_fts
+         JOIN documents d ON d.id = documents_fts.rowid
+         WHERE documents_fts MATCH ?1 AND d.namespace = ?2 AND d.path = ?3
+         LIMIT 1`
+      )
+        .bind(HEALTH_PROBE_TERM, HEALTH_PROBE_NS, HEALTH_PROBE_PATH)
+        .first<{ path: string }>();
+      fts = hit?.path === HEALTH_PROBE_PATH ? "ok" : `no match for ${HEALTH_PROBE_NS}/${HEALTH_PROBE_PATH}`;
+    } catch (err) {
+      fts = `error: ${(err instanceof Error ? err.message : String(err)).slice(0, 120)}`;
+    }
+  }
+
+  const healthy = d1 === "ok" && fts === "ok";
+  return Response.json(
+    { status: healthy ? "ok" : "degraded", ...provenance, store: { d1, fts } },
+    { status: healthy ? 200 : 503 }
+  );
+}
+
 export const defaultHandler = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
-    // /health carries deploy provenance so "the deployed worker is this commit"
-    // is a readable fact rather than an inference from a clean tree. The vars
-    // are stamped at deploy time by scripts/deploy.mjs. dirty=true means the
-    // deployed bytes are NOT the named commit.
-    if (url.pathname === "/health") {
-      return Response.json({
-        status: "ok",
-        sha: env.BUILD_SHA ?? "unknown",
-        dirty: env.BUILD_DIRTY === "true",
-        builtAt: env.BUILT_AT ?? null,
-      });
-    }
+    if (url.pathname === "/health") return handleHealth(env);
     if (url.pathname === REPORT_PATH && request.method === "POST") return handleCspReport(request, env);
     if (url.pathname === "/ops/mcp") return handleOperatorMcp(request, env, ctx);
     if (url.pathname === "/ops/backup" && request.method === "POST") return handleBackup(request, env);

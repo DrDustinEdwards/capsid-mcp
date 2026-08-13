@@ -130,6 +130,66 @@ function edgesTouching(db: D1Database, namespace: string, path: string): D1Prepa
 }
 // PATH_MUTATION_HELPER_END
 
+// A statement that ABORTS the batch it is in unless (namespace, path) names an
+// existing document. It writes nothing when the document is there.
+//
+// Why a statement and not an `if`: every path-mutating tool already reads the row
+// first, and that read is a different transaction from the batch that follows it.
+// Between the two, the row can go. What the tools then reported was a success:
+// the batch ran, zero rows matched, `move` answered "moved" and `delete` answered
+// "deleted" over a document that was not there. D1's meta.changes cannot be used
+// to catch it either, because `documents` carries FTS5 sync triggers whose row
+// changes accumulate across a batch (measured 2026-08-10: one repointed edge
+// reported as five). So the check has to be INSIDE the transaction, and it has to
+// be a statement rather than a number read back afterwards.
+//
+// The mechanism, since SQLite has no RAISE outside a trigger body: attempt an
+// INSERT that violates NOT NULL, guarded by NOT EXISTS so it is attempted only
+// when the document is missing. Present, and the SELECT yields no rows and
+// nothing is inserted. Missing, and it tries to write NULL into
+// document_versions.document_id, which fails the constraint and rolls the whole
+// batch back. document_versions is the target because it carries no triggers and
+// is already in this file's vocabulary; the guard never inserts a row into it.
+const GUARD_VIOLATION = "document_versions.document_id";
+function requireExists(db: D1Database, namespace: string, path: string): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO document_versions (document_id, namespace, path)
+       SELECT NULL, ?1, ?2
+       WHERE NOT EXISTS (SELECT 1 FROM documents WHERE namespace = ?1 AND path = ?2)`
+    )
+    .bind(namespace, path);
+}
+
+// True when the batch failed because a requireExists guard fired, rather than for
+// the reason the caller's catch block would otherwise assume (a UNIQUE collision
+// on the move target).
+function isMissingRowAbort(err: unknown): boolean {
+  return (err instanceof Error ? err.message : String(err)).includes(GUARD_VIOLATION);
+}
+
+// Documents may only be written to a namespace that has a `namespaces` row.
+//
+// Writing to a namespace label does not create it, so a typo in `namespace` used
+// to open a shadow namespace: documents that `namespaces` cannot see, that the
+// unconsolidated counter never counts, that no repo tool can resolve, and that
+// `brief` will not assemble because there is no core.md and never will be. It is
+// invisible by construction, which is the whole failure mode. Measured
+// 2026-08-13 before this landed: zero ghost namespaces live, so this closes the
+// hole rather than cleaning one up.
+//
+// register_namespace stays the only way to create one, deliberately: a namespace
+// is a repo mapping and an authorization boundary, not a string a write can coin.
+async function requireRegisteredNamespace(db: D1Database, namespace: string): Promise<string | null> {
+  const row = await db.prepare("SELECT namespace FROM namespaces WHERE namespace = ?1").bind(namespace).first();
+  if (row) return null;
+  return (
+    `unknown namespace '${namespace}'. Nothing was written. Documents can only live in a registered namespace, ` +
+    `because an unregistered one is invisible to the namespaces list, the lint loop and every repo tool. ` +
+    `Check the spelling against the namespaces tool, or create it with register_namespace.`
+  );
+}
+
 type ConfirmVerdict = "accepted" | "declined" | "unsupported";
 
 // Asks the connected client to confirm a destructive action via MCP elicitation.
@@ -177,7 +237,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
   server.registerTool(
     "list",
     {
-      description: "List documents with optional namespace, type, and status filters. Returns metadata rows without bodies.",
+      description: "List documents with optional namespace, type, and status filters. Returns metadata rows without bodies: id, namespace, path, title, type, status, tags and timestamps.",
       inputSchema: {
         namespace: z.string().optional(),
         type: z.string().optional(),
@@ -187,7 +247,15 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
     async ({ namespace, type, status }) => {
       const { results } = await db
         .prepare(
-          `SELECT id, namespace, path, title, type, status, tags, publish_at, created_at, updated_at
+          // frontmatter and publish_at are NOT selected. Both are columns from the
+          // original CMS-shaped schema that nothing in this server reads or writes.
+          // Measured 2026-08-13, not assumed: both are NULL on all 494 documents.
+          // Listing publish_at advertised a scheduling feature that does not exist
+          // and put a permanently empty field in front of every caller.
+          // Ruled 2026-08-13: dropped from the output, LEFT IN THE TABLE. Removing
+          // a column means a migration, a rebuild of the FTS triggers and a change
+          // to the backup table guard, to reclaim nothing.
+          `SELECT id, namespace, path, title, type, status, tags, created_at, updated_at
            FROM documents
            WHERE (?1 IS NULL OR namespace = ?1) AND (?2 IS NULL OR type = ?2) AND (?3 IS NULL OR status = ?3)
            ORDER BY namespace, path`
@@ -326,7 +394,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
     "write",
     {
       description:
-        "Create or update a document. Snapshots the prior version and writes an audit log entry. mode selects how body is applied: 'replace' (default, full body, needs title and body), 'append' (body is added to the end of the existing document, no title needed, no confirmation needed because nothing is overwritten), 'patch' (replace an anchored region: needs find and replace_with, and find must occur EXACTLY ONCE or the write is refused), or 'meta' (change type, tags, status or title and leave the body untouched; use this to close a task or correct a document's type). append, patch and meta exist so amending a large document does not mean retranscribing it. Every response carries sha256 and bytes of the resulting body, so a write can be verified without reading the document back. Overwriting with replace or patch needs confirmation: the server elicits it when the client supports elicitation, otherwise pass confirm: true. Optional links: a JSON array of typed outgoing edges [{\"type\":\"references\",\"to_path\":\"decisions.md\",\"to_ns\":\"capsid\"}] (types: governs, references, supersedes, replaces, depends-on; to_ns defaults to this namespace). When provided it replaces this document's outgoing edges; omit it to leave edges untouched; pass [] to clear them. Read edges with backlinks.",
+        "Create or update a document. Snapshots the prior version and writes an audit log entry. mode selects how body is applied: 'replace' (default, full body, needs title and body), 'append' (body is added to the end of the existing document, no title needed, no confirmation needed because nothing is overwritten), 'patch' (replace an anchored region: needs find and replace_with, and find must occur EXACTLY ONCE or the write is refused), or 'meta' (change type, tags, status or title and leave the body byte-identical, normalization included; use this to close a task or correct a document's type). append, patch and meta exist so amending a large document does not mean retranscribing it. Every response carries sha256 and bytes of the resulting body, so a write can be verified without reading the document back. Optional if_match: the sha256 of the body you believe is stored (the value a previous read-back or write returned). When it does not match the stored body the write is REFUSED and the error carries the current sha256, so a concurrent edit cannot be silently overwritten. Overwriting with replace or patch needs confirmation: the server elicits it when the client supports elicitation, otherwise pass confirm: true. Optional links: a JSON array of typed outgoing edges [{\"type\":\"references\",\"to_path\":\"decisions.md\",\"to_ns\":\"capsid\"}] (types: governs, references, supersedes, replaces, depends-on; to_ns defaults to this namespace). When provided it replaces this document's outgoing edges; omit it to leave edges untouched; pass [] to clear them. Read edges with backlinks.",
       inputSchema: {
         namespace: z.string(),
         path: z.string(),
@@ -345,9 +413,10 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
         status: z.string().optional(),
         confirm: z.boolean().optional(),
         links: z.string().optional(),
+        if_match: z.string().optional(),
       },
     },
-    async ({ namespace, path, title, body, mode, find, replace_with, type, tags, status, confirm, links }) => {
+    async ({ namespace, path, title, body, mode, find, replace_with, type, tags, status, confirm, links, if_match }) => {
       if (!operator) return fail(DENIED);
       const writeMode = mode ?? "replace";
       const typeError = type === undefined ? null : validateDocType(type);
@@ -356,11 +425,46 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       if (statusError) return fail(statusError);
       const parsedLinks = links === undefined ? null : parseLinks(links, namespace);
       if (parsedLinks && "error" in parsedLinks) return fail(parsedLinks.error);
+      const nsError = await requireRegisteredNamespace(db, namespace);
+      if (nsError) return fail(nsError);
 
       const prior = await db
-        .prepare("SELECT id, title, body FROM documents WHERE namespace = ?1 AND path = ?2")
+        .prepare("SELECT id, title, body, type, status, tags FROM documents WHERE namespace = ?1 AND path = ?2")
         .bind(namespace, path)
-        .first<{ id: number; title: string | null; body: string | null }>();
+        .first<{ id: number; title: string | null; body: string | null; type: string | null; status: string | null; tags: string | null }>();
+
+      // OPTIMISTIC CONCURRENCY. if_match is the sha256 of the body the caller
+      // believes is stored, which is exactly the value every write already
+      // returns, so a client that read or wrote the document has it without an
+      // extra fetch.
+      //
+      // It exists because conventions.md's "re-read a document immediately
+      // before overwriting it" is a discipline the server could not enforce, and
+      // it was caught firing live on 2026-07-27 when a session doc was
+      // substantially rewritten between a read and a planned write. A
+      // lost-update needs no malice and leaves no trace in the result: the write
+      // succeeds, the prior body is snapshotted, and nobody looks at the
+      // snapshot because nothing said anything went wrong.
+      //
+      // Fail closed, the same shape as a patch anchor: on mismatch NOTHING is
+      // written and the error carries the CURRENT sha so the caller can re-read,
+      // rebase its edit and retry without guessing what it is racing. Opt-in,
+      // because requiring it would break append, which is safe by construction.
+      if (if_match !== undefined) {
+        if (!prior) {
+          return fail(
+            `if_match was given but ${namespace}/${path} does not exist. Nothing was written. Omit if_match to create it.`
+          );
+        }
+        const currentSha = await sha256Hex(prior.body ?? "");
+        if (currentSha !== if_match.trim().toLowerCase()) {
+          return fail(
+            `if_match mismatch on ${namespace}/${path}: the stored body is not the one you read. Nothing was written. ` +
+              `Current sha256 is ${currentSha}; you passed ${if_match.trim().toLowerCase()}. ` +
+              `Re-read the document, reapply your change to the current body, and retry.`
+          );
+        }
+      }
 
       // Body assembly, per mode. Pure and unit-tested in ./write-modes. Every
       // mode returns the FULL new body, so the write path below is unchanged and
@@ -387,7 +491,18 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       // which is the gap the hand-run SQL splice had: normalization did not run
       // on that path at all.
       if (title !== undefined) title = normalizeDashes(title, "title");
-      body = normalizeDashes(body as string, "prose");
+      // mode 'meta' does not touch the body, so the body is not normalized
+      // either. THE CONTRACT IS: meta leaves the stored body byte-identical.
+      // Running the normalizer over an untouched body broke that in one case
+      // that matters, and it is not hypothetical: bodies stored before the
+      // normalizer existed can still carry a wide dash, and a meta write meant
+      // to close a task would then silently rewrite prose it was never asked to
+      // change, with bytes_before != bytes as the only hint. conventions.md also
+      // forbids editing already-stored content to satisfy the dash rule.
+      // Everything a caller actually supplies still goes through the normalizer,
+      // so no client can introduce an em dash: this only declines to rewrite
+      // what nobody submitted.
+      if (writeMode !== "meta") body = normalizeDashes(body as string, "prose");
       // append is exempt from confirmation, deliberately. Confirmation exists to
       // stop an accidental clobber of existing text, and an append cannot
       // destroy any: the prior body is still snapshotted, and the addition goes
@@ -432,10 +547,35 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
           )
           .bind(namespace, path, title ?? null, body, type ?? null, tags ?? null, status ?? null)
       );
+      // The PRIOR type, status, tags and title go into the audit params whenever
+      // a write changes any of them, and this is the only place they survive.
+      // document_versions snapshots title and body ONLY, so a meta write that
+      // retyped a document or closed a task was previously unrecoverable: the
+      // new value was in documents, the old value was nowhere. Ruled 2026-08-13:
+      // the snapshot schema stays title plus body, and the audit log carries the
+      // metadata delta instead, because a version row is a body snapshot and
+      // widening it would mean a migration plus a rewrite of every restore path
+      // to answer a question the log can already answer.
+      const metaChanged = title !== undefined || type !== undefined || tags !== undefined || status !== undefined;
       statements.push(
         db
           .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES (?1, 'write', ?2, ?3, ?4)")
-          .bind(actor, namespace, path, JSON.stringify({ title, type, tags, status, updated: Boolean(prior) }))
+          .bind(
+            actor,
+            namespace,
+            path,
+            JSON.stringify({
+              title,
+              type,
+              tags,
+              status,
+              mode: writeMode,
+              updated: Boolean(prior),
+              ...(prior && metaChanged
+                ? { prior_meta: { title: prior.title, type: prior.type, status: prior.status, tags: prior.tags } }
+                : {}),
+            })
+          )
       );
       // links replaces this document's outgoing edges when provided. Left
       // untouched when omitted, so a routine body edit never drops edges.
@@ -513,6 +653,143 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
     }
   );
 
+  // Every overwrite and delete has snapshotted the prior row into
+  // document_versions since the beginning, and until 2026-08-13 nothing could read
+  // it back. The rows were reachable only by raw SQL, which meant a recovery was a
+  // hand-written D1 query by whoever still had account access, and it was done that
+  // way twice: the 2026-08-10 edge repair read snapshots directly, and
+  // recova/parity/INVENTORY-SEED.md is STILL unrestored while surviving as a
+  // 7889-byte snapshot, because restoring it was more work than it was worth. A
+  // backup nobody can read is a backup nobody uses.
+  server.registerTool(
+    "history",
+    {
+      description:
+        "List the retained versions of a document (newest first) from document_versions, or fetch one body by passing version_id. Snapshots are written by every overwrite and delete, so the history of a deleted document is still readable. Retention is 90 days; older snapshots live only in the R2 dumps. Read-only. Note the scope: a version records title and body, so a change to type, status or tags is not here, it is in the audit log.",
+      inputSchema: { namespace: z.string(), path: z.string(), version_id: z.number().int().positive().optional() },
+    },
+    async ({ namespace, path, version_id }) => {
+      if (version_id !== undefined) {
+        const row = await db
+          .prepare(
+            "SELECT id, document_id, namespace, path, title, body, snapshot_at FROM document_versions WHERE id = ?1 AND namespace = ?2 AND path = ?3"
+          )
+          .bind(version_id, namespace, path)
+          .first<{ id: number; body: string | null }>();
+        // namespace and path are part of the lookup on purpose: an id alone would
+        // let a caller walk every snapshot in the store by incrementing a number.
+        if (!row) return fail(`no version ${version_id} for ${namespace}/${path}`);
+        return ok({ ...row, bytes: new TextEncoder().encode(row.body ?? "").length });
+      }
+      const { results } = await db
+        .prepare(
+          `SELECT id, snapshot_at, title, LENGTH(body) AS bytes
+           FROM document_versions
+           WHERE namespace = ?1 AND path = ?2
+           ORDER BY snapshot_at DESC, id DESC`
+        )
+        .bind(namespace, path)
+        .all();
+      const live = await db
+        .prepare("SELECT title, updated_at, LENGTH(body) AS bytes FROM documents WHERE namespace = ?1 AND path = ?2")
+        .bind(namespace, path)
+        .first();
+      return ok({
+        namespace,
+        path,
+        live: live ?? null,
+        versions: results,
+        ...(live ? {} : { note: "no live document at this path: these are the snapshots of a deleted or moved document" }),
+      });
+    }
+  );
+
+  server.registerTool(
+    "restore",
+    {
+      description:
+        "Restore a document's title and body from one of its retained versions (see history). Goes through the normal write path, so the CURRENT body is snapshotted first and the restore is audit-logged: a restore is itself undoable. Restoring a deleted document recreates it. Does not restore type, status, tags or links, which a version row does not carry. Requires operator key and confirm: true.",
+      inputSchema: {
+        namespace: z.string(),
+        path: z.string(),
+        version_id: z.number().int().positive(),
+        confirm: z.boolean().optional(),
+      },
+    },
+    async ({ namespace, path, version_id, confirm }) => {
+      if (!operator) return fail(DENIED);
+      const nsError = await requireRegisteredNamespace(db, namespace);
+      if (nsError) return fail(nsError);
+      const version = await db
+        .prepare("SELECT id, title, body, snapshot_at FROM document_versions WHERE id = ?1 AND namespace = ?2 AND path = ?3")
+        .bind(version_id, namespace, path)
+        .first<{ id: number; title: string | null; body: string | null; snapshot_at: string }>();
+      if (!version) return fail(`no version ${version_id} for ${namespace}/${path}`);
+      const prior = await db
+        .prepare("SELECT id, title, body FROM documents WHERE namespace = ?1 AND path = ?2")
+        .bind(namespace, path)
+        .first<{ id: number; title: string | null; body: string | null }>();
+      if (confirm !== true) {
+        const verdict = await confirmDestructive(
+          server,
+          `Restore ${namespace}/${path} to the version snapshotted at ${version.snapshot_at}? The current body will be snapshotted first.`
+        );
+        if (verdict === "declined") return fail(`restore of ${namespace}/${path} declined`);
+        if (verdict === "unsupported") {
+          return fail(
+            `confirmation required: re-run restore with confirm: true to overwrite ${namespace}/${path} with version ${version_id} (snapshotted ${version.snapshot_at}). The current body will be snapshotted first.`
+          );
+        }
+      }
+      // The stored body goes back EXACTLY as it was snapshotted, with no dash
+      // normalization. A snapshot is a record of what the document said, and a
+      // restore that quietly rewrote it would not be a restore.
+      const body = version.body ?? "";
+      const statements: D1PreparedStatement[] = [];
+      if (prior) {
+        statements.push(
+          db
+            .prepare("INSERT INTO document_versions (document_id, namespace, path, title, body) VALUES (?1, ?2, ?3, ?4, ?5)")
+            .bind(prior.id, namespace, path, prior.title, prior.body)
+        );
+      }
+      statements.push(
+        db
+          .prepare(
+            `INSERT INTO documents (namespace, path, title, body)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(namespace, path) DO UPDATE SET
+               title = ?3,
+               body = excluded.body,
+               updated_at = datetime('now')`
+          )
+          .bind(namespace, path, version.title, body)
+      );
+      statements.push(
+        db
+          .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES (?1, 'restore', ?2, ?3, ?4)")
+          .bind(
+            actor,
+            namespace,
+            path,
+            JSON.stringify({ version_id, snapshot_at: version.snapshot_at, recreated: !prior, snapshotted: Boolean(prior) })
+          )
+      );
+      await db.batch(statements);
+      return ok({
+        namespace,
+        path,
+        action: prior ? "restored" : "recreated",
+        version_id,
+        snapshot_at: version.snapshot_at,
+        sha256: await sha256Hex(body),
+        bytes: new TextEncoder().encode(body).length,
+        snapshotted: Boolean(prior),
+        ...(prior ? {} : { note: "the document did not exist and was recreated; its type, status, tags and links are defaults, not the ones it had" }),
+      });
+    }
+  );
+
   server.registerTool(
     "backlinks",
     {
@@ -545,6 +822,8 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
     },
     async ({ namespace, path, confirm }) => {
       if (!operator) return fail(DENIED);
+      const nsError = await requireRegisteredNamespace(db, namespace);
+      if (nsError) return fail(nsError);
       const prior = await db
         .prepare("SELECT id, title, body FROM documents WHERE namespace = ?1 AND path = ?2")
         .bind(namespace, path)
@@ -566,17 +845,29 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       // only place they survive, since document_versions holds title and body
       // only.
       const { results: removedEdges } = await edgesTouching(db, namespace, path).all();
-      await db.batch([
-        db
-          .prepare(
-            "INSERT INTO document_versions (document_id, namespace, path, title, body) VALUES (?1, ?2, ?3, ?4, ?5)"
-          )
-          .bind(prior.id, namespace, path, prior.title, prior.body),
-        ...pathMutation(db, namespace, path, null),
-        db
-          .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES (?1, 'delete', ?2, ?3, ?4)")
-          .bind(actor, namespace, path, JSON.stringify({ edges_removed: removedEdges })),
-      ]);
+      // requireExists is not redundant with the `prior` read above: that read is
+      // a separate transaction, and a delete that matches zero rows would
+      // otherwise snapshot a body, write an audit row saying 'delete', and answer
+      // "deleted" having removed nothing.
+      try {
+        await db.batch([
+          requireExists(db, namespace, path),
+          db
+            .prepare(
+              "INSERT INTO document_versions (document_id, namespace, path, title, body) VALUES (?1, ?2, ?3, ?4, ?5)"
+            )
+            .bind(prior.id, namespace, path, prior.title, prior.body),
+          ...pathMutation(db, namespace, path, null),
+          db
+            .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES (?1, 'delete', ?2, ?3, ?4)")
+            .bind(actor, namespace, path, JSON.stringify({ edges_removed: removedEdges })),
+        ]);
+      } catch (err) {
+        if (isMissingRowAbort(err)) {
+          return fail(`delete aborted, nothing changed: ${namespace}/${path} no longer exists. Another session removed it after this call started.`);
+        }
+        return fail(`delete failed, nothing changed: ${err instanceof Error ? err.message : String(err)}`);
+      }
       return ok({
         namespace,
         path,
@@ -595,6 +886,8 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
     },
     async ({ namespace, path, new_path }) => {
       if (!operator) return fail(DENIED);
+      const nsError = await requireRegisteredNamespace(db, namespace);
+      if (nsError) return fail(nsError);
       // Existence and the edge count are both read BEFORE the batch, deliberately.
       // D1's meta.changes cannot be used for either here: documents carries FTS5
       // sync triggers, so an UPDATE on it reports the trigger's row changes too,
@@ -608,16 +901,29 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       if (!exists) return fail(`not found: ${namespace}/${path}`);
       const { results: movingEdges } = await edgesTouching(db, namespace, path).all();
       const repointed = movingEdges.length;
-      // One batch, so the rename and its edge repointing cannot half-land.
+      // ONE batch: the guard, the rename, the edge repointing AND the audit row.
+      //
+      // The audit INSERT used to run as its own statement after the batch, which
+      // made two failures possible that the log then could not describe. A move
+      // that succeeded and an audit write that failed left a rename with no
+      // record, and the reverse left a record of a move that never happened. The
+      // 2026-08-10 edge repair depended entirely on audit_log move records to
+      // recover five repoints, so a log that can disagree with the table is not
+      // an academic problem here.
       try {
-        await db.batch(pathMutation(db, namespace, path, new_path));
+        await db.batch([
+          requireExists(db, namespace, path),
+          ...pathMutation(db, namespace, path, new_path),
+          db
+            .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES (?1, 'move', ?2, ?3, ?4)")
+            .bind(actor, namespace, path, JSON.stringify({ new_path, edges_repointed: repointed })),
+        ]);
       } catch (err) {
-        return fail(`move failed (target may already exist): ${err instanceof Error ? err.message : String(err)}`);
+        if (isMissingRowAbort(err)) {
+          return fail(`move aborted, nothing changed: ${namespace}/${path} no longer exists. Another session moved or removed it after this call started.`);
+        }
+        return fail(`move failed, nothing changed (target may already exist): ${err instanceof Error ? err.message : String(err)}`);
       }
-      await db
-        .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES (?1, 'move', ?2, ?3, ?4)")
-        .bind(actor, namespace, path, JSON.stringify({ new_path, edges_repointed: repointed }))
-        .run();
       return ok({ namespace, path, new_path, action: "moved", edges_repointed: repointed });
     }
   );
@@ -739,9 +1045,17 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
         }
         list = [{ repo, label: (label ?? "primary").trim() || "primary" }];
       }
+      // The single-primary requirement is UNIFIED with update_namespace as of
+      // 2026-08-13. It was enforced on the update path only, so the two tools
+      // disagreed about what a valid mapping is: register could create a namespace
+      // with two primaries or none, which every repo tool then resolves by
+      // accident, and update would refuse to fix it in place. One rule, both
+      // paths, and the rule belongs where the mapping is created.
+      const primaryError = requireSinglePrimary(list);
+      if (primaryError) return fail(primaryError);
       const existing = await db.prepare("SELECT namespace FROM namespaces WHERE namespace = ?1").bind(ns).first();
       if (existing) {
-        return fail(`namespace already registered: ${ns}. Edit its namespaces row directly to change the repo mapping.`);
+        return fail(`namespace already registered: ${ns}. Use update_namespace to change its repo mapping; it snapshots the prior mapping to the audit log.`);
       }
       const reposJson = JSON.stringify(list);
       await db.batch([
@@ -913,7 +1227,15 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       if (problems.length > 0) return fail(`finalize aborted, nothing archived:\n${problems.join("\n")}`);
       // Archiving is a rename to archive/<path>, so it goes through the same
       // helper as move and drags its edges along for the same reason.
-      const statements = paths.flatMap((path) => pathMutation(db, namespace, path, `archive/${path}`));
+      // Each path carries its own in-batch existence guard. The loop above
+      // already checked every path, but that was a separate transaction per path
+      // and finalize is the widest of these mutations: it renames many documents
+      // at once, so it is the one most likely to race a delete, and a partial
+      // archive silently drops documents out of the lint loop's view.
+      const statements = paths.flatMap((path) => [
+        requireExists(db, namespace, path),
+        ...pathMutation(db, namespace, path, `archive/${path}`),
+      ]);
       statements.push(
         db
           .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES (?1, 'lint', ?2, NULL, ?3)")
@@ -922,6 +1244,11 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       try {
         await db.batch(statements);
       } catch (err) {
+        if (isMissingRowAbort(err)) {
+          return fail(
+            "finalize aborted, nothing archived: one of the consumed paths no longer exists. Another session moved or removed it after this call started. Re-run gather and finalize the current set."
+          );
+        }
         return fail(`finalize failed, nothing archived (an archive/ target may already exist): ${err instanceof Error ? err.message : String(err)}`);
       }
       return ok({
@@ -1002,8 +1329,8 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
         namespace: z.string(),
         path_prefix: z.string().optional().describe("Only scan files whose path starts with this prefix, e.g. 'app/lib/billing'."),
         ref: z.string().optional().describe("Branch, tag, or sha to search. Defaults to the default branch."),
-        max_results: z.number().int().positive().optional().describe("Cap on returned matches (default 20)."),
-        max_files: z.number().int().positive().optional().describe("Cap on files fetched and scanned (default 200). Raise for a wider sweep; narrowing path_prefix is cheaper."),
+        max_results: z.number().int().positive().optional().describe("Cap on returned matches (default 20, max 200)."),
+        max_files: z.number().int().positive().optional().describe("Cap on files fetched and scanned (default 200, max 200). A wider sweep resumes with start, because each file costs one GitHub request against the App installation's quota; narrowing path_prefix is cheaper."),
         start: z.number().int().nonnegative().optional().describe("Candidate-file offset to resume a truncated scan; pass the previous result's next_start."),
         repo: z.string().optional().describe(REPO_ARG),
       },
@@ -1108,14 +1435,14 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
     "ci_status",
     {
       description:
-        "Recent CI workflow runs for a namespace's repo (name, head sha, status, conclusion, timestamps). For the most recent failed run it also returns the failing jobs/steps and a bounded log tail. Read-only; use it to verify a deploy is green after a merge instead of guessing. Needs the GitHub App's Actions: Read permission.",
+        "Recent CI workflow runs for a namespace's repo (name, head sha, status, conclusion, timestamps). For the most recent failed run it also returns the failing jobs and steps, plus a bounded log tail for write-grant keys only (a read-only key gets the metadata and a note saying the tail was withheld, because job logs can echo ids and variables). Read-only; use it to verify a deploy is green after a merge instead of guessing. Needs the GitHub App's Actions: Read permission.",
       inputSchema: {
         namespace: z.string(),
         repo: z.string().optional().describe(REPO_ARG),
         limit: z.number().int().positive().optional().describe("How many recent runs to return (default 10, max 20)."),
       },
     },
-    ({ namespace, repo, limit }) => guarded(() => ciStatus(env, namespace, repo, { limit }))
+    ({ namespace, repo, limit }) => guarded(() => ciStatus(env, namespace, repo, { limit, logTail: operator }))
   );
 
   // Resources: every document is addressable context at capsid://<namespace>/<path>.
@@ -1156,17 +1483,24 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
   // Prompts: reusable templates stored as type 'prompt' documents whose bodies
   // use {{variable}} placeholders. Handled at the protocol level (McpServer only
   // lists prompts registered at build time) so the D1 query runs lazily, only on
-  // prompts/list and prompts/get. Prompt name is the doc path without .md.
+  // prompts/list and prompts/get.
+  //
+  // A prompt is named "<namespace>/<path without .md>", which is how every other
+  // tool in this server addresses a document. It used to be the bare path, and a
+  // bare path is not a document key: two namespaces can both hold prompts/brief.md
+  // and the lookup ended in `LIMIT 1`, so it would answer with whichever row
+  // SQLite reached first and the caller could not tell which one it got. One
+  // prompt document exists today, so this collides with nothing yet.
   const PLACEHOLDER = /\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g;
   const promptVariables = (body: string) => [...new Set([...body.matchAll(PLACEHOLDER)].map((m) => m[1]))];
   server.server.registerCapabilities({ prompts: { listChanged: false } });
   server.server.setRequestHandler(ListPromptsRequestSchema, async () => {
     const { results } = await db
-      .prepare("SELECT path, title, body FROM documents WHERE type = 'prompt' ORDER BY namespace, path")
-      .all<{ path: string; title: string | null; body: string | null }>();
+      .prepare("SELECT namespace, path, title, body FROM documents WHERE type = 'prompt' ORDER BY namespace, path")
+      .all<{ namespace: string; path: string; title: string | null; body: string | null }>();
     return {
       prompts: results.map((row) => ({
-        name: row.path.replace(/\.md$/, ""),
+        name: `${row.namespace}/${row.path.replace(/\.md$/, "")}`,
         description: row.title ?? undefined,
         arguments: promptVariables(row.body ?? "").map((name) => ({ name, required: true })),
       })),
@@ -1175,9 +1509,22 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
   server.server.setRequestHandler(GetPromptRequestSchema, async (request) => {
     const { name } = request.params;
     const args = request.params.arguments ?? {};
+    // Split on the FIRST slash only: the namespace never contains one and the
+    // path frequently does.
+    const slash = name.indexOf("/");
+    if (slash <= 0 || slash === name.length - 1) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `prompt name must be "<namespace>/<path>", got "${name}". Call prompts/list for the available names.`
+      );
+    }
+    const promptNs = name.slice(0, slash);
+    const promptPath = name.slice(slash + 1);
     const row = await db
-      .prepare("SELECT title, body FROM documents WHERE type = 'prompt' AND (path = ?1 OR path = ?1 || '.md') LIMIT 1")
-      .bind(name)
+      .prepare(
+        "SELECT title, body FROM documents WHERE type = 'prompt' AND namespace = ?1 AND (path = ?2 OR path = ?2 || '.md')"
+      )
+      .bind(promptNs, promptPath)
       .first<{ title: string | null; body: string | null }>();
     if (!row) throw new McpError(ErrorCode.InvalidParams, `prompt not found: ${name}`);
     const missing = new Set<string>();

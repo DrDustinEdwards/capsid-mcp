@@ -54,11 +54,11 @@ test("scan flags a stale tool count in a standing doc", () => {
   assert.equal(claims.length, 1);
   assert.equal(claims[0].noun, "tools");
   assert.equal(claims[0].states, "19");
-  assert.equal(claims[0].authoritative, "22");
+  assert.equal(claims[0].authoritative, "24");
 });
 
 test("scan does NOT flag a correct count", () => {
-  assert.deepEqual(scanCountClaims([{ path: "core.md", type: "core", body: "22 tools, split 11 read and 11 write." }]), []);
+  assert.deepEqual(scanCountClaims([{ path: "core.md", type: "core", body: "24 tools, split 13 read and 11 write." }]), []);
 });
 
 test("episodics are exempt because their numbers are history, not claims", () => {
@@ -78,11 +78,11 @@ test("archived documents are exempt", () => {
 test("the 'N of M gates' form is judged on the TOTAL, not the numerator", () => {
   // "6 of 8 gates" states the artifact has 8 gates, which is correct, and that 6
   // passed, which is a run result and none of this lint's business.
-  assert.deepEqual(scanCountClaims([{ path: "core.md", type: "core", body: "6 of 8 gates passed" }]), []);
+  assert.deepEqual(scanCountClaims([{ path: "core.md", type: "core", body: "6 of 9 gates passed" }]), []);
   const stale = scanCountClaims([{ path: "core.md", type: "core", body: "6 of 6 gates passed" }]);
   assert.equal(stale.length, 1);
   assert.equal(stale[0].states, "6");
-  assert.equal(stale[0].authoritative, "8");
+  assert.equal(stale[0].authoritative, "9");
 });
 
 test("'all seven' is flagged when it is about headers", () => {

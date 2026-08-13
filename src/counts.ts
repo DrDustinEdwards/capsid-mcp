@@ -18,9 +18,17 @@
 // That is the "derive the expected list from the source of truth" rule from
 // capsid/conventions.md, applied to numbers instead of table names.
 
+// tools moved 22 to 24 on 2026-08-13: history and restore. That is a deliberate
+// exception to the repo's own "the tool surface is deliberately small and should
+// stay that way" rule, ruled by Dustin in the audit response, because every
+// overwrite and delete had been snapshotting to document_versions since day one and
+// nothing could read a snapshot back without raw SQL.
+//
+// liveGates moved 8 to 9 the same day: /health gained a D1 and FTS probe, so a
+// deploy that unbinds the store now goes red.
 export const AUTHORITATIVE = {
-  tools: 22,
-  liveGates: 8,
+  tools: 24,
+  liveGates: 9,
   htmlEnforcedHeaders: 6,
   htmlReportOnlyHeaders: 1,
 };
