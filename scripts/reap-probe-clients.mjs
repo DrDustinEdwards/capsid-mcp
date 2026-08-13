@@ -1,103 +1,107 @@
 #!/usr/bin/env node
-// Deletes the OAuth client registrations that scripts/verify-live.mjs creates.
+// Deletes the ONE OAuth client registration that this run's scripts/verify-live.mjs
+// created. Nothing else. It does not list the namespace, it does not match on a
+// client name, and it cannot discover a key it was not told about.
 //
-// WHY THESE EXIST AND WHY THEY MUST KEEP EXISTING. Gate 2 registers a FRESH
+// WHY THE PROBE CLIENTS EXIST AND MUST KEEP EXISTING. Gate 2 registers a FRESH
 // client on every run, and that is load-bearing rather than incidental:
-// handleAuthorizeGet short-circuits for a client id already in the approved
-// cookie and 302s straight out of the GET without rendering a form. That fast
-// path is exactly what hid the 26-day consent outage. A run that reused a client
-// id would take the fast path and prove nothing. So the fix for the accumulation
-// is NOT to reuse a client; it is to clean up afterwards.
+// handleAuthorizeGet short-circuits for a client id already in the approved cookie
+// and 302s straight out of the GET without rendering a form. That fast path is
+// exactly what hid the 26-day consent outage. A run that reused a client id would
+// take the fast path and prove nothing. So the fix for the accumulation is NOT to
+// reuse a client; it is to clean up afterwards.
 //
-// Measured 2026-08-12: 51 keys in the namespace, 44 of them client:*. At the
-// six-hourly CI schedule that is roughly 1,460 dead registrations a year.
+// WHY IT NARROWED TO ONE ID, 2026-08-13. The first version listed every key under
+// the client: prefix, read each value, and deleted the ones whose clientName was in
+// a hardcoded set. Three things were wrong with that, in increasing order of
+// seriousness:
+//
+//   1. It read the whole keyspace to delete its own key. It enumerated 51 keys and
+//      fetched 51 values, including the grants of live sessions' clients, to find
+//      the one it wrote itself and already knew the id of.
+//   2. The name list is a guess about the future. "capsid verify-live probe" and
+//      "header probe" were the names known that day. Any client that registers
+//      under one of those names, for any reason, is deleted; a probe that registers
+//      under a new name is not. Both errors are silent.
+//   3. A name is attacker-controlled input. /register is unauthenticated by
+//      necessity, so any caller can choose its own client_name, and a delete rule
+//      keyed on that string is a rule anyone can aim. On a single-user server the
+//      blast radius is small. The shape is still wrong: the run knows exactly which
+//      key it created, and that is the only key it has any business deleting.
+//
+// Two known strays are deliberately left behind rather than swept: "p" and
+// "capsid-smoke-test". They now expire on their own, because index.ts sets a 90 day
+// clientRegistrationTTL and every live registration carries one (measured
+// 2026-08-13). A reap is no longer the thing standing between this namespace and
+// unbounded growth, which is what made the broad version defensible in the first
+// place.
 //
 // No wrangler and no node_modules, on purpose. This runs in the live job, which
-// deliberately skips npm ci so the gate still works when install is broken, so
-// this talks to the KV REST API with global fetch and nothing else.
-//
-// SAFETY. Two independent conditions must both hold before anything is deleted:
-// the key must be under the client: prefix, AND its stored value must carry a
-// clientName this file recognises as a probe. grant:, token:,
-// capsid:oauth-state: and gh:* are never listed, never read and never touched.
-// Deleting is opt-in with --apply; the default is a report.
+// deliberately skips npm ci so the gate still works when install is broken, so this
+// talks to the KV REST API with global fetch and nothing else.
+
+import { readFileSync } from "node:fs";
 
 const ACCOUNT = process.env.CLOUDFLARE_ACCOUNT_ID;
 const TOKEN = process.env.CLOUDFLARE_API_TOKEN;
 // Pinned, same value and same reasoning as scripts/ci-config.mjs: published in
 // capsid/core.md and inert without a token.
 const NAMESPACE_ID = "5fac20b95ad541a39f24eb8c5a753b6c";
-const APPLY = process.argv.includes("--apply");
 
-// Every client_name this portfolio's probes register under. verify-live.mjs uses
-// the first; the second is from a one-off header probe run on 2026-08-12 whose
-// registrations are in the same backlog.
-const PROBE_NAMES = new Set(["capsid verify-live probe", "header probe"]);
+// The id comes from the run that created it: --client <id>, or the file
+// verify-live.mjs writes when PROBE_CLIENT_FILE is set. No discovery.
+function resolveClientId() {
+  const flag = process.argv.indexOf("--client");
+  if (flag !== -1 && process.argv[flag + 1]) return process.argv[flag + 1].trim();
+  const file = process.env.PROBE_CLIENT_FILE;
+  if (!file) return null;
+  try {
+    return readFileSync(file, "utf8").trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+const clientId = resolveClientId();
+
+// Nothing registered means nothing to delete, and that is a real state rather than
+// a failure to look: verify-live.mjs writes the file the moment gate 2 succeeds, so
+// an absent file means gate 2 did not get that far. Said out loud, because a
+// cleanup step that prints nothing is indistinguishable from one that did not run.
+if (!clientId) {
+  console.log("reap: no probe client id recorded (gate 2 did not register one). Nothing to delete.");
+  process.exit(0);
+}
 
 if (!ACCOUNT || !TOKEN) {
   console.error("reap: CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN are required. Refusing to run blind.");
   process.exit(1);
 }
 
+// A client id is generated by the provider and appears in a URL path here, so it is
+// checked rather than trusted. Anything outside this shape is a bug in the caller,
+// not a key to go deleting.
+if (!/^[A-Za-z0-9_-]{8,64}$/.test(clientId)) {
+  console.error(`reap: refusing to delete an implausible client id: ${JSON.stringify(clientId.slice(0, 80))}`);
+  process.exit(1);
+}
+
+const key = `client:${clientId}`;
 const BASE = `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}/storage/kv/namespaces/${NAMESPACE_ID}`;
 const auth = { Authorization: `Bearer ${TOKEN}` };
 
-async function api(path, init = {}) {
-  const resp = await fetch(`${BASE}${path}`, { ...init, headers: { ...auth, ...(init.headers ?? {}) } });
-  if (!resp.ok) {
-    const body = await resp.text().catch(() => "");
-    throw new Error(`${init.method ?? "GET"} ${path} -> ${resp.status} ${body.slice(0, 300)}`);
-  }
-  return resp;
+const del = await fetch(`${BASE}/values/${encodeURIComponent(key)}`, { method: "DELETE", headers: auth });
+if (!del.ok) {
+  console.error(`reap: DELETE ${key} -> ${del.status} ${(await del.text().catch(() => "")).slice(0, 300)}`);
+  process.exit(1);
 }
 
-// List only the client: prefix. Nothing else is even enumerated.
-const keys = [];
-let cursor = "";
-do {
-  const qs = new URLSearchParams({ prefix: "client:", limit: "1000" });
-  if (cursor) qs.set("cursor", cursor);
-  const data = await (await api(`/keys?${qs}`)).json();
-  keys.push(...data.result.map((k) => k.name));
-  cursor = data.result_info?.cursor ?? "";
-} while (cursor);
-
-console.log(`reap: ${keys.length} keys under the client: prefix`);
-
-const doomed = [];
-const kept = [];
-for (const key of keys) {
-  let value;
-  try {
-    value = await (await api(`/values/${encodeURIComponent(key)}`)).json();
-  } catch (err) {
-    // A key that cannot be read is a key that does not get deleted. Failing
-    // toward keeping data is the correct direction for a delete script.
-    kept.push(`${key} (unreadable: ${err.message.slice(0, 60)})`);
-    continue;
-  }
-  if (PROBE_NAMES.has(value?.clientName)) doomed.push(key);
-  else kept.push(`${key} (${value?.clientName ?? "no clientName"})`);
+// Confirm the delete landed. A 200 from the API is what the API returns; it is not
+// evidence the key is gone, and this file's whole job is that one key.
+const check = await fetch(`${BASE}/values/${encodeURIComponent(key)}`, { headers: auth });
+if (check.status !== 404) {
+  console.error(`reap: deleted ${key} but it still reads back with status ${check.status}. Not treating that as done.`);
+  process.exit(1);
 }
 
-console.log(`reap: ${doomed.length} probe registrations, ${kept.length} real clients kept`);
-for (const k of kept) console.log(`  keep ${k}`);
-
-if (doomed.length === 0) {
-  console.log("reap: nothing to delete");
-  process.exit(0);
-}
-
-if (!APPLY) {
-  console.log(`reap: DRY RUN. ${doomed.length} would be deleted. Re-run with --apply.`);
-  for (const k of doomed) console.log(`  would delete ${k}`);
-  process.exit(0);
-}
-
-// Bulk delete takes an array of key names.
-await api("/bulk", {
-  method: "DELETE",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify(doomed),
-});
-console.log(`reap: deleted ${doomed.length} probe client registrations`);
+console.log(`reap: deleted ${key} and confirmed it is gone (read-back 404)`);

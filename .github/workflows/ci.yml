@@ -34,16 +34,37 @@ on:
     - cron: "17 */6 * * *"
   workflow_dispatch:
 
-# Nothing here sets continue-on-error, and nothing should. A step that fails
-# fails its job, and the live job does not run unless checks passed.
+# Least privilege for GITHUB_TOKEN. Absent, the token's scopes come from the
+# repository default, which for this account is read and WRITE on contents. No job
+# here pushes, comments, or touches the API at all: checks runs tsc and node --test,
+# deploy talks to Cloudflare with its own secrets, and the live gate talks to a URL.
+# Declaring it here means the token cannot be used for more than the checkout even
+# if a step, or something a step installs, tries.
+permissions:
+  contents: read
+
+# THIRD PARTY ACTIONS ARE PINNED BY COMMIT SHA, not by tag. A tag is a moving
+# pointer that the tag's owner can repoint at any time, and these actions run with
+# the checkout of this repository and the environment of the deploy job next to
+# them. `@v5` means "whatever v5 means the next time this workflow runs"; a sha
+# means one immutable tree. Dependabot understands the `# v5.x.x` comment form and
+# will still offer bumps.
+#
+# The shas below are what actions/checkout@v5 and actions/setup-node@v5 resolved to
+# on 2026-08-13, read with `gh api repos/<action>/git/ref/tags/v5`. Both actions now
+# have a v7; this change pins the version already in use and deliberately does not
+# ride a major bump in on the back of a security fix.
+#
+# Nothing here sets continue-on-error, and nothing should. A step that fails fails
+# its job, and the live job does not run unless checks passed.
 jobs:
   checks:
     name: checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -82,9 +103,9 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -125,15 +146,16 @@ jobs:
     if: github.event_name != 'pull_request' && !failure() && !cancelled()
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version-file: .nvmrc
 
-      # No npm ci on purpose: scripts/verify-live.mjs imports nothing at all and
-      # runs on global fetch, so it needs no node_modules. Keeping it
-      # dependency-free is what lets the live gate run even if install is broken.
+      # No npm ci on purpose: scripts/verify-live.mjs imports nothing outside the
+      # Node standard library and runs on global fetch, so it needs no node_modules.
+      # Keeping it dependency-free is what lets the live gate run even if install is
+      # broken.
 
       # THE SHA-EQUALITY GATE. EXPECT_SHA is set only when the deploy job in
       # THIS run actually succeeded, so gate 1 polls /health until it reports
@@ -153,13 +175,19 @@ jobs:
         env:
           EXPECT_SHA: ${{ needs.deploy.result == 'success' && github.sha || '' }}
           VERIFY_POLL_ATTEMPTS: "40"
+          # Gate 2 writes the client id it registered here, and the reap step below
+          # deletes exactly that key. The file is the whole channel between them.
+          PROBE_CLIENT_FILE: ${{ runner.temp }}/probe-client-id
         run: npm run verify:live
 
       # Gate 2 registers a fresh client every run, and it must: reusing one would
-      # take the approved-client fast path that hid the 26-day outage, and the
-      # run would prove nothing. So the registrations are cleaned up here instead,
-      # AFTER the gate has finished with its client. 44 had accumulated by
-      # 2026-08-12 and nothing was removing them.
+      # take the approved-client fast path that hid the 26-day outage, and the run
+      # would prove nothing. So the registration is cleaned up here instead, AFTER
+      # the gate has finished with its client.
+      #
+      # It deletes ONE key: the id gate 2 recorded in PROBE_CLIENT_FILE. It does not
+      # list the namespace and does not match on client names, which is what it used
+      # to do (see the header of the script for why that was wrong).
       #
       # Runs even when verify:live failed (always()), because a failed gate still
       # registered a client and leaving it behind would make the leak worse on
@@ -168,10 +196,11 @@ jobs:
       #
       # No npm ci needed here either; the script uses global fetch against the KV
       # REST API precisely so this job stays install-free.
-      - name: Reap probe client registrations
+      - name: Reap this run's probe client registration
         if: always()
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: node scripts/reap-probe-clients.mjs --apply
+          PROBE_CLIENT_FILE: ${{ runner.temp }}/probe-client-id
+        run: node scripts/reap-probe-clients.mjs
 
