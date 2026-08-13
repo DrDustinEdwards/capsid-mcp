@@ -195,3 +195,54 @@ test("the one genuine hit still fires after all three fixes", () => {
   assert.equal(claims[0].states, "11");
   assert.equal(claims[0].authoritative, "24");
 });
+
+// Defects 4 and 5, the two false positives that survived the 2026-08-14 scoping fixes.
+
+test("a transition states the RESULTING count, not the pre-state", () => {
+  // "19 to 22" said the surface stopped being 19. The lint reported "states 19".
+  const doc = { path: "core.md", type: "core", body: "Expansion layer, tool surface 19 to 22 (links, brief, ci_status)." };
+  const claims = scanCountClaims([doc], "capsid");
+  assert.equal(claims.length, 1);
+  assert.equal(claims[0].states, "22", "the pre-state was reported instead of the resulting state");
+
+  // And when the resulting state is current, nothing fires.
+  assert.deepEqual(scanCountClaims([{ ...doc, body: "the surface went 22 to 24 tools" }], "capsid"), []);
+});
+
+test("a transition inside an append-only log is history, not a claim", () => {
+  // A ruling log's genre IS the record of changes. capsid/decisions.md's newest tools
+  // mention is a dated heading saying the surface went 19 to 22 in July.
+  const log = { path: "decisions.md", type: "decision", body: "## 2026-07-18: Expansion layer, tool surface 19 to 22 (links, brief, ci_status)" };
+  assert.deepEqual(scanCountClaims([log], "capsid"), []);
+  // A flat assertion of a stale total in the same log still fires.
+  const stale = { path: "decisions.md", type: "decision", body: "The server exposes 19 tools." };
+  assert.equal(scanCountClaims([stale], "capsid").length, 1);
+});
+
+test("a subset count is not a total", () => {
+  // The exact sentence that kept firing after the document was corrected.
+  const doc = { path: "concept-build-operations.md", type: "concept", body: "The other 12 tools are read-open: list, read, brief." };
+  assert.deepEqual(scanCountClaims([doc], "capsid"), []);
+  for (const phrase of ["The remaining 12 tools are read-open.", "Only 12 tools are gated.", "Of those 12 tools, none are gated."]) {
+    assert.deepEqual(scanCountClaims([{ path: "x.md", type: "concept", body: phrase }], "capsid"), [], `subset not exempted: ${phrase}`);
+  }
+  // An unqualified total in the same document still fires.
+  assert.equal(scanCountClaims([{ path: "x.md", type: "concept", body: "The server exposes 19 tools." }], "capsid").length, 1);
+});
+
+test("N of M: M is checked as the total, N is exempt", () => {
+  // Correct pair: M matches the authoritative total, so nothing fires.
+  assert.deepEqual(scanCountClaims([{ path: "x.md", type: "concept", body: "Gated tools (12 of 24), all failing with DENIED." }], "capsid"), []);
+  // Stale M fires, and reports M rather than N.
+  const claims = scanCountClaims([{ path: "x.md", type: "concept", body: "Gated tools (11 of 22)." }], "capsid");
+  assert.equal(claims.length, 1);
+  assert.equal(claims[0].states, "22");
+});
+
+test("N of M is checked for internal consistency even when M is right", () => {
+  // A subset larger than its total is wrong without reference to any artifact.
+  const claims = scanCountClaims([{ path: "x.md", type: "concept", body: "Gated tools (30 of 24)." }], "capsid");
+  assert.equal(claims.length, 1);
+  assert.match(claims[0].authoritative, /cannot exceed/);
+  assert.match(claims[0].note ?? "", /internal contradiction/);
+});

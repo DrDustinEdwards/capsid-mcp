@@ -135,11 +135,60 @@ export function scanCountClaims(docs: ScannableDoc[], namespace: string): CountC
       pending.set(noun, list);
     };
 
-    // "22 tools", "tool surface at 22", "surface is 22"
+    // Tool-count mentions, CLASSIFIED before they are compared. A bare number next to
+    // the word "tools" is not automatically a claim that the surface is that size, and
+    // treating it as one produced both surviving false positives of 2026-08-14.
+    //
+    // Three passes, in order, each consuming the text it matched so a later pass
+    // cannot re-read the same numbers as something else.
+    const consumed: Array<[number, number]> = [];
+    const isConsumed = (start: number) => consumed.some(([a, b]) => start >= a && start < b);
+    const consume = (m: RegExpExecArray) => consumed.push([m.index, m.index + m[0].length]);
+
+    // PASS 1, "N of M tools" and "tools (N of M)". M is the total; N is a SUBSET of it
+    // and says nothing about the surface size. Both numbers are still worth something:
+    // if N exceeds M the sentence contradicts itself, and that is checkable without
+    // knowing the authoritative figure at all.
+    for (const re of [/(\d+)\s*(?:of|\/)\s*(\d+)\s+tools\b/gi, /tools?\s*\((\d+)\s*(?:of|\/)\s*(\d+)\)/gi]) {
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(body)) !== null) {
+        consume(m);
+        const [, subset, total] = m;
+        if (Number(subset) > Number(total)) {
+          flag("tools", m, `${subset} of ${total}`, `a subset cannot exceed its total`, "internal contradiction: the subset is larger than the total it is drawn from");
+        }
+        if (!YEAR.test(total)) flag("tools", m, total, String(authoritative.tools));
+      }
+    }
+
+    // PASS 2, "N to M tools" and "tool surface N to M". A transition states that the
+    // count BECAME M, so M is the resulting state and N is the pre-state. Flagging N
+    // reported "the surface is 19" against a sentence saying it stopped being 19.
+    //
+    // In an append-only log a transition is exempt entirely: "it went from 19 to 22" is
+    // a record of a change that happened on a date, not an assertion about now, and
+    // that is the whole genre of a ruling log.
+    for (const re of [/(\d+)\s+to\s+(\d+)\s+tools\b/gi, /tool surface[^.\n]*?\b(\d+)\s+to\s+(\d+)\b/gi]) {
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(body)) !== null) {
+        consume(m);
+        if (historyOnly) continue;
+        const resulting = m[2];
+        if (!YEAR.test(resulting)) flag("tools", m, resulting, String(authoritative.tools));
+      }
+    }
+
+    // PASS 3, a plain "N tools" or "tool surface ... N", unless it is SUBSET-QUALIFIED.
+    // "The other 12 tools are read-open" is a true statement about a subset, and it was
+    // flagged as a stale total even after the document had been corrected.
+    const SUBSET_PREFIX = /\b(?:other|others|remaining|rest|read-open|read open|gated|write-gated|ungated|only|another|of those|of these|first|last)\b[^.\n]{0,12}$/i;
     for (const re of [/(\d+)\s+tools\b/gi, /tool surface[^.\n]*?\b(\d+)\b/gi]) {
       let m: RegExpExecArray | null;
       while ((m = re.exec(body)) !== null) {
+        if (isConsumed(m.index)) continue;
         if (YEAR.test(m[1])) continue;
+        const numberAt = m.index + m[0].indexOf(m[1]);
+        if (SUBSET_PREFIX.test(body.slice(Math.max(0, numberAt - 40), numberAt))) continue;
         flag("tools", m, m[1], String(authoritative.tools));
       }
     }
