@@ -2,27 +2,54 @@
 # PreToolUse hook on Bash: blocks unscoped git adds (git add -A / --all / .).
 # Canon: capsid/conventions.md, scoped commits with explicit named paths only.
 #
-# PreToolUse plus exit 2 is the only combination that blocks the tool call.
+# PreToolUse plus exit 2 is the only combination that blocks the tool call, and
+# jq is not guaranteed on macOS, so the check is written in Python.
 #
-# FAILS CLOSED (2026-08-09). Contract: checker exit 3 blocks, exit 0 passes,
-# EVERY other outcome blocks and names the code. The previous version carried
-# both of the defects that f4c30f9 fixed in the sibling no-em-dash.sh and that
-# were never ported here:
-#   1. The interpreter was probed with command -v, which the Microsoft Store
-#      python3 stub satisfies without being an interpreter.
-#   2. A missing interpreter exited 1, which does not block a PreToolUse, so the
-#      check silently enforced nothing while printing that it had not run.
-# Measured 2026-08-09 on the Windows host: with the interpreter hidden, the old
-# script returned exit 1 on "git add -A" (fails open) where the sibling returned
-# exit 2 (fails closed).
+# Token-based, so paths that merely START with a dot (.claude/settings.json)
+# pass; only the bare tokens -A, --all, . and ./ block.
 #
-# The interpreter is therefore probed by RUNNING it, not by command -v.
-# Candidates in order: python3, python, py (the Windows launcher). The first one
-# that echoes the probe token wins.
+# CANONICAL COPY, ruled 2026-08-16. Two properties define it, and neither is
+# negotiable without a new ruling.
 #
-# Token-based check so paths that merely START with a dot (.claude/settings.json)
-# pass; only the bare tokens -A, --all, ., ./ block.
-# Functionally tested 2026-07-17: 10/10 cases.
+# FAILS CLOSED. The interpreter is probed by RUNNING candidates, not by
+# command -v, because on Windows the bare name python3 resolves to the Microsoft
+# Store stub, which satisfies command -v, prints an install notice and exits 49.
+# stdin is decoded from sys.stdin.buffer as UTF-8 rather than trusting the text
+# layer, which is cp1252 on Windows. CONTRACT, matching no-em-dash.sh exactly:
+# checker exit 3 blocks, exit 0 passes, EVERY other outcome blocks and names the
+# code. Before 2026-08-11 none of that held here: a missing interpreter exited 1,
+# which does not block a tool call, and invalid JSON and any unexpected checker
+# exit both fell through to 0.
+#
+# WHOLE-STRING MATCHING. The scan reads the entire command string. A variant
+# anchoring the match to command position was tried in capsid-mcp (19554e1) and
+# is REJECTED as of 2026-08-16: it removed one false positive and let three real
+# bypasses through, each measured staging every file in a throwaway repo.
+# "if true; then git add -A; fi", "env FOO=1 git add -A", and a backslash
+# newline continuation all passed the narrowed matcher and are blocked by this
+# one.
+#
+# KNOWN AND ACCEPTED FALSE POSITIVE, measured 2026-08-16 rather than assumed: it
+# fires on UNQUOTED adjacency only, such as the rule written out in a heredoc
+# body. A QUOTED mention passes, because the closing quote glues to the token
+# and defeats the equality test, so a commit message quoting the rule inside
+# double quotes is not blocked. For the cases that do fire the fix is to REWORD,
+# not to loosen the matcher: parsing shell well enough to tell a heredoc from an
+# argument is not something a guard should attempt, and for a blocking safety
+# hook a false positive costs a rewording while a false negative costs the thing
+# the hook exists to prevent. It fired on the very commit that landed the
+# hardening (bb63828).
+#
+# KNOWN GAP, recorded and not fixed here: the check is token EQUALITY against
+# four literal spellings, so a quoted flag, bundled short options, a subshell,
+# and the repo-root pathspec all stage everything and are NOT blocked. Widening
+# that tuple is a separate ruling.
+#
+# Verified 2026-08-11 by planting all three arms, and re-verified 2026-08-16
+# against this canonical file before it landed anywhere. The older note
+# "Functionally tested 2026-07-17: 10/10 cases" is RETIRED: it covered token
+# matching only, predates every fail-open finding above, and never exercised
+# them.
 set -uo pipefail
 
 block() {
@@ -51,15 +78,7 @@ try:
 except Exception:
     sys.exit(4)
 cmd = str((d.get("tool_input") or {}).get("command") or "")
-# Only inspect segments that START a command: string start, or immediately
-# after a shell separator. The previous version scanned the whole string with
-# finditer, so prose that merely MENTIONED an add anywhere in a heredoc commit
-# message tripped it. That fired on 2026-08-09 while committing this hook, on a
-# message describing these very test cases.
-for seg in re.split(r"[\n;&|]+", cmd):
-    m = re.match(r"\s*git\s+add\s+(.*)$", seg)
-    if not m:
-        continue
+for m in re.finditer(r"git\s+add\s+([^|;&]*)", cmd):
     toks = m.group(1).split()
     if any(t in ("-A", "--all", ".", "./") for t in toks):
         sys.exit(3)
@@ -75,6 +94,7 @@ case "$rc" in
     {
       echo "Blocked: unscoped git add (-A, --all, or .)."
       echo "Canon (capsid/conventions.md): scoped commits only. git add the named paths you changed."
+      echo "Run git diff on each path first: a named path is not a scoped change if the file carries edits you did not write."
     } >&2
     exit 2
     ;;
