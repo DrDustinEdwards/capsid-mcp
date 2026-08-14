@@ -28,20 +28,75 @@ interface FakeOptions {
   namespaceExists?: boolean;
   body?: string;
   updatedAt?: string;
+  // The document does not exist, so the handler takes its create path.
+  exists?: boolean;
+  // A CONCURRENT WRITER. Runs once, immediately after the handler's pre-read of
+  // the document row and therefore BEFORE its commit-time read and its batch.
+  // That is exactly the window the write predicate exists to close: it is where
+  // a racing write lands, and with a 90 second elicitation sitting in it, it is
+  // not small.
+  raceAfterPreRead?: (live: LiveState) => void;
+}
+
+interface LiveState {
+  body: string | null;
+  exists: boolean;
+  updatedAt: string;
+}
+
+// The guard statements the server arms. Recognised by SQL shape so the fake can
+// evaluate the predicate the way SQLite would, rather than assuming it passed.
+//
+// EXTENSION NOTE (audit 2 batch A). Until now this fake recorded statements and
+// returned success unconditionally, so it could not express a race at all: every
+// batch "succeeded" whatever the store contained. Two things were added, both
+// minimal and both load-bearing for the tests below. First, batch() now
+// EVALUATES the three guard shapes against current state and throws the real NOT
+// NULL violation when one fires, which is what D1 does. Second, mutable live
+// state plus a raceBeforeCommit hook, so a test can put a competing write in the
+// exact window the predicate exists to close. Without both, a predicate test
+// would be asserting against a store that cannot disagree with it, which is the
+// vacuous-guard shape this repo has been bitten by four times.
+const GUARD_ERROR = "NOT NULL constraint failed: document_versions.document_id";
+
+function guardFires(sql: string, params: unknown[], live: LiveState): boolean {
+  const flat = sql.replace(/\s+/g, " ");
+  if (!/INSERT INTO document_versions \(document_id, namespace, path\) SELECT NULL/i.test(flat)) return false;
+  if (/AND body IS \?3/i.test(flat)) return !(live.exists && live.body === params[2]); // requireBodyUnchanged
+  if (/WHERE EXISTS/i.test(flat)) return live.exists; // requireMissing
+  return !live.exists; // requireExists
 }
 
 function fakeDb(opts: FakeOptions = {}) {
-  const { namespaceExists = true, body: priorBody = "prior body", updatedAt = "2020-01-01 00:00:00" } = opts;
+  const {
+    namespaceExists = true,
+    body: priorBody = "prior body",
+    updatedAt = "2020-01-01 00:00:00",
+    exists = true,
+    raceAfterPreRead,
+  } = opts;
   const recorded: Recorded[] = [];
-  const doc = { id: 7, title: "Prior title", body: priorBody, type: "note", status: "published", tags: "a,b", updated_at: updatedAt };
+  const live: LiveState = { body: priorBody as string | null, exists, updatedAt };
+  const doc = () => ({ id: 7, title: "Prior title", body: live.body, type: "note", status: "published", tags: "a,b", updated_at: live.updatedAt });
 
+  let raced = false;
   const answer = (sql: string) => {
     if (/FROM namespaces/i.test(sql)) return namespaceExists ? { namespace: "capsid" } : null;
     if (/FROM document_versions WHERE id/i.test(sql)) {
       return { id: 42, document_id: 7, namespace: "capsid", path: "doc.md", title: "Old title", body: "old body", snapshot_at: "2026-08-01 00:00:00" };
     }
     if (/SELECT 1 AS ok FROM documents/i.test(sql)) return { ok: 1 };
-    if (/FROM documents/i.test(sql)) return doc;
+    if (/FROM documents/i.test(sql)) {
+      // The commit-time read of updated_at is NOT the pre-read, so it must see
+      // whatever the racing writer left behind.
+      const isPreRead = !/SELECT updated_at FROM documents/i.test(sql);
+      const value = live.exists ? doc() : null;
+      if (isPreRead && raceAfterPreRead && !raced) {
+        raced = true;
+        raceAfterPreRead(live);
+      }
+      return value;
+    }
     return null;
   };
 
@@ -59,10 +114,16 @@ function fakeDb(opts: FakeOptions = {}) {
 
   return {
     recorded,
+    live,
     db: {
       prepare: (sql: string) => stmt(sql),
       batch: async (statements: Array<{ sql: string; params: unknown[] }>) => {
-        for (const s of statements) recorded.push({ sql: s.sql, params: s.params, via: "batch" });
+        for (const s of statements) {
+          // A guard that fires aborts the transaction, so nothing this batch
+          // would have written is recorded. That is the property under test.
+          if (guardFires(s.sql, s.params, live)) throw new Error(GUARD_ERROR);
+          recorded.push({ sql: s.sql, params: s.params, via: "batch" });
+        }
         return statements.map(() => ({ results: [], meta: { changes: 1 } }));
       },
     },
@@ -70,13 +131,18 @@ function fakeDb(opts: FakeOptions = {}) {
 }
 
 async function connect(operator: boolean, opts: FakeOptions = {}) {
-  const { recorded, db } = fakeDb(opts);
+  const { recorded, db, live } = fakeDb(opts);
   const server = buildServer({ DB: db } as never, operator, "test:guard");
   const client = new Client({ name: "invariant-test", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-  return { client, recorded, close: () => client.close() };
+  return { client, recorded, live, close: () => client.close() };
 }
+
+const call = async (client: Client, name: string, args: Record<string, unknown>) =>
+  (await client.callTool({ name, arguments: args })) as { isError?: boolean; content: Array<{ text: string }> };
+
+const shaOf = async (s: string) => (await import("node:crypto")).createHash("sha256").update(s).digest("hex");
 
 const sqlFor = (recorded: Recorded[]) => recorded.map((r) => r.sql.replace(/\s+/g, " ")).join("\n");
 
@@ -182,7 +248,10 @@ test("write accepts the if_match it just handed out", async () => {
 test("write, delete and move all refuse an unregistered namespace, and write nothing", async () => {
   // A typo in `namespace` used to open a shadow namespace: documents the namespaces
   // list cannot see, the lint loop never counts, and brief will never assemble.
-  for (const { tool, args } of MUTATORS.filter((m) => m.tool !== "restore")) {
+  // restore was excluded here until 2026-08-17 (audit 2, F31). It checks the
+  // namespace like every other mutator, so the exclusion was hiding nothing and
+  // the loop is now whole.
+  for (const { tool, args } of MUTATORS) {
     const { client, recorded, close } = await connect(true, { namespaceExists: false });
     const result = (await client.callTool({
       name: tool,
@@ -289,4 +358,173 @@ test("a UTC timestamp is not read as local time", async () => {
   // A future timestamp is not a concurrent edit, it is a clock problem.
   assert.equal(concurrentEditWarning("2026-08-14 13:00:00", now), null);
   assert.equal(concurrentEditWarning(null, now), null);
+});
+
+// AUDIT 2 BATCH A, 2026-08-17: the write predicate.
+//
+// Every test below turns on a store that CHANGES between the handler's pre-read
+// and its commit. Before this batch the fake could not express that at all, so
+// none of these could have failed for the right reason.
+
+test("PREDICATE: a body that changes after the pre-read is refused at commit, not accepted", async () => {
+  // The pre-check passes (the sha is correct when the handler reads it) and the
+  // refusal therefore comes from the in-batch guard. That is the distinction:
+  // this is the window the old pre-read left open.
+  const sha = await shaOf("prior body");
+  const { client, recorded, close } = await connect(true, {
+    body: "prior body",
+    raceAfterPreRead: (live) => {
+      live.body = "body written by someone else";
+    },
+  });
+  const result = await call(client, "write", {
+    namespace: "capsid", path: "doc.md", title: "New", body: "new body", confirm: true, if_match: sha,
+  });
+  await close();
+  assert.equal(result.isError, true, "the racing write was overwritten instead of refused");
+  assert.match(result.content[0].text, /stored body changed after this write read it/);
+  assert.match(result.content[0].text, /Current sha256 is [0-9a-f]{64}/);
+  // The sha reported is the RACER's body, which is what the caller must rebase
+  // onto. Reporting the sha it already knew would be useless.
+  assert.match(result.content[0].text, new RegExp(await shaOf("body written by someone else")));
+  // Fail closed: the aborted batch left nothing behind.
+  assert.deepEqual(recorded, [], "a refused predicate still committed statements");
+});
+
+test("PREDICATE: an overwrite with no confirm is refused before any commit", async () => {
+  // The pre-elicitation arm. The in-memory client advertises no elicitation
+  // capability, so the handler refuses rather than waiting. The post-elicitation
+  // arm is the guard itself, which the test above proves, and both arm the same
+  // statement.
+  const { client, recorded, close } = await connect(true, { body: "prior body" });
+  const result = await call(client, "write", {
+    namespace: "capsid", path: "doc.md", title: "New", body: "new body",
+  });
+  await close();
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /confirmation required/);
+  assert.deepEqual(recorded, [], "the confirmation path wrote before it was confirmed");
+});
+
+test("PREDICATE: an unguarded update still lands, so the guard is not a blanket refusal", async () => {
+  // The other side. Without this, a predicate that refused everything would pass
+  // every test above and break every legitimate write.
+  const { client, recorded, close } = await connect(true, { body: "prior body" });
+  const result = await call(client, "write", {
+    namespace: "capsid", path: "doc.md", title: "New", body: "new body", confirm: true,
+  });
+  await close();
+  assert.ok(!result.isError, `an ordinary write was refused: ${result.content?.[0]?.text}`);
+  assert.match(sqlFor(recorded), /INSERT INTO documents/);
+});
+
+test("CREATE COLLISION: exactly one of two racing creates wins, and the loser is refused", async () => {
+  // Both writers pre-read nothing, so both take the create path. The first
+  // commits. The second must NOT fall into ON CONFLICT DO UPDATE, because its
+  // statement list carries no snapshot (there was nothing to snapshot when it
+  // looked), so the winner's body would be gone with no version row anywhere.
+  const { client, recorded, close } = await connect(true, {
+    exists: false,
+    raceAfterPreRead: (live) => {
+      live.exists = true;
+      live.body = "the winner body";
+    },
+  });
+  const result = await call(client, "write", {
+    namespace: "capsid", path: "new-doc.md", title: "Loser", body: "the loser body",
+  });
+  await close();
+  assert.equal(result.isError, true, "the second create silently overwrote the first");
+  assert.match(result.content[0].text, /create collision/);
+  assert.match(result.content[0].text, /another writer created it first/);
+  assert.deepEqual(recorded, [], "the losing create still wrote statements");
+});
+
+test("CREATE COLLISION: an uncontested create still succeeds", async () => {
+  const { client, recorded, close } = await connect(true, { exists: false });
+  const result = await call(client, "write", {
+    namespace: "capsid", path: "new-doc.md", title: "T", body: "b",
+  });
+  await close();
+  assert.ok(!result.isError, `an uncontested create was refused: ${result.content?.[0]?.text}`);
+  const out = JSON.parse(result.content[0].text) as { action: string; snapshotted: boolean };
+  assert.equal(out.action, "created");
+  assert.equal(out.snapshotted, false);
+  assert.match(sqlFor(recorded), /INSERT INTO documents/);
+});
+
+test("restore accepts if_match and refuses a stale one", async () => {
+  const stale = await connect(true, { body: "prior body" });
+  const staleRes = await call(stale.client, "restore", {
+    namespace: "capsid", path: "doc.md", version_id: 42, confirm: true, if_match: "0".repeat(64),
+  });
+  await stale.close();
+  assert.equal(staleRes.isError, true, "restore accepted a stale if_match");
+  assert.match(staleRes.content[0].text, /if_match mismatch/);
+  assert.match(staleRes.content[0].text, /Current sha256 is [0-9a-f]{64}/);
+  assert.deepEqual(stale.recorded, [], "a refused restore still wrote statements");
+
+  const good = await connect(true, { body: "prior body" });
+  const okRes = await call(good.client, "restore", {
+    namespace: "capsid", path: "doc.md", version_id: 42, confirm: true, if_match: await shaOf("prior body"),
+  });
+  await good.close();
+  assert.ok(!okRes.isError, `restore refused a correct if_match: ${okRes.content?.[0]?.text}`);
+  assert.match(sqlFor(good.recorded), /INSERT INTO document_versions \(document_id, namespace, path, title, body\)/);
+});
+
+test("restore refuses at the PREDICATE when the live body changes after its pre-read", async () => {
+  const { client, recorded, close } = await connect(true, {
+    body: "prior body",
+    raceAfterPreRead: (live) => {
+      live.body = "changed under the restore";
+    },
+  });
+  const result = await call(client, "restore", {
+    namespace: "capsid", path: "doc.md", version_id: 42, confirm: true, if_match: await shaOf("prior body"),
+  });
+  await close();
+  assert.equal(result.isError, true, "restore committed over a body that changed beneath it");
+  assert.match(result.content[0].text, /live body changed after this restore read it/);
+  assert.deepEqual(recorded, [], "a refused restore still committed statements");
+});
+
+test("restore recreating a deleted document refuses a racing create", async () => {
+  const { client, recorded, close } = await connect(true, {
+    exists: false,
+    raceAfterPreRead: (live) => {
+      live.exists = true;
+      live.body = "recreated by someone else";
+    },
+  });
+  const result = await call(client, "restore", {
+    namespace: "capsid", path: "doc.md", version_id: 42, confirm: true,
+  });
+  await close();
+  assert.equal(result.isError, true, "restore overwrote a document created during its flight");
+  assert.match(result.content[0].text, /create collision/);
+  assert.deepEqual(recorded, [], "the losing restore still wrote statements");
+});
+
+test("the concurrency warning is read at COMMIT time, not from the pre-read", async () => {
+  // The pre-read sees a timestamp two years old, so the OLD code, which computed
+  // the warning from that row, could not warn no matter what happened next. A
+  // writer then lands during this handler's flight and the commit-time read sees
+  // it. This test fails against the pre-change code, which is what makes it
+  // evidence rather than decoration.
+  const fresh = new Date(Date.now() - 5 * 60_000).toISOString().slice(0, 19).replace("T", " ");
+  const { client, close } = await connect(true, {
+    updatedAt: "2020-01-01 00:00:00",
+    raceAfterPreRead: (live) => {
+      live.updatedAt = fresh;
+    },
+  });
+  const result = await call(client, "write", {
+    namespace: "capsid", path: "doc.md", title: "New", body: "new body", confirm: true,
+  });
+  await close();
+  const out = JSON.parse(result.content[0].text) as { concurrency_warning?: string };
+  assert.ok(out.concurrency_warning, "the warning was computed from the stale pre-read, not from a fresh read at commit");
+  assert.match(out.concurrency_warning, /possible concurrent edit/);
+  assert.match(out.concurrency_warning, new RegExp(fresh));
 });

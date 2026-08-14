@@ -168,6 +168,72 @@ function isMissingRowAbort(err: unknown): boolean {
   return (err instanceof Error ? err.message : String(err)).includes(GUARD_VIOLATION);
 }
 
+// THE WRITE PREDICATE (audit 2 finding F12/F13/F14, 2026-08-17).
+//
+// Before this, if_match was a PRE-READ: select the body, hash it, compare, then
+// run an unguarded batch. Everything between the compare and the commit was
+// unprotected, and the window is not theoretical: mode 'replace' over a large
+// document elicits a confirmation first, so the gap could be the full 90 second
+// elicitation timeout. A writer that landed inside that window was overwritten
+// with a clean success and no signal, which is the precise failure if_match
+// exists to prevent.
+//
+// So the expectation moves INSIDE the batch, using the same mechanism
+// requireExists uses and for the same reason: SQLite has no RAISE outside a
+// trigger body, D1's meta.changes is inflated by the FTS5 triggers on
+// `documents` and cannot be used to count what a batch did, so the check has to
+// be a STATEMENT that aborts the transaction rather than a number read back
+// afterwards.
+//
+// WHY BODY EQUALITY RATHER THAN A STORED SHA COLUMN. The obvious alternative is
+// a `body_sha` column compared in the WHERE clause. It was not taken: a hash
+// column is a second source of truth for something the row already contains, it
+// has to be recomputed correctly by every present and future write path, and a
+// path that forgets leaves the guard comparing a stale hash while looking
+// green. That is the mirrored-state defect class this repo already guards
+// against elsewhere. Comparing the body itself needs no migration, cannot drift
+// from the thing it describes, and is strictly stronger than comparing a digest
+// of it. The caller still speaks sha256, which is what it already holds; the
+// server resolves that to the body it read and asserts THAT body is still
+// there.
+//
+// `IS` rather than `=` because a NULL body is a legitimate stored value and
+// `body = NULL` is never true in SQL, which would make the guard fire forever
+// on any document with a null body.
+function requireBodyUnchanged(
+  db: D1Database,
+  namespace: string,
+  path: string,
+  expectedBody: string | null
+): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO document_versions (document_id, namespace, path)
+       SELECT NULL, ?1, ?2
+       WHERE NOT EXISTS (SELECT 1 FROM documents WHERE namespace = ?1 AND path = ?2 AND body IS ?3)`
+    )
+    .bind(namespace, path, expectedBody);
+}
+
+// The create-path half. Fires when the row DOES exist, so a create that raced
+// another create aborts instead of falling into the ON CONFLICT branch and
+// overwriting a body that was never snapshotted, because the snapshot statement
+// is only added when the pre-read saw a row.
+function requireMissing(db: D1Database, namespace: string, path: string): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO document_versions (document_id, namespace, path)
+       SELECT NULL, ?1, ?2
+       WHERE EXISTS (SELECT 1 FROM documents WHERE namespace = ?1 AND path = ?2)`
+    )
+    .bind(namespace, path);
+}
+
+// All three guards abort with the same NOT NULL violation, so the caller cannot
+// tell them apart from the message and must know which one it armed. Each write
+// site arms exactly one.
+type WriteGuard = "none" | "body" | "missing";
+
 // Documents may only be written to a namespace that has a `namespaces` row.
 //
 // Writing to a namespace label does not create it, so a typo in `namespace` used
@@ -547,6 +613,11 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       // more ceremonious than the dangerous one, and callers would go back to
       // full-body rewrites. patch and replace both mutate existing text and are
       // NOT exempt.
+      // Set when the client actually sat through an elicitation. A human said
+      // "overwrite THIS" about a body that was read before the prompt went out,
+      // and the answer can arrive up to 90 seconds later, so the confirmation is
+      // about a specific body and goes stale exactly like an if_match does.
+      let elicited = false;
       if (prior && confirm !== true && writeMode !== "append" && writeMode !== "meta") {
         const verdict = await confirmDestructive(
           server,
@@ -558,8 +629,26 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
             `confirmation required: ${namespace}/${path} already exists. Re-run write with confirm: true to overwrite it. The current version will be snapshotted to document_versions first.`
           );
         }
+        elicited = true;
       }
       const statements: D1PreparedStatement[] = [];
+      // Arm exactly one guard, and arm it FIRST so the transaction aborts before
+      // any other statement is attempted.
+      //
+      // A create guards on the row still being absent. An update guards on the
+      // body still being the one this call read, and only when the caller asked
+      // for that (if_match) or a human confirmed it (elicited). An unguarded
+      // update keeps its existing last-writer-wins behaviour on purpose:
+      // requiring if_match everywhere would refuse every legitimate rapid edit
+      // and would break append, which is safe by construction.
+      let guard: WriteGuard = "none";
+      if (!prior) {
+        guard = "missing";
+        statements.push(requireMissing(db, namespace, path));
+      } else if (if_match !== undefined || elicited) {
+        guard = "body";
+        statements.push(requireBodyUnchanged(db, namespace, path, prior.body));
+      }
       if (prior) {
         statements.push(
           db
@@ -635,7 +724,47 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
             .bind(actor, namespace, path, JSON.stringify({ edges: parsedLinks.edges.length }))
         );
       }
-      await db.batch(statements);
+      // The warning is computed from a read taken HERE, not from the pre-read at
+      // the top of the handler. Between those two points this handler may have
+      // sat in a 90 second elicitation, which is exactly when a racing write is
+      // most likely to have landed and precisely the case the warning exists to
+      // surface. Reading it late costs one SELECT and makes the telemetry
+      // describe the state the write is actually committing against.
+      const atCommit = prior
+        ? await db
+            .prepare("SELECT updated_at FROM documents WHERE namespace = ?1 AND path = ?2")
+            .bind(namespace, path)
+            .first<{ updated_at: string }>()
+        : null;
+      try {
+        await db.batch(statements);
+      } catch (err) {
+        if (!isMissingRowAbort(err)) throw err;
+        if (guard === "missing") {
+          return fail(
+            `create collision on ${namespace}/${path}: the document did not exist when this write started and it does now, so another writer created it first. ` +
+              `Nothing was written and the other writer's body is intact. ` +
+              `Re-read the document and retry as an update if you still mean to change it.`
+          );
+        }
+        // guard === "body". Report the sha that is stored NOW so the caller can
+        // rebase without a second round trip to find out what it lost to.
+        const current = await db
+          .prepare("SELECT body FROM documents WHERE namespace = ?1 AND path = ?2")
+          .bind(namespace, path)
+          .first<{ body: string | null }>();
+        if (!current) {
+          return fail(
+            `conflict on ${namespace}/${path}: the document was deleted while this write was in flight. Nothing was written.`
+          );
+        }
+        const currentSha = await sha256Hex(current.body ?? "");
+        return fail(
+          `${if_match !== undefined ? "if_match mismatch" : "stale confirmation"} on ${namespace}/${path}: the stored body changed after this write read it${elicited && if_match === undefined ? " and while the overwrite confirmation was pending" : ""}. Nothing was written. ` +
+            `Current sha256 is ${currentSha}. ` +
+            `Re-read the document, reapply your change to the current body, and retry.`
+        );
+      }
       // Warn, do not reject, when an edge points at a document that does not
       // exist. Rejecting would block the legitimate case of asserting an edge
       // before its target is written, and edges may also address repo files
@@ -683,7 +812,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
         // Only when the caller did not already guard the write.
         ...(prior && if_match === undefined
           ? (() => {
-              const warning = concurrentEditWarning(prior.updated_at, Date.now());
+              const warning = concurrentEditWarning(atCommit?.updated_at ?? prior.updated_at, Date.now());
               return warning ? { concurrency_warning: warning } : {};
             })()
           : {}),
@@ -752,15 +881,16 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
     "restore",
     {
       description:
-        "Restore a document's title and body from one of its retained versions (see history). Goes through the normal write path, so the CURRENT body is snapshotted first and the restore is audit-logged: a restore is itself undoable. Restoring a deleted document recreates it. Does not restore type, status, tags or links, which a version row does not carry. Requires operator key and confirm: true.",
+        "Restore a document's title and body from one of its retained versions (see history). It carries the same two write-path invariants as write: the CURRENT body is snapshotted to document_versions first and the restore is appended to audit_log, so a restore is itself undoable. It is NOT the write tool's code path and differs from it deliberately: the snapshotted bytes go back exactly as they were stored, with no dash normalization, and type, status, tags and links are neither validated nor restored, because a version row does not carry them. Restoring a deleted document recreates it. Optional if_match: the sha256 of the body you believe is live now, enforced as a commit-time predicate, so a restore cannot land on a body that changed after you read it. Requires operator key and confirm: true.",
       inputSchema: {
         namespace: z.string(),
         path: z.string(),
         version_id: z.number().int().positive(),
         confirm: z.boolean().optional(),
+        if_match: z.string().optional(),
       },
     },
-    async ({ namespace, path, version_id, confirm }) => {
+    async ({ namespace, path, version_id, confirm, if_match }) => {
       if (!operator) return fail(DENIED);
       const nsError = await requireRegisteredNamespace(db, namespace);
       if (nsError) return fail(nsError);
@@ -773,6 +903,23 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
         .prepare("SELECT id, title, body FROM documents WHERE namespace = ?1 AND path = ?2")
         .bind(namespace, path)
         .first<{ id: number; title: string | null; body: string | null }>();
+      // Same fast pre-check the write tool keeps: a caller holding an obviously
+      // stale sha gets a clear answer without the server issuing a statement.
+      // The authority is the in-batch predicate below, not this.
+      if (if_match !== undefined) {
+        if (!prior) {
+          return fail(
+            `if_match was given but ${namespace}/${path} does not exist. Nothing was written. Omit if_match to recreate it from a version.`
+          );
+        }
+        const currentSha = await sha256Hex(prior.body ?? "");
+        if (currentSha !== if_match.trim().toLowerCase()) {
+          return fail(
+            `if_match mismatch on ${namespace}/${path}: the live body is not the one you read. Nothing was restored. ` +
+              `Current sha256 is ${currentSha}; you passed ${if_match.trim().toLowerCase()}.`
+          );
+        }
+      }
       if (confirm !== true) {
         const verdict = await confirmDestructive(
           server,
@@ -790,6 +937,20 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       // restore that quietly rewrote it would not be a restore.
       const body = version.body ?? "";
       const statements: D1PreparedStatement[] = [];
+      // The same commit-time predicate the write tool arms, for the same reason:
+      // this handler may have just spent up to 90 seconds in an elicitation, and
+      // its own ON CONFLICT DO UPDATE would otherwise overwrite whatever landed
+      // during the wait. On the recreate path the guard is the absence of a row,
+      // because the snapshot statement is only added when the pre-read saw one,
+      // so a racing create would be overwritten with nothing kept.
+      let guard: WriteGuard = "none";
+      if (!prior) {
+        guard = "missing";
+        statements.push(requireMissing(db, namespace, path));
+      } else if (if_match !== undefined || confirm !== true) {
+        guard = "body";
+        statements.push(requireBodyUnchanged(db, namespace, path, prior.body));
+      }
       if (prior) {
         statements.push(
           db
@@ -819,7 +980,29 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
             JSON.stringify({ version_id, snapshot_at: version.snapshot_at, recreated: !prior, snapshotted: Boolean(prior) })
           )
       );
-      await db.batch(statements);
+      try {
+        await db.batch(statements);
+      } catch (err) {
+        if (!isMissingRowAbort(err)) throw err;
+        if (guard === "missing") {
+          return fail(
+            `create collision on ${namespace}/${path}: it did not exist when this restore started and it does now, so another writer created it first. Nothing was written and that body is intact.`
+          );
+        }
+        const current = await db
+          .prepare("SELECT body FROM documents WHERE namespace = ?1 AND path = ?2")
+          .bind(namespace, path)
+          .first<{ body: string | null }>();
+        if (!current) {
+          return fail(
+            `conflict on ${namespace}/${path}: the document was deleted while this restore was in flight. Nothing was written.`
+          );
+        }
+        return fail(
+          `conflict on ${namespace}/${path}: the live body changed after this restore read it. Nothing was written. ` +
+            `Current sha256 is ${await sha256Hex(current.body ?? "")}. Re-read history and retry.`
+        );
+      }
       return ok({
         namespace,
         path,
