@@ -28,7 +28,22 @@ import { readFileSync, writeFileSync } from "node:fs";
 // one place to change, and the change is reviewable in the diff.
 const EXPECTED = {
   d1: { name: "capsid", id: "f24921c8-5e6f-499e-96a1-f124f52f12f7" },
-  kv: { name: "capsid-app-kv", id: "5fac20b95ad541a39f24eb8c5a753b6c" },
+  // TWO KV NAMESPACES, asserted INDEPENDENTLY as of 2026-08-15. They were one id
+  // behind two binding names until the split, and this script pinned it once. That
+  // was not merely redundant: with a single pin and a single placeholder, CI could
+  // not have produced two different ids, so the split would have failed on its own
+  // deploy. Each binding now resolves by its own title and is checked against its
+  // own pinned id.
+  //
+  // appKv holds ONLY the Worker's own caches (gh:install, gh:token, gh:get).
+  // oauthKv holds the provider's client/grant/token keys and this Worker's
+  // capsid:oauth-state, which uses the OAUTH_KV binding and therefore stays.
+  //
+  // Resolution is by EXACT TITLE and refuses ambiguity, which matters here: the
+  // account also contains a namespace literally titled "OAUTH_KV" belonging to
+  // dustinedwards-mcp. Neither title below can match it.
+  appKv: { name: "capsid-app-kv-v2", id: "21465e558b464cbf893753d2b2cb7829" },
+  oauthKv: { name: "capsid-app-kv", id: "5fac20b95ad541a39f24eb8c5a753b6c" },
   r2: { name: "capsid-media" },
   // Public identifier. It appears in every OAuth URL the App generates and in
   // wrangler's own deploy output. It is pinned here because wrangler would
@@ -112,8 +127,15 @@ assertId("D1 capsid", d1.uuid ?? d1.id, EXPECTED.d1.id);
 
 // KV
 const kvList = parseJsonArray(wrangler(["kv", "namespace", "list"]), "KV");
-const kv = resolveUnique(kvList, `KV namespace titled "${EXPECTED.kv.name}"`, (n) => n.title === EXPECTED.kv.name);
-assertId("KV capsid-app-kv", kv.id, EXPECTED.kv.id);
+const appKv = resolveUnique(kvList, `KV namespace titled "${EXPECTED.appKv.name}"`, (n) => n.title === EXPECTED.appKv.name);
+assertId(`KV ${EXPECTED.appKv.name} (APP_KV)`, appKv.id, EXPECTED.appKv.id);
+const oauthKv = resolveUnique(kvList, `KV namespace titled "${EXPECTED.oauthKv.name}"`, (n) => n.title === EXPECTED.oauthKv.name);
+assertId(`KV ${EXPECTED.oauthKv.name} (OAUTH_KV)`, oauthKv.id, EXPECTED.oauthKv.id);
+// The split is the point: if these two ever resolve to the same id again, the
+// Worker's caches are back in the provider's keyspace and nothing else would say so.
+if (appKv.id === oauthKv.id) {
+  die(`APP_KV and OAUTH_KV resolved to the SAME namespace id (${appKv.id}). The 2026-08-15 split has been undone. Nothing was deployed.`);
+}
 
 // R2 is asserted against the COMMITTED CONFIG, not against the account, and the
 // reason is worth stating rather than leaving as an apparent gap.
@@ -143,7 +165,8 @@ console.log(`ci-config: R2 ${EXPECTED.r2.name} pinned by name, existence is enfo
 let config = readFileSync("wrangler.jsonc.example", "utf8");
 const substitutions = [
   ["YOUR_D1_ID", EXPECTED.d1.id],
-  ["YOUR_KV_ID", EXPECTED.kv.id],
+  ["YOUR_APP_KV_ID", EXPECTED.appKv.id],
+  ["YOUR_OAUTH_KV_ID", EXPECTED.oauthKv.id],
   ["YOUR_R2_BUCKET", EXPECTED.r2.name],
   ["YOUR_GITHUB_APP_CLIENT_ID", EXPECTED.githubAppClientId],
 ];

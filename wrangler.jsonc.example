@@ -22,14 +22,19 @@
       "migrations_dir": "migrations"
     }
   ],
+  // TWO DISTINCT NAMESPACES as of 2026-08-15. They shared one id until then, which
+  // meant the Worker's own caches (gh:*) lived in the same keyspace as the OAuth
+  // provider's grants and tokens. The placeholders are deliberately different: a
+  // single shared placeholder made it structurally impossible for CI to emit two
+  // different ids, so the split could not have been deployed by CI at all.
   "kv_namespaces": [
     {
       "binding": "APP_KV",
-      "id": "YOUR_KV_ID"
+      "id": "YOUR_APP_KV_ID"
     },
     {
       "binding": "OAUTH_KV",
-      "id": "YOUR_KV_ID"
+      "id": "YOUR_OAUTH_KV_ID"
     }
   ],
   "r2_buckets": [
