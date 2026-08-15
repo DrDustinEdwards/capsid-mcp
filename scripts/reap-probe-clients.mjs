@@ -42,6 +42,7 @@
 
 import { readFileSync } from "node:fs";
 import { OAUTH_KV } from "./bindings.mjs";
+import { reapProbeClient, reportFor } from "./reap-lib.mjs";
 
 const ACCOUNT = process.env.CLOUDFLARE_ACCOUNT_ID;
 const TOKEN = process.env.CLOUDFLARE_API_TOKEN;
@@ -95,18 +96,14 @@ const key = `client:${clientId}`;
 const BASE = `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}/storage/kv/namespaces/${NAMESPACE_ID}`;
 const auth = { Authorization: `Bearer ${TOKEN}` };
 
-const del = await fetch(`${BASE}/values/${encodeURIComponent(key)}`, { method: "DELETE", headers: auth });
-if (!del.ok) {
-  console.error(`reap: DELETE ${key} -> ${del.status} ${(await del.text().catch(() => "")).slice(0, 300)}`);
-  process.exit(1);
+// READ, then delete, then read back. The decision lives in ./reap-lib.mjs so it can
+// be tested; see that file for why the pre-read is the part that matters.
+const { outcome, status, detail } = await reapProbeClient({ fetchImpl: fetch, base: BASE, key, auth });
+const { ok, message } = reportFor(outcome, key);
+const suffix = [status ? `status ${status}` : "", detail ? detail : ""].filter(Boolean).join(" ");
+if (ok) {
+  console.log(message);
+  process.exit(0);
 }
-
-// Confirm the delete landed. A 200 from the API is what the API returns; it is not
-// evidence the key is gone, and this file's whole job is that one key.
-const check = await fetch(`${BASE}/values/${encodeURIComponent(key)}`, { headers: auth });
-if (check.status !== 404) {
-  console.error(`reap: deleted ${key} but it still reads back with status ${check.status}. Not treating that as done.`);
-  process.exit(1);
-}
-
-console.log(`reap: deleted ${key} and confirmed it is gone (read-back 404)`);
+console.error(suffix ? `${message} (${suffix})` : message);
+process.exit(1);
