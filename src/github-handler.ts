@@ -4,6 +4,7 @@ import { isAdminUser, operatorGrant, operatorIdentity, sha256Hex } from "./auth"
 import { runBackup } from "./backup";
 import { REPORT_PATH } from "./headers";
 import { buildServer, type Env } from "./server";
+import { probeFts } from "./store-probe";
 
 const GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize";
 const GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token";
@@ -307,8 +308,10 @@ async function handleBackup(request: Request, env: Env): Promise<Response> {
       headers: { "WWW-Authenticate": 'Bearer realm="capsid-operator"' },
     });
   }
-  const summary = await runBackup(env);
-  return Response.json(summary);
+  const result = await runBackup(env);
+  // 409 when another run holds the lease: a caller polling this endpoint should be
+  // able to tell "I did nothing" from "I ran" without reading the body.
+  return Response.json(result, { status: result.ran ? 200 : 409 });
 }
 
 // Item 9 report sink. Unauthenticated by necessity: a browser posts a violation
@@ -480,10 +483,9 @@ async function handleCspReport(request: Request, env: Env): Promise<Response> {
 //
 // A failed probe returns 503 with status "degraded", so a deploy that unbinds the
 // store goes RED rather than green-with-a-detail-nobody-reads.
-const HEALTH_PROBE_NS = "capsid";
-const HEALTH_PROBE_PATH = "conventions.md";
-const HEALTH_PROBE_TERM = "conventions";
-
+//
+// The fts probe itself moved to src/store-probe.ts on 2026-08-17, because the backup
+// preflight refuses to prune on the same signal and the two must be the same probe.
 async function handleHealth(env: Env): Promise<Response> {
   const provenance = {
     sha: env.BUILD_SHA ?? "unknown",
@@ -499,22 +501,7 @@ async function handleHealth(env: Env): Promise<Response> {
   } catch (err) {
     d1 = `error: ${(err instanceof Error ? err.message : String(err)).slice(0, 120)}`;
   }
-  if (d1 === "ok") {
-    try {
-      // Pinned to one document: an empty or rebuilt-wrong index cannot satisfy it.
-      const hit = await env.DB.prepare(
-        `SELECT d.path FROM documents_fts
-         JOIN documents d ON d.id = documents_fts.rowid
-         WHERE documents_fts MATCH ?1 AND d.namespace = ?2 AND d.path = ?3
-         LIMIT 1`
-      )
-        .bind(HEALTH_PROBE_TERM, HEALTH_PROBE_NS, HEALTH_PROBE_PATH)
-        .first<{ path: string }>();
-      fts = hit?.path === HEALTH_PROBE_PATH ? "ok" : `no match for ${HEALTH_PROBE_NS}/${HEALTH_PROBE_PATH}`;
-    } catch (err) {
-      fts = `error: ${(err instanceof Error ? err.message : String(err)).slice(0, 120)}`;
-    }
-  }
+  if (d1 === "ok") fts = await probeFts(env.DB);
 
   const healthy = d1 === "ok" && fts === "ok";
   return Response.json(

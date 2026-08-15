@@ -88,6 +88,24 @@ export default {
     return withSecurityHeaders(withCacheDefault(response, new URL(request.url).pathname));
   },
   scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(runBackup(env));
+    // A thrown runBackup used to reach nothing but the platform, which records the
+    // invocation as failed and keeps the reason to itself. The reason is the only
+    // useful part: "the cron failed" is not something anyone can act on, and nobody
+    // is watching the cron dashboard daily. Logged here, then rethrown so the
+    // invocation still counts as failed.
+    ctx.waitUntil(
+      runBackup(env)
+        .then((result) => {
+          if (result.ran && result.prune_refused !== null) {
+            console.error(`BACKUP_CRON_REFUSED_PRUNE ${result.prune_refused}`);
+          } else if (!result.ran) {
+            console.error(`BACKUP_CRON_SKIPPED ${result.skipped}`);
+          }
+        })
+        .catch((err) => {
+          console.error(`BACKUP_CRON_THREW ${err instanceof Error ? `${err.message}\n${err.stack}` : String(err)}`);
+          throw err;
+        })
+    );
   },
 } satisfies ExportedHandler<Env>;

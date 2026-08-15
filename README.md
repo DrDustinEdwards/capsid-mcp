@@ -86,7 +86,7 @@ D1 Time Travel already provides 30-day point-in-time recovery, so backups here a
 
 A daily Cron Trigger (09:00 UTC) exports the whole database to the `MEDIA` R2 bucket:
 
-- `backups/json/<timestamp>.json` a full JSON dump of all five tables (documents, namespaces, document_versions, audit_log, document_links). The 14 most recent dumps are kept; older ones are pruned automatically.
+- `backups/json/<timestamp>/<table>.json` one JSON dump per table, five per run (documents, namespaces, document_versions, audit_log, document_links). Retention treats the run, not the object: a run is kept for 90 days, the 14 most recent runs are always kept whatever their age, and a run that ages out is deleted whole.
 - `backups/markdown/<namespace>/<path>` a plain-markdown mirror of every document body, verbatim, one file per document. This mirror tracks the current state (files for deleted documents are pruned), so the knowledge base stays readable and portable with no Capsid dependency.
 
 After each export the history tables are pruned in D1: `document_versions` rows older than 90 days and `audit_log` rows older than 180 days. Pruning runs after the export, so every pruned row exists in at least one retained JSON dump.
@@ -113,7 +113,7 @@ Three paths, in the order to try them. Path 2 has been executed end to end again
 
    Create the new database, apply **every** migration in `migrations/` in order (`0001_init.sql` then `0002_document_links.sql`; applying only 0001 leaves no `document_links` table for the import to land in), then execute the five exports with `documents` first. Importing `documents` fires the FTS sync triggers, so `documents_fts` rebuilds itself and needs no separate step. `document_links` has no triggers and no foreign keys, so its import order does not matter. Verify with count queries against both databases and one MATCH query on the new one, then point `wrangler.jsonc` at the new `database_id` and deploy.
 
-3. **The R2 JSON dump**, for anything beyond the 30-day Time Travel window. Wrangler cannot list R2 objects, so get the exact key from the Cloudflare dashboard or from the `json_key` field of a `/ops/backup` response, then `wrangler r2 object get capsid-media/backups/json/<key>.json --file dump.json`. Convert each table in `dump.tables` to INSERT statements and follow path 2 from the create step. The `backups/markdown/` mirror is the last-resort human-readable copy: bodies only, no metadata.
+3. **The R2 JSON dump**, for anything beyond the 30-day Time Travel window. Wrangler cannot list R2 objects, so get the exact keys from the Cloudflare dashboard or from the `json_keys` field of a `/ops/backup` response, then fetch each table's object: `wrangler r2 object get capsid-media/backups/json/<timestamp>/<table>.json --file <table>.json`. Convert each object's `rows` to INSERT statements and follow path 2 from the create step, `documents` first. The `backups/markdown/` mirror is the last-resort human-readable copy: bodies only, no metadata.
 
 Single-document recovery rarely needs any of this. Every overwrite and delete snapshots the prior row into `document_versions` first, so recovering one document is usually just reading its latest snapshot back.
 
