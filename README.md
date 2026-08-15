@@ -174,10 +174,9 @@ Single-document recovery rarely needs any of this. Every overwrite and delete sn
    ```
    # put the App client id in wrangler.jsonc vars as GITHUB_APP_CLIENT_ID
    npx wrangler secret put GITHUB_APP_PRIVATE_KEY        # paste the .pem contents
-   npx wrangler secret put GITHUB_APP_INSTALLATION_ID    # optional; auto-resolved if omitted
    ```
 
-   Only the private key is used to mint installation tokens; the App client secret is not needed.
+   Only the private key is used to mint installation tokens; the App client secret is not needed. The installation id is not configured: it is resolved from GitHub per owner and repo and cached for a day, because one pinned id cannot be correct for two owners.
 
 8. Type check and deploy:
 

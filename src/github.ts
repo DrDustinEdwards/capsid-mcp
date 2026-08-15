@@ -18,6 +18,22 @@ const TOKEN_TTL_SECONDS = 3300; // installation tokens live 60 min; refresh a li
 const INSTALL_TTL_SECONDS = 86400; // installation id is stable
 const READ_CACHE_TTL_SECONDS = 60; // brief cache for read tools
 
+// EVERY APP_KV KEY THIS MODULE OWNS IS BUILT HERE. A call site that spells a key
+// inline is a key the invalidator below cannot find, and the read cache is exactly
+// the place where an unfindable key means serving a body that no longer exists.
+//
+// The v2 on the install and token keys is a rollout guard, not decoration. Until
+// 2026-08-17 a pinned GITHUB_APP_INSTALLATION_ID was written to gh:install:<owner>
+// for EVERY owner (see getInstallationId), so an entry written before this deploy
+// can hold one owner's installation id under another owner's name, with 24 hours
+// to run. Fixing the writer does not fix the entries it already wrote, so the
+// reader stops looking at them.
+const installKey = (owner: string) => `gh:install:v2:${owner}`;
+const tokenKey = (owner: string) => `gh:token:v2:${owner}`;
+const readKey = (path: string) => `gh:get:${path}`;
+// The trailing slash matters: without it, owner/r would also match owner/repo2.
+const readPrefix = (owner: string, repo: string) => `gh:get:/repos/${owner}/${repo}/`;
+
 export interface RepoRef {
   owner: string;
   repo: string;
@@ -91,26 +107,41 @@ async function appFetch(env: Env, path: string, init?: RequestInit): Promise<Res
   });
 }
 
+// RESOLVED PER OWNER AND REPO, ALWAYS (audit 2, F20).
+//
+// This used to short-circuit on a pinned GITHUB_APP_INSTALLATION_ID and write that
+// one id under gh:install:<owner> for whatever owner was asked for. One id cannot be
+// right for two owners: a namespace mapped to a second owner then minted tokens
+// against the first owner's installation and kept doing it for 24 hours, and the
+// symptom is a 404 on a repo that plainly exists.
+//
+// The pin is gone rather than kept as a hint. It was a mirror of something GitHub
+// answers authoritatively for the exact repo being asked about, one cached call per
+// owner per day, and a mirror that can disagree with the source eventually does.
+// Keeping it would have meant adding a second secret naming the owner it applies to,
+// which is more configuration for no capability.
 async function getInstallationId(env: Env, owner: string, repo: string): Promise<string> {
-  const cacheKey = `gh:install:${owner}`;
-  const cached = await env.APP_KV.get(cacheKey);
+  const cached = await env.APP_KV.get(installKey(owner));
   if (cached) return cached;
-  if (env.GITHUB_APP_INSTALLATION_ID) {
-    await env.APP_KV.put(cacheKey, env.GITHUB_APP_INSTALLATION_ID, { expirationTtl: INSTALL_TTL_SECONDS });
-    return env.GITHUB_APP_INSTALLATION_ID;
-  }
   const resp = await appFetch(env, `/repos/${owner}/${repo}/installation`);
   if (!resp.ok) {
-    throw new Error(`could not resolve GitHub App installation for ${owner}/${repo} (${resp.status}): ${await resp.text()}`);
+    // 404 here is diagnostic rather than opaque: a valid App JWT with no
+    // installation covering the repo answers 404, while a bad JWT answers 401
+    // (measured 2026-07-06). So a 404 means the credentials are fine and the App
+    // is not installed on that repo.
+    throw new Error(
+      `could not resolve GitHub App installation for ${owner}/${repo} (${resp.status}): ${await resp.text()}` +
+        (resp.status === 404 ? " (404 means the App is not installed on this repo; the credentials are fine)" : "")
+    );
   }
   const data = (await resp.json()) as { id: number };
   const id = String(data.id);
-  await env.APP_KV.put(cacheKey, id, { expirationTtl: INSTALL_TTL_SECONDS });
+  await env.APP_KV.put(installKey(owner), id, { expirationTtl: INSTALL_TTL_SECONDS });
   return id;
 }
 
 async function getInstallationToken(env: Env, owner: string, repo: string): Promise<string> {
-  const cacheKey = `gh:token:${owner}`;
+  const cacheKey = tokenKey(owner);
   const cached = await env.APP_KV.get(cacheKey);
   if (cached) return cached;
   const installationId = await getInstallationId(env, owner, repo);
@@ -131,14 +162,17 @@ async function ghFetch(env: Env, owner: string, repo: string, path: string, init
     });
   let resp = await call(await getInstallationToken(env, owner, repo));
   if (resp.status === 401) {
-    await env.APP_KV.delete(`gh:token:${owner}`);
+    await env.APP_KV.delete(tokenKey(owner));
     resp = await call(await getInstallationToken(env, owner, repo));
   }
   return resp;
 }
 
+// The cache key is the full API path, which already carries owner, repo, the file
+// path and the ref (as the literal ?ref= query), so entries for different refs are
+// different keys and cannot collide. What was missing was deletion.
 async function cachedGet(env: Env, owner: string, repo: string, path: string): Promise<Response> {
-  const cacheKey = `gh:get:${path}`;
+  const cacheKey = readKey(path);
   const cached = (await env.APP_KV.get(cacheKey, "json")) as { status: number; body: string } | null;
   if (cached) return new Response(cached.body, { status: cached.status });
   const resp = await ghFetch(env, owner, repo, path);
@@ -147,6 +181,46 @@ async function cachedGet(env: Env, owner: string, repo: string, path: string): P
     await env.APP_KV.put(cacheKey, JSON.stringify({ status: resp.status, body }), { expirationTtl: READ_CACHE_TTL_SECONDS });
   }
   return new Response(body, { status: resp.status });
+}
+
+// INVALIDATION AFTER A WRITE (audit 2, F15). Nothing deleted these entries, so for
+// up to READ_CACHE_TTL_SECONDS after a commit, read_repo_file returned the body the
+// write replaced and list_repo_tree the listing it changed. Capsid writes to a repo
+// and then reads it back, so this is the ordinary path, not a corner.
+//
+// Swept by REPO PREFIX rather than by computed key, deliberately. A key-precise
+// invalidation has to reproduce the exact spelling of every entry the write
+// affected: the file path through encodePath, the parent directory listing, the
+// root listing's trailing slash, and each of those in both the no-ref spelling and
+// the ?ref=<branch> spelling. Miss one spelling and the stale read survives while
+// the code reads as though it were handled. The prefix sweep matches the SHAPE
+// instead, so it cannot be defeated by a spelling, and it covers a merge, where the
+// affected paths are not known here at all without another API call. It
+// over-invalidates: a write on a work branch also drops the default branch's
+// entries for that repo. That costs one GitHub GET on the next read, which is the
+// cheaper side to be wrong on.
+async function invalidateRepoReads(env: Env, owner: string, repo: string): Promise<number> {
+  const prefix = readPrefix(owner, repo);
+  let cursor: string | undefined;
+  let deleted = 0;
+  try {
+    do {
+      const page = await env.APP_KV.list({ prefix, cursor });
+      for (const key of page.keys) {
+        await env.APP_KV.delete(key.name);
+        deleted++;
+      }
+      cursor = page.list_complete ? undefined : page.cursor;
+    } while (cursor);
+  } catch (err) {
+    // The commit already landed. Reporting the tool call as failed because a cache
+    // sweep failed would be a lie about the write, so this is logged by name and
+    // the stale window stays bounded by the 60 second TTL.
+    console.error(
+      `GH_CACHE_INVALIDATION_FAILED ${owner}/${repo}: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+  return deleted;
 }
 
 // ---- repo resolution ---------------------------------------------------------
@@ -522,7 +596,25 @@ async function putFile(
   });
   if (!resp.ok) throw new Error(`commit failed (${resp.status}): ${await resp.text()}`);
   const data = (await resp.json()) as { commit: { sha: string }; content: { sha: string } };
+  // Both write modes reach the repo through here, so one call covers write_repo_file
+  // direct and pr alike.
+  await invalidateRepoReads(env, owner, repo);
   return { commitSha: data.commit.sha, fileSha: data.content.sha };
+}
+
+// The create-a-work-branch step, shared by write_repo_file and delete_repo_file in
+// pr mode (audit 2, F24). create_branch does NOT use it: as an explicit tool it must
+// fail when the branch already exists, and this tolerates that case on purpose.
+async function ensureBranch(env: Env, owner: string, repo: string, branch: string, fromSha: string): Promise<void> {
+  const created = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/git/refs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ref: `refs/heads/${branch}`, sha: fromSha }),
+  });
+  // 422 means the branch already exists, which is fine when a caller passed one.
+  if (!created.ok && created.status !== 422) {
+    throw new Error(`branch create failed (${created.status}): ${await created.text()}`);
+  }
 }
 
 export async function createBranch(env: Env, namespace: string, branch: string, from?: string, repoSelector?: string) {
@@ -584,15 +676,7 @@ export async function writeRepoFile(
 
   const work = branch || `capsid/${branchSlug(path)}-${Date.now().toString(36)}`;
   const headSha = await getRefSha(env, owner, repo, defaultBranch);
-  const created = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/git/refs`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ref: `refs/heads/${work}`, sha: headSha }),
-  });
-  if (!created.ok && created.status !== 422) {
-    // 422 means the branch already exists, which is fine when a caller passed one.
-    throw new Error(`branch create failed (${created.status}): ${await created.text()}`);
-  }
+  await ensureBranch(env, owner, repo, work, headSha);
   const res = await putFile(env, owner, repo, path, content, message, work);
   const title = message.split("\n")[0] || `Update ${path}`;
   // Pass the resolved repo full name so the PR lands on the same repo the file
@@ -627,14 +711,7 @@ export async function deleteRepoFile(
 
   if (mode === "pr") {
     const headSha = await getRefSha(env, owner, repo, defaultBranch);
-    const created = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/git/refs`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ref: `refs/heads/${target}`, sha: headSha }),
-    });
-    if (!created.ok && created.status !== 422) {
-      throw new Error(`branch create failed (${created.status}): ${await created.text()}`);
-    }
+    await ensureBranch(env, owner, repo, target, headSha);
   }
 
   const sha = await getFileSha(env, owner, repo, path, target);
@@ -646,6 +723,7 @@ export async function deleteRepoFile(
   });
   if (!resp.ok) throw new Error(`delete failed (${resp.status}): ${await resp.text()}`);
   const data = (await resp.json()) as { commit: { sha: string } };
+  await invalidateRepoReads(env, owner, repo);
 
   if (mode === "direct") {
     return { repo: `${owner}/${repo}`, mode: "direct", branch: target, path, commitSha: data.commit.sha };
@@ -681,6 +759,10 @@ export async function managePr(
     });
     if (!resp.ok) throw new Error(`merge failed (${resp.status}): ${await resp.text()}`);
     const data = (await resp.json()) as { sha: string; merged: boolean; message: string };
+    // A merge changes the base branch's contents, so it is a write to every path the
+    // PR touched. Which paths those are is not known here, which is the other reason
+    // invalidation sweeps the repo prefix instead of computing keys.
+    await invalidateRepoReads(env, owner, repo);
     return { repo: `${owner}/${repo}`, number, action: "merge", merged: data.merged, sha: data.sha, message: data.message };
   }
   const resp = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/pulls/${number}`, {
@@ -751,37 +833,47 @@ export async function ciStatus(
   } = { repo: full, runs };
 
   // Drill into the most recent failed run so the caller sees why, not just that.
+  //
+  // EVERY DEGRADED PATH IS NAMED (audit 2, F34). Both sub-fetches used to fail into
+  // silence: a jobs fetch that errored dropped failed_run entirely, so the answer
+  // looked like a run that failed for no reason, and a log fetch that errored
+  // returned neither log_tail nor log_tail_withheld, so a caller with a write grant
+  // could not tell "no log" from "the log was refused for you". A tool reporting on
+  // whether CI is healthy is the last place to answer by omission.
   const failed = data.workflow_runs.find((r) => r.conclusion === "failure");
   if (failed) {
+    const failedRun: Record<string, unknown> = {
+      name: failed.name,
+      head_sha: failed.head_sha?.slice(0, 7),
+      url: failed.html_url,
+    };
     const jobsResp = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/actions/runs/${failed.id}/jobs`);
-    if (jobsResp.ok) {
+    if (!jobsResp.ok) {
+      failedRun.jobs_unavailable = `${jobsResp.status}: ${(await jobsResp.text()).slice(0, 200) || "no response body"}`;
+    } else {
       const jobsData = (await jobsResp.json()) as {
         jobs: Array<{ id: number; name: string; conclusion: string | null; steps?: Array<{ name: string; conclusion: string | null }> }>;
       };
-      const failingJobs = jobsData.jobs
+      failedRun.jobs = jobsData.jobs
         .filter((j) => j.conclusion === "failure")
         .map((j) => ({
           name: j.name,
           failed_steps: (j.steps ?? []).filter((s) => s.conclusion === "failure").map((s) => s.name),
         }));
-      let logTail: string | undefined;
       const firstFailedJob = jobsData.jobs.find((j) => j.conclusion === "failure");
-      if (opts.logTail && firstFailedJob) {
+      if (!opts.logTail) {
+        // Unchanged: this is the read-only tier's boundary, not a degraded path.
+        failedRun.log_tail_withheld =
+          "read-only key: run metadata only. A write-grant key returns the failing job's log tail.";
+      } else if (!firstFailedJob) {
+        failedRun.log_tail_unavailable = "the run is marked failed but no job in it is, so there is no job log to tail";
+      } else {
         const logResp = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/actions/jobs/${firstFailedJob.id}/logs`);
-        if (logResp.ok) logTail = (await logResp.text()).slice(-2000);
+        if (logResp.ok) failedRun.log_tail = (await logResp.text()).slice(-2000);
+        else failedRun.log_tail_unavailable = `${logResp.status}: ${(await logResp.text()).slice(0, 200) || "no response body"}`;
       }
-      result.failed_run = {
-        name: failed.name,
-        head_sha: failed.head_sha?.slice(0, 7),
-        url: failed.html_url,
-        jobs: failingJobs,
-        ...(logTail
-          ? { log_tail: logTail }
-          : opts.logTail
-            ? {}
-            : { log_tail_withheld: "read-only key: run metadata only. A write-grant key returns the failing job's log tail." }),
-      };
     }
+    result.failed_run = failedRun;
   }
   return result;
 }

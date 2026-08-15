@@ -39,11 +39,11 @@ export interface Env {
   GITHUB_CLIENT_SECRET: string;
   COOKIE_ENCRYPTION_KEY: string;
   ADMIN_GITHUB_LOGIN: string;
-  // GitHub App for repo fallthrough (read and write). The private key and
-  // installation id are Worker secrets; the client id is a plain var.
+  // GitHub App for repo fallthrough (read and write). The private key is a Worker
+  // secret; the client id is a plain var. There is deliberately no pinned
+  // installation id: it is resolved per owner and repo (see src/github.ts).
   GITHUB_APP_CLIENT_ID: string;
   GITHUB_APP_PRIVATE_KEY: string;
-  GITHUB_APP_INSTALLATION_ID?: string;
   // Deploy provenance, stamped by scripts/deploy.mjs at deploy time (--var),
   // not committed. Absent when deployed by bare wrangler.
   BUILD_SHA?: string;
