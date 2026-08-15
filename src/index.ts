@@ -2,7 +2,7 @@ import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { createMcpHandler } from "agents/mcp";
 import { isAdminUser } from "./auth";
 import { runBackup } from "./backup";
-import { callerIp, checkRegistrationRate } from "./dcr-rate-limit";
+import { callerIp, checkRegistrationRate } from "./rate-limit";
 import { defaultHandler } from "./routes";
 import { withSecurityHeaders } from "./headers";
 import type { Env, Props } from "./env";
@@ -89,7 +89,7 @@ const provider = new OAuthProvider({
   clientRegistrationTTL: CLIENT_REGISTRATION_TTL_SECONDS,
   // Rate limit on the one unauthenticated write path this Worker exposes. Returning
   // an object rejects with the library's own error response; returning nothing
-  // allows. See src/dcr-rate-limit.ts for the measured thresholds and for why every
+  // allows. See src/rate-limit.ts for the measured thresholds and for why every
   // failure path in it allows the registration.
   clientRegistrationCallback: async ({ request }) => {
     const env = currentEnv;

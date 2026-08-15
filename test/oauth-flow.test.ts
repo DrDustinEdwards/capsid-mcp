@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { APPROVAL_MAX_AGE_SECONDS, approvalTag } from "../src/approval.ts";
-import { callerIp, checkRegistrationRate, MAX_PER_DAY, MAX_PER_HOUR, type RateVerdict } from "../src/dcr-rate-limit.ts";
+import { callerIp, checkRegistrationRate, MAX_PER_DAY, MAX_PER_HOUR, type RateVerdict } from "../src/rate-limit.ts";
 import { fakeKv } from "./fakes.ts";
 
 const src = (name: string) => readFileSync(join(import.meta.dirname, "..", "src", name), "utf8");

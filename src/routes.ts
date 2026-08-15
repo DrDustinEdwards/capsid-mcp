@@ -16,6 +16,7 @@ import { isAdminUser, operatorGrant, operatorIdentity, sha256Hex, timingSafeEqua
 import { runBackup } from "./backup";
 import { b64urlDecode, b64urlEncode, bytesToHex } from "./encoding";
 import { REPORT_PATH, REPORT_PREFIX } from "./headers";
+import { callerIp, checkCspReportRate, rateLimitedResponse } from "./rate-limit";
 import type { Env } from "./env";
 import { buildServer } from "./server";
 import { probeFts } from "./store-probe";
@@ -420,6 +421,20 @@ function summarizeReport(parsed: unknown): { directive: string; blocked: string;
 }
 
 async function handleCspReport(request: Request, env: Env): Promise<Response> {
+  // RATE LIMITED FIRST, before the body is read (audit 2, F3; the WAF half turned
+  // out not to exist, see src/rate-limit.ts). Every accepted report becomes an R2
+  // object, so this is the Worker's most expensive unauthenticated write per call,
+  // and nothing bounded arrival rate.
+  //
+  // The refusal is a 429 rather than this endpoint's usual 204; the reasoning is
+  // stated once, on rateLimitedResponse.
+  const ip = callerIp(request);
+  const rate = await checkCspReportRate(env.APP_KV, ip, new Date());
+  if (!rate.allowed) {
+    console.error(`CSP_REPORT_RATE_LIMITED ${ip} hit the ${rate.window} limit (${rate.count} of ${rate.limit})`);
+    return rateLimitedResponse(rate);
+  }
+
   // Content-Type first, before the body is even read.
   const contentType = (request.headers.get("Content-Type") ?? "").split(";")[0].trim().toLowerCase();
   if (!CSP_REPORT_TYPES.includes(contentType)) {
