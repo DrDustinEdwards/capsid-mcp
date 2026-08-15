@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { buildServer, type ToolGrant } from "../src/server.ts";
 import { fakeD1, fakeEnv, type FakeD1Rows, type Recorded } from "./fakes.ts";
 import { sourceFile } from "./source-files.ts";
@@ -752,6 +753,136 @@ test("the concurrency warning is read at COMMIT time, not from the pre-read", as
   assert.ok(out.concurrency_warning, "the warning was computed from the stale pre-read, not from a fresh read at commit");
   assert.match(out.concurrency_warning, /possible concurrent edit/);
   assert.match(out.concurrency_warning, new RegExp(fresh));
+});
+
+// ---- THE ELICITED ARM, reachable at last -----------------------------------
+//
+// Q3 recorded this as a hole and could not close it: the in-memory client
+// advertises no elicitation capability, so confirmDestructive returns "unsupported"
+// and every call without confirm is refused BEFORE a guard is ever chosen. That
+// left the whole elicited path untestable, and one specific consequence was
+// findable by plant: collapsing write's `if_match mismatch` / `stale confirmation`
+// ternary changed nothing the suite could see.
+//
+// A client that DECLARES the capability and answers the request closes it. The two
+// refusals are genuinely different messages for genuinely different situations, and
+// telling them apart is the whole point: "if_match mismatch" means the sha you sent
+// is not what is stored, and "stale confirmation" means a human approved an
+// overwrite of a body that changed while the prompt sat on screen for up to 90
+// seconds. Reporting the second as the first would send a caller looking for an
+// if_match they never sent.
+async function connectEliciting(opts: FakeOptions = {}, answer: "accept" | "decline" = "accept") {
+  const { recorded, reads, rows, batches, db } = fakeD1(connectOptions(opts));
+  const server = buildServer(fakeEnv({ DB: db }), "write", "test:guard");
+  const client = new Client({ name: "eliciting-test", version: "1.0.0" }, { capabilities: { elicitation: {} } });
+  // Counted, because a test that silently fell back to the unsupported path would
+  // assert nothing at all: it would be refused with "confirmation required" and
+  // never reach the guard.
+  const prompts: string[] = [];
+  client.setRequestHandler(ElicitRequestSchema, async (request) => {
+    prompts.push(String(request.params.message));
+    return answer === "accept" ? { action: "accept", content: { confirm: true } } : { action: "decline" };
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  return { client, recorded, reads, rows, batches, prompts, close: () => client.close() };
+}
+
+test("an accepted elicitation reaches the commit, so the arm is really reachable", async () => {
+  // The harness check. Everything below depends on this path being live, and if it
+  // silently reverted to "unsupported" the wording tests would pass by refusing
+  // early for a completely different reason.
+  const { client, recorded, prompts, close } = await connectEliciting({ body: "prior body" });
+  const result = await call(client, "write", {
+    namespace: "capsid", path: "doc.md", title: "New", body: "new body",
+  });
+  await close();
+  assert.equal(prompts.length, 1, "no elicitation was requested, so this client is not exercising the elicited arm");
+  assert.match(prompts[0], /Overwrite capsid\/doc\.md\?/);
+  assert.ok(!result.isError, `an approved overwrite was refused: ${result.content?.[0]?.text}`);
+  assert.match(sqlFor(recorded), /INSERT INTO documents/);
+});
+
+test("a declined elicitation refuses, and writes nothing", async () => {
+  const { client, recorded, prompts, close } = await connectEliciting({ body: "prior body" }, "decline");
+  const result = await call(client, "write", {
+    namespace: "capsid", path: "doc.md", title: "New", body: "new body",
+  });
+  await close();
+  assert.equal(prompts.length, 1);
+  assert.equal(result.isError, true, "a declined overwrite was written anyway");
+  assert.match(result.content[0].text, /overwrite of capsid\/doc\.md declined/);
+  assert.deepEqual(recorded, [], "a declined overwrite still issued statements");
+});
+
+test("STALE CONFIRMATION is named as itself, not as an if_match mismatch", async () => {
+  // A human approved overwriting a body that changed while the prompt was up. No
+  // if_match was ever sent, so calling this "if_match mismatch" would point the
+  // caller at an argument they did not use.
+  const { client, recorded, prompts, close } = await connectEliciting({
+    body: "prior body",
+    raceAfterPreRead: (live) => {
+      live.body = "body written while the prompt was up";
+    },
+  });
+  const result = await call(client, "write", {
+    namespace: "capsid", path: "doc.md", title: "New", body: "new body",
+  });
+  await close();
+  assert.equal(prompts.length, 1, "the elicited arm was not exercised");
+  assert.equal(result.isError, true, "a write landed on a body that changed under an open prompt");
+  const text = result.content[0].text;
+  assert.match(text, /^stale confirmation on capsid\/doc\.md:/, `wrong refusal: ${text}`);
+  assert.doesNotMatch(text, /if_match mismatch/, "a stale confirmation was reported as an if_match mismatch");
+  // The clause that says WHY it went stale, which only this arm can produce.
+  assert.match(text, /and while the overwrite confirmation was pending/);
+  assert.match(text, new RegExp(await shaOf("body written while the prompt was up")));
+  assert.deepEqual(recorded, [], "a refused stale confirmation still committed statements");
+});
+
+test("IF_MATCH MISMATCH keeps its own wording, and no pending clause", async () => {
+  // The other side of the ternary. This caller DID send a sha, so the refusal names
+  // that, and the confirmation clause must not appear: there was no prompt.
+  const sha = await shaOf("prior body");
+  const { client, close } = await connectEliciting({
+    body: "prior body",
+    raceAfterPreRead: (live) => {
+      live.body = "body written by someone else";
+    },
+  });
+  const result = await call(client, "write", {
+    namespace: "capsid", path: "doc.md", title: "New", body: "new body", confirm: true, if_match: sha,
+  });
+  await close();
+  assert.equal(result.isError, true);
+  const text = result.content[0].text;
+  assert.match(text, /^if_match mismatch on capsid\/doc\.md:/, `wrong refusal: ${text}`);
+  assert.doesNotMatch(text, /stale confirmation/);
+  assert.doesNotMatch(text, /overwrite confirmation was pending/, "a caller who sent if_match was told about a prompt that never happened");
+});
+
+test("the two refusals are DIFFERENT strings for the same underlying conflict", async () => {
+  // The strongest form. Same race, same guard, same commit-time abort; only the
+  // route in differs. If these ever converge, one of the two callers is being told
+  // something untrue about what went wrong.
+  const race = (live: LiveState) => {
+    live.body = "the racer";
+  };
+  const stale = await connectEliciting({ body: "prior body", raceAfterPreRead: race });
+  const staleText = (await call(stale.client, "write", { namespace: "capsid", path: "doc.md", title: "T", body: "b" })).content[0].text;
+  await stale.close();
+
+  const mismatch = await connectEliciting({ body: "prior body", raceAfterPreRead: race });
+  const mismatchText = (
+    await call(mismatch.client, "write", {
+      namespace: "capsid", path: "doc.md", title: "T", body: "b", confirm: true, if_match: await shaOf("prior body"),
+    })
+  ).content[0].text;
+  await mismatch.close();
+
+  assert.notEqual(staleText, mismatchText, "the two refusals have collapsed into one message");
+  assert.ok(staleText.startsWith("stale confirmation"), staleText);
+  assert.ok(mismatchText.startsWith("if_match mismatch"), mismatchText);
 });
 
 // ---- F30: a batch failure is a clean refusal, not an exception ---------------
