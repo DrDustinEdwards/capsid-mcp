@@ -206,6 +206,98 @@ function requireMissing(db: D1Database, namespace: string, path: string): D1Prep
 // site arms exactly one.
 type WriteGuard = "none" | "body" | "missing";
 
+// THE COMMIT PROTOCOL, in one place.
+//
+// write and restore perform the same four steps, and the ORDER is the whole point:
+//
+//   1. pre-check if_match, BEFORE any elicitation, so a caller holding an
+//      obviously stale sha is refused immediately instead of being made to sit
+//      through a 90 second prompt for a write that was never going to land;
+//   2. arm exactly one guard, chosen from the same pre-read the caller already
+//      has: absence for a create, unchanged-body for an update the caller asked
+//      to be checked (if_match) or a human confirmed (elicited);
+//   3. run the batch with that guard FIRST, so the transaction aborts before any
+//      other statement is attempted and nothing is half-written;
+//   4. map the abort back to the guard that was armed, since all three guards
+//      fail with the identical NOT NULL violation and the error cannot say which.
+//
+// It was written out twice, and the copies had drifted: they spelled step 2's
+// consent condition differently (`elicited` against `confirm !== true`), which
+// happened to denote the same thing only because of how requireConfirmation
+// returns. Step 4 is the reason the flag from step 2 must not be a separate
+// variable a caller can forget to set: `guard` is now unreachable from the
+// handlers, so arming and interpreting cannot disagree about what was armed.
+//
+// An unguarded update keeps its last-writer-wins behaviour on purpose. Requiring
+// if_match everywhere would refuse every legitimate rapid edit, and would break
+// append, which is safe by construction.
+type CommitRefusals = {
+  ifMatchOnMissing: string;
+  ifMatchMismatch: (currentSha: string, passed: string) => string;
+  createCollision: string;
+  deletedInFlight: string;
+  bodyChanged: (currentSha: string, elicited: boolean) => string;
+  batchFailed: (reason: string) => string;
+};
+
+function guardedCommit(opts: {
+  db: D1Database;
+  namespace: string;
+  path: string;
+  prior: { body: string | null } | null;
+  if_match: string | undefined;
+  refusals: CommitRefusals;
+}) {
+  const { db, namespace, path, prior, if_match, refusals } = opts;
+  return {
+    // Step 1. A fast refusal that costs no statement. The AUTHORITY is the
+    // in-batch predicate below, not this: everything can change between the two.
+    async precheckIfMatch(): Promise<string | null> {
+      if (if_match === undefined) return null;
+      if (!prior) return refusals.ifMatchOnMissing;
+      const currentSha = await sha256Hex(prior.body ?? "");
+      const passed = if_match.trim().toLowerCase();
+      return currentSha === passed ? null : refusals.ifMatchMismatch(currentSha, passed);
+    },
+    // Steps 2 to 4. Returns null when the batch committed, or the refusal to
+    // hand back. `elicited` is requireConfirmation's own report of whether a
+    // human actually answered a prompt, so both callers key off one signal.
+    async run(elicited: boolean, statements: D1PreparedStatement[]): Promise<string | null> {
+      let guard: WriteGuard = "none";
+      const armed: D1PreparedStatement[] = [];
+      if (!prior) {
+        guard = "missing";
+        armed.push(requireMissing(db, namespace, path));
+      } else if (if_match !== undefined || elicited) {
+        guard = "body";
+        armed.push(requireBodyUnchanged(db, namespace, path, prior.body));
+      }
+      try {
+        await db.batch([...armed, ...statements]);
+        return null;
+      } catch (err) {
+        // Every batch failure returns a clean refusal (audit 2, F30). This used to
+        // rethrow anything that was not a guard abort, so a D1 error escaped the
+        // handler as an exception while delete, move and finalize all answered
+        // with fail(). Same class of failure, two different shapes, and the
+        // caller had to know which tool it called to know what to expect.
+        if (!isMissingRowAbort(err)) {
+          return refusals.batchFailed(err instanceof Error ? err.message : String(err));
+        }
+        if (guard === "missing") return refusals.createCollision;
+        // guard === "body". Report the sha that is stored NOW so the caller can
+        // rebase without a second round trip to find out what it lost to.
+        const current = await db
+          .prepare("SELECT body FROM documents WHERE namespace = ?1 AND path = ?2")
+          .bind(namespace, path)
+          .first<{ body: string | null }>();
+        if (!current) return refusals.deletedInFlight;
+        return refusals.bodyChanged(await sha256Hex(current.body ?? ""), elicited);
+      }
+    },
+  };
+}
+
 // Documents may only be written to a namespace that has a `namespaces` row.
 //
 // Writing to a namespace label does not create it, so a typo in `namespace` used
@@ -302,15 +394,30 @@ async function confirmDestructive(server: McpServer, message: string): Promise<C
 // The messages stay per tool because they are the instruction the caller acts on:
 // a generic "confirmation required" does not say which argument to add or what
 // will happen when they do.
+//
+// IT REPORTS WHETHER IT ACTUALLY ELICITED, and that signal is load-bearing rather
+// than informational (quality audit 4.1). A human who sat through an elicitation
+// said "overwrite THIS" about a body that was read before the prompt went out, and
+// the answer can arrive up to 90 seconds later, so that consent is about a
+// specific body and goes stale exactly like an if_match does. Both write and
+// restore arm the commit-time body guard on it.
+//
+// Before this returned it, the two paths inferred it separately: write kept its own
+// `elicited` flag, restore re-derived it as `confirm !== true`. Those coincide
+// today only because restore always calls this helper and this helper returns
+// early when confirm is true. A change here, such as treating confirm:true after a
+// successful elicitation, would have armed one path and not the other, silently.
+type ConfirmResult = { ok: true; elicited: boolean } | { ok: false; message: string };
+
 async function requireConfirmation(
   server: McpServer,
   confirm: boolean | undefined,
   messages: { prompt: string; declined: string; unsupported: string }
-): Promise<string | null> {
-  if (confirm === true) return null;
+): Promise<ConfirmResult> {
+  if (confirm === true) return { ok: true, elicited: false };
   const verdict = await confirmDestructive(server, messages.prompt);
-  if (verdict === "accepted") return null;
-  return verdict === "declined" ? messages.declined : messages.unsupported;
+  if (verdict === "accepted") return { ok: true, elicited: true };
+  return { ok: false, message: verdict === "declined" ? messages.declined : messages.unsupported };
 }
 
 // `actor` is the principal that will be recorded on every audit_log row this
@@ -545,21 +652,32 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       // written and the error carries the CURRENT sha so the caller can re-read,
       // rebase its edit and retry without guessing what it is racing. Opt-in,
       // because requiring it would break append, which is safe by construction.
-      if (if_match !== undefined) {
-        if (!prior) {
-          return fail(
-            `if_match was given but ${namespace}/${path} does not exist. Nothing was written. Omit if_match to create it.`
-          );
-        }
-        const currentSha = await sha256Hex(prior.body ?? "");
-        if (currentSha !== if_match.trim().toLowerCase()) {
-          return fail(
+      const commit = guardedCommit({
+        db,
+        namespace,
+        path,
+        prior,
+        if_match,
+        refusals: {
+          ifMatchOnMissing: `if_match was given but ${namespace}/${path} does not exist. Nothing was written. Omit if_match to create it.`,
+          ifMatchMismatch: (currentSha, passed) =>
             `if_match mismatch on ${namespace}/${path}: the stored body is not the one you read. Nothing was written. ` +
-              `Current sha256 is ${currentSha}; you passed ${if_match.trim().toLowerCase()}. ` +
-              `Re-read the document, reapply your change to the current body, and retry.`
-          );
-        }
-      }
+            `Current sha256 is ${currentSha}; you passed ${passed}. ` +
+            `Re-read the document, reapply your change to the current body, and retry.`,
+          createCollision:
+            `create collision on ${namespace}/${path}: the document did not exist when this write started and it does now, so another writer created it first. ` +
+            `Nothing was written and the other writer's body is intact. ` +
+            `Re-read the document and retry as an update if you still mean to change it.`,
+          deletedInFlight: `conflict on ${namespace}/${path}: the document was deleted while this write was in flight. Nothing was written.`,
+          bodyChanged: (currentSha, elicited) =>
+            `${if_match !== undefined ? "if_match mismatch" : "stale confirmation"} on ${namespace}/${path}: the stored body changed after this write read it${elicited && if_match === undefined ? " and while the overwrite confirmation was pending" : ""}. Nothing was written. ` +
+            `Current sha256 is ${currentSha}. ` +
+            `Re-read the document, reapply your change to the current body, and retry.`,
+          batchFailed: (reason) => `write failed, nothing was written: ${reason}`,
+        },
+      });
+      const staleIfMatch = await commit.precheckIfMatch();
+      if (staleIfMatch) return fail(staleIfMatch);
 
       // Body assembly, per mode. Pure and unit-tested in ./write-modes. Every
       // mode returns the FULL new body, so the write path below is unchanged and
@@ -605,10 +723,9 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       // more ceremonious than the dangerous one, and callers would go back to
       // full-body rewrites. patch and replace both mutate existing text and are
       // NOT exempt.
-      // Set when the client actually sat through an elicitation. A human said
-      // "overwrite THIS" about a body that was read before the prompt went out,
-      // and the answer can arrive up to 90 seconds later, so the confirmation is
-      // about a specific body and goes stale exactly like an if_match does.
+      // Whether a human actually answered a prompt, reported by the helper rather
+      // than inferred here. It arms the commit-time body guard; why that consent
+      // goes stale is stated once, on requireConfirmation.
       let elicited = false;
       if (prior && confirm !== true && writeMode !== "append" && writeMode !== "meta") {
         const refusal = await requireConfirmation(server, confirm, {
@@ -616,27 +733,11 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
           declined: `overwrite of ${namespace}/${path} declined`,
           unsupported: `confirmation required: ${namespace}/${path} already exists. Re-run write with confirm: true to overwrite it. The current version will be snapshotted to document_versions first.`,
         });
-        if (refusal) return fail(refusal);
-        elicited = true;
+        if (!refusal.ok) return fail(refusal.message);
+        elicited = refusal.elicited;
       }
+      // The guard itself is armed by commit.run() below, from this same pre-read.
       const statements: D1PreparedStatement[] = [];
-      // Arm exactly one guard, and arm it FIRST so the transaction aborts before
-      // any other statement is attempted.
-      //
-      // A create guards on the row still being absent. An update guards on the
-      // body still being the one this call read, and only when the caller asked
-      // for that (if_match) or a human confirmed it (elicited). An unguarded
-      // update keeps its existing last-writer-wins behaviour on purpose:
-      // requiring if_match everywhere would refuse every legitimate rapid edit
-      // and would break append, which is safe by construction.
-      let guard: WriteGuard = "none";
-      if (!prior) {
-        guard = "missing";
-        statements.push(requireMissing(db, namespace, path));
-      } else if (if_match !== undefined || elicited) {
-        guard = "body";
-        statements.push(requireBodyUnchanged(db, namespace, path, prior.body));
-      }
       if (prior) {
         statements.push(
           db
@@ -724,42 +825,8 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
             .bind(namespace, path)
             .first<{ updated_at: string }>()
         : null;
-      try {
-        await db.batch(statements);
-      } catch (err) {
-        // Every batch failure returns a clean refusal (audit 2, F30). This used to
-        // rethrow anything that was not a guard abort, so a D1 error escaped the
-        // handler as an exception while delete, move and finalize all answered
-        // with fail(). Same class of failure, two different shapes, and the
-        // caller had to know which tool it called to know what to expect.
-        if (!isMissingRowAbort(err)) {
-          return fail(`write failed, nothing was written: ${err instanceof Error ? err.message : String(err)}`);
-        }
-        if (guard === "missing") {
-          return fail(
-            `create collision on ${namespace}/${path}: the document did not exist when this write started and it does now, so another writer created it first. ` +
-              `Nothing was written and the other writer's body is intact. ` +
-              `Re-read the document and retry as an update if you still mean to change it.`
-          );
-        }
-        // guard === "body". Report the sha that is stored NOW so the caller can
-        // rebase without a second round trip to find out what it lost to.
-        const current = await db
-          .prepare("SELECT body FROM documents WHERE namespace = ?1 AND path = ?2")
-          .bind(namespace, path)
-          .first<{ body: string | null }>();
-        if (!current) {
-          return fail(
-            `conflict on ${namespace}/${path}: the document was deleted while this write was in flight. Nothing was written.`
-          );
-        }
-        const currentSha = await sha256Hex(current.body ?? "");
-        return fail(
-          `${if_match !== undefined ? "if_match mismatch" : "stale confirmation"} on ${namespace}/${path}: the stored body changed after this write read it${elicited && if_match === undefined ? " and while the overwrite confirmation was pending" : ""}. Nothing was written. ` +
-            `Current sha256 is ${currentSha}. ` +
-            `Re-read the document, reapply your change to the current body, and retry.`
-        );
-      }
+      const conflict = await commit.run(elicited, statements);
+      if (conflict) return fail(conflict);
       // Warn, do not reject, when an edge points at a document that does not
       // exist. Rejecting would block the legitimate case of asserting an edge
       // before its target is written, and edges may also address repo files
@@ -906,48 +973,43 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
         .prepare("SELECT id, title, body FROM documents WHERE namespace = ?1 AND path = ?2")
         .bind(namespace, path)
         .first<{ id: number; title: string | null; body: string | null }>();
-      // Same fast pre-check the write tool keeps: a caller holding an obviously
-      // stale sha gets a clear answer without the server issuing a statement.
-      // The authority is the in-batch predicate below, not this.
-      if (if_match !== undefined) {
-        if (!prior) {
-          return fail(
-            `if_match was given but ${namespace}/${path} does not exist. Nothing was written. Omit if_match to recreate it from a version.`
-          );
-        }
-        const currentSha = await sha256Hex(prior.body ?? "");
-        if (currentSha !== if_match.trim().toLowerCase()) {
-          return fail(
+      // The same protocol the write tool runs, with restore's wordings. On the
+      // recreate path the guard is the ABSENCE of a row, because the snapshot
+      // statement is only added when the pre-read saw one, so a racing create
+      // would otherwise be overwritten with nothing kept.
+      const commit = guardedCommit({
+        db,
+        namespace,
+        path,
+        prior,
+        if_match,
+        refusals: {
+          ifMatchOnMissing: `if_match was given but ${namespace}/${path} does not exist. Nothing was written. Omit if_match to recreate it from a version.`,
+          ifMatchMismatch: (currentSha, passed) =>
             `if_match mismatch on ${namespace}/${path}: the live body is not the one you read. Nothing was restored. ` +
-              `Current sha256 is ${currentSha}; you passed ${if_match.trim().toLowerCase()}.`
-          );
-        }
-      }
+            `Current sha256 is ${currentSha}; you passed ${passed}.`,
+          createCollision: `create collision on ${namespace}/${path}: it did not exist when this restore started and it does now, so another writer created it first. Nothing was written and that body is intact.`,
+          deletedInFlight: `conflict on ${namespace}/${path}: the document was deleted while this restore was in flight. Nothing was written.`,
+          bodyChanged: (currentSha) =>
+            `conflict on ${namespace}/${path}: the live body changed after this restore read it. Nothing was written. ` +
+            `Current sha256 is ${currentSha}. Re-read history and retry.`,
+          batchFailed: (reason) => `restore failed, nothing was written: ${reason}`,
+        },
+      });
+      const staleIfMatch = await commit.precheckIfMatch();
+      if (staleIfMatch) return fail(staleIfMatch);
       const restoreRefusal = await requireConfirmation(server, confirm, {
         prompt: `Restore ${namespace}/${path} to the version snapshotted at ${version.snapshot_at}? The current body will be snapshotted first.`,
         declined: `restore of ${namespace}/${path} declined`,
         unsupported: `confirmation required: re-run restore with confirm: true to overwrite ${namespace}/${path} with version ${version_id} (snapshotted ${version.snapshot_at}). The current body will be snapshotted first.`,
       });
-      if (restoreRefusal) return fail(restoreRefusal);
+      if (!restoreRefusal.ok) return fail(restoreRefusal.message);
+      const elicited = restoreRefusal.elicited;
       // The stored body goes back EXACTLY as it was snapshotted, with no dash
       // normalization. A snapshot is a record of what the document said, and a
       // restore that quietly rewrote it would not be a restore.
       const body = version.body ?? "";
       const statements: D1PreparedStatement[] = [];
-      // The same commit-time predicate the write tool arms, for the same reason:
-      // this handler may have just spent up to 90 seconds in an elicitation, and
-      // its own ON CONFLICT DO UPDATE would otherwise overwrite whatever landed
-      // during the wait. On the recreate path the guard is the absence of a row,
-      // because the snapshot statement is only added when the pre-read saw one,
-      // so a racing create would be overwritten with nothing kept.
-      let guard: WriteGuard = "none";
-      if (!prior) {
-        guard = "missing";
-        statements.push(requireMissing(db, namespace, path));
-      } else if (if_match !== undefined || confirm !== true) {
-        guard = "body";
-        statements.push(requireBodyUnchanged(db, namespace, path, prior.body));
-      }
       if (prior) {
         statements.push(
           db
@@ -977,36 +1039,8 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
             JSON.stringify({ version_id, snapshot_at: version.snapshot_at, recreated: !prior, snapshotted: Boolean(prior) })
           )
       );
-      try {
-        await db.batch(statements);
-      } catch (err) {
-        // Every batch failure returns a clean refusal (audit 2, F30). This used to
-        // rethrow anything that was not a guard abort, so a D1 error escaped the
-        // handler as an exception while delete, move and finalize all answered
-        // with fail(). Same class of failure, two different shapes, and the
-        // caller had to know which tool it called to know what to expect.
-        if (!isMissingRowAbort(err)) {
-          return fail(`restore failed, nothing was written: ${err instanceof Error ? err.message : String(err)}`);
-        }
-        if (guard === "missing") {
-          return fail(
-            `create collision on ${namespace}/${path}: it did not exist when this restore started and it does now, so another writer created it first. Nothing was written and that body is intact.`
-          );
-        }
-        const current = await db
-          .prepare("SELECT body FROM documents WHERE namespace = ?1 AND path = ?2")
-          .bind(namespace, path)
-          .first<{ body: string | null }>();
-        if (!current) {
-          return fail(
-            `conflict on ${namespace}/${path}: the document was deleted while this restore was in flight. Nothing was written.`
-          );
-        }
-        return fail(
-          `conflict on ${namespace}/${path}: the live body changed after this restore read it. Nothing was written. ` +
-            `Current sha256 is ${await sha256Hex(current.body ?? "")}. Re-read history and retry.`
-        );
-      }
+      const conflict = await commit.run(elicited, statements);
+      if (conflict) return fail(conflict);
       return ok({
         namespace,
         path,
@@ -1065,7 +1099,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
         declined: `delete of ${namespace}/${path} declined`,
         unsupported: `confirmation required: re-run delete with confirm: true to remove ${namespace}/${path}. It will be snapshotted to document_versions first.`,
       });
-      if (deleteRefusal) return fail(deleteRefusal);
+      if (!deleteRefusal.ok) return fail(deleteRefusal.message);
       // Read the edges before pathMutation removes them: the audit row is the
       // only place they survive, since document_versions holds title and body
       // only.
@@ -1133,7 +1167,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
         declined: `move of ${namespace}/${path} declined`,
         unsupported: `confirmation required: re-run move with confirm: true to rename ${namespace}/${path} to ${new_path}.`,
       });
-      if (moveRefusal) return fail(moveRefusal);
+      if (!moveRefusal.ok) return fail(moveRefusal.message);
       const { results: movingEdges } = await edgesTouching(db, namespace, path).all();
       const repointed = movingEdges.length;
       // ONE batch: the guard, the rename, the edge repointing AND the audit row.
@@ -1470,7 +1504,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
         declined: `finalize of ${namespace} declined`,
         unsupported: `confirmation required: re-run lint finalize with confirm: true to archive ${paths.length} document(s) in ${namespace}.`,
       });
-      if (finalizeRefusal) return fail(finalizeRefusal);
+      if (!finalizeRefusal.ok) return fail(finalizeRefusal.message);
       // Archiving is a rename to archive/<path>, so it goes through the same
       // helper as move and drags its edges along for the same reason.
       // Each path carries its own in-batch existence guard. The loop above

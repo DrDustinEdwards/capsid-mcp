@@ -4,6 +4,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { buildServer } from "../src/server.ts";
 import { fakeD1, fakeEnv, type FakeD1Rows, type Recorded } from "./fakes.ts";
+import { sourceFile } from "./source-files.ts";
 
 // THE BEHAVIOURAL HALF of the write-path invariants. test/invariants.test.ts reads
 // the source; this file DRIVES the real tool handlers over a real MCP connection
@@ -109,12 +110,12 @@ function connectOptions(opts: FakeOptions) {
 }
 
 async function connect(operator: boolean, opts: FakeOptions = {}) {
-  const { rows, recorded, db } = fakeD1(connectOptions(opts));
+  const { rows, recorded, batches, db } = fakeD1(connectOptions(opts));
   const server = buildServer(fakeEnv({ DB: db }), operator, "test:guard");
   const client = new Client({ name: "invariant-test", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-  return { client, recorded, rows, close: () => client.close() };
+  return { client, recorded, rows, batches, close: () => client.close() };
 }
 
 const call = async (client: Client, name: string, args: Record<string, unknown>) =>
@@ -434,6 +435,90 @@ test("CREATE COLLISION: exactly one of two racing creates wins, and the loser is
   assert.match(result.content[0].text, /create collision/);
   assert.match(result.content[0].text, /another writer created it first/);
   assert.deepEqual(recorded, [], "the losing create still wrote statements");
+});
+
+// ARMING PARITY: write and restore choose the same guard under the same
+// conditions, and it leads the batch.
+//
+// This test could not have been written before 2026-08-17. The protocol was
+// shipped twice, and the two copies spelled the consent condition differently:
+// write kept its own `elicited` flag, restore re-derived it as `confirm !== true`.
+// Those denoted the same thing, but only by inference from how requireConfirmation
+// returns, so a change to that helper could have armed one path and not the other
+// with nothing to catch it. There was no shared unit to point a test at, and
+// asserting the two separately would have asserted the drift rather than the rule.
+//
+// Guard classification is by SQL, not by a flag the source exports, so this fails
+// against a handler that sets the right flag and pushes the wrong statement.
+const guardOf = (batches: string[][]): "missing" | "body" | "none" => {
+  const first = batches[0]?.[0] ?? "";
+  if (/WHERE NOT EXISTS .*body IS \?3/.test(first)) return "body";
+  if (/SELECT NULL, \?1, \?2 WHERE EXISTS/.test(first)) return "missing";
+  return "none";
+};
+
+const ARMING_CASES = [
+  // A create guards on the row still being ABSENT.
+  { name: "create", opts: { exists: false }, withIfMatch: false, expected: "missing" as const },
+  // An update the caller asked to be checked guards on the body.
+  { name: "update with if_match", opts: { body: "prior body" }, withIfMatch: true, expected: "body" as const },
+  // An unguarded update keeps last-writer-wins, deliberately.
+  { name: "plain update", opts: { body: "prior body" }, withIfMatch: false, expected: "none" as const },
+];
+
+for (const { name, opts, withIfMatch, expected } of ARMING_CASES) {
+  test(`ARMING PARITY: write and restore both arm the ${expected} guard, first, on a ${name}`, async () => {
+    const if_match = withIfMatch ? await shaOf("prior body") : undefined;
+
+    const w = await connect(true, opts);
+    const wRes = await call(w.client, "write", {
+      namespace: "capsid", path: "doc.md", title: "T", body: "b", confirm: true, ...(if_match ? { if_match } : {}),
+    });
+    await w.close();
+
+    const r = await connect(true, opts);
+    const rRes = await call(r.client, "restore", {
+      namespace: "capsid", path: "doc.md", version_id: VERSION_ID, confirm: true, ...(if_match ? { if_match } : {}),
+    });
+    await r.close();
+
+    // Both landed, so the guards below are the ones a SUCCEEDING commit arms.
+    assert.ok(!wRes.isError, `write was refused: ${wRes.content?.[0]?.text}`);
+    assert.ok(!rRes.isError, `restore was refused: ${rRes.content?.[0]?.text}`);
+
+    assert.equal(guardOf(w.batches), expected, "write armed the wrong guard");
+    assert.equal(guardOf(r.batches), expected, "restore armed the wrong guard");
+    assert.equal(guardOf(w.batches), guardOf(r.batches), "write and restore have drifted apart again");
+
+    // ARMED FIRST. The abort must happen before any other statement is attempted,
+    // and the fake's batch log is the only place that order is visible: `recorded`
+    // is written only after every statement has passed, so it cannot show it.
+    if (expected !== "none") {
+      assert.equal(w.batches.length, 1);
+      assert.match(w.batches[0][0], /INSERT INTO document_versions \(document_id, namespace, path\) SELECT NULL/);
+      assert.match(r.batches[0][0], /INSERT INTO document_versions \(document_id, namespace, path\) SELECT NULL/);
+    }
+  });
+}
+
+test("ARMING PARITY: both call sites pass the SAME consent signal", async () => {
+  // The behavioural cases above cannot reach the elicited arm: the in-memory
+  // client advertises no elicitation capability, so a call without confirm is
+  // refused before any guard is chosen. The signal itself is therefore pinned at
+  // the source, where the drift would appear: one shared expression inside the
+  // protocol helper, and both call sites handing it the same variable.
+  const server = sourceFile("server.ts");
+  assert.equal(
+    server.split("commit.run(elicited, statements)").length - 1,
+    2,
+    "a call site stopped passing the shared elicited signal to the commit protocol"
+  );
+  // And the condition that consumes it is stated once, inside the helper.
+  assert.equal(
+    server.split("if_match !== undefined || elicited").length - 1,
+    1,
+    "the arming condition is written more than once again"
+  );
 });
 
 test("CREATE COLLISION: an uncontested create still succeeds", async () => {
