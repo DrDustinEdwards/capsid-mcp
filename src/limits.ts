@@ -55,6 +55,31 @@ export const MAX_COMMIT_MESSAGE = 4096;
 export const MAX_PR_TITLE = 512;
 export const MAX_PR_BODY = 65_536;
 
+// OUTPUT BOUNDS. Everything above bounds what a caller may SEND. These bound what
+// the server may RETURN, which until 2026-08-17 only `search` and `brief` did.
+//
+// MEASURED, not guessed (live store, 2026-08-17): 557 documents across 8
+// namespaces, the largest namespace holding 245. MAX_ROWS is set above that and
+// below the total on purpose, so a namespace-scoped list or find never truncates
+// today while the unfiltered whole-store read does, and is told to add a filter.
+// An unbounded read is not a bug until the store grows, which is exactly why it
+// gets bounded before it does.
+export const MAX_ROWS = 500;
+
+// search ranks by bm25 and has always returned 25. Unchanged; what changed is that
+// it now SAYS when there were more, which a bare array could not.
+export const SEARCH_ROWS = 25;
+
+// brief's existing budget, unchanged, moved here so the number and the prose that
+// quotes it cannot drift apart.
+export const BRIEF_BUDGET = 40_000;
+
+// gather's budget was already this number, but only as a WARNING threshold, and
+// the packets measured over it: recova 213KB, dustinedwards 330KB. A warning that
+// fires on the normal case is not a bound. Same number, now enforced by trimming
+// the section gather itself tells the caller to batch.
+export const GATHER_BUDGET = 150_000;
+
 // Control characters, including the newline and tab that would otherwise ride
 // through a path and out into an R2 key and every log line that quotes it.
 function hasControlChar(text: string): boolean {

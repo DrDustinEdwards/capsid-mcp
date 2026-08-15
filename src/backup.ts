@@ -164,6 +164,28 @@ export async function runBackup(env: Env): Promise<BackupResult> {
 }
 
 async function exportAndPrune(env: Env, now: string): Promise<BackupSummary> {
+  // THE DUMP LOOP STAYS SEQUENTIAL, and this is a ruling rather than an oversight
+  // (quality audit 9.1, which proposed making the five tables concurrent since
+  // they are independent).
+  //
+  // MEASURED 2026-08-17, live: document_versions holds 25.8MB of body text and
+  // documents 5.4MB, on a 38.5MB database. `docs` is retained across the whole
+  // loop because the preflight and the markdown mirror both need it, so the peak
+  // today is documents + one table + that table's JSON string: roughly 57MB while
+  // document_versions is in hand, against a 128MB isolate.
+  //
+  // Running the five concurrently does not reduce that peak, it GUARANTEES the
+  // worst case: all five row sets and up to five JSON strings alive at once, on
+  // the table that grows with every write and is only pruned at 90 days. The
+  // finding named isolate memory as the risk, and concurrency spends memory to buy
+  // latency on a cron job that nothing waits for.
+  //
+  // Streaming is the fix that would actually bound this, and it is NOT free here:
+  // .all() has already materialized the rows, so a streamed dump means paging the
+  // SELECT, and pages are not a consistent snapshot. A backup that can tear while
+  // a write lands is worse than one that is merely large. Revisit when D1 offers a
+  // consistent paged read, or by moving versions and audit to their own cadence.
+  //
   // One object per table under a per-run prefix. The dump is the prefix; see the
   // retention note on runIdOf above for how ageing works now that it is not one key.
   const jsonPrefix = `${JSON_PREFIX}${now.replace(/[:.]/g, "-")}/`;

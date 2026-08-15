@@ -3,6 +3,7 @@ import {
   ErrorCode,
   GetPromptRequestSchema,
   ListPromptsRequestSchema,
+  ListResourcesRequestSchema,
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
@@ -26,13 +27,36 @@ import { normalizeDashes } from "./normalize";
 import { parseLinks } from "./links";
 import { validateDocStatus, validateDocType } from "./doc-meta";
 import { authoritativeFor, scanCountClaims } from "./counts";
-import { bounded, docPath, MAX_BODY, MAX_COMMIT_MESSAGE, MAX_DOC_TYPE, MAX_GLOB, MAX_LINKS_JSON, MAX_PATH, MAX_PR_BODY, MAX_PR_TITLE, MAX_QUERY, MAX_REF, MAX_REPO_SELECTOR, MAX_REPOS_JSON, MAX_SHA, MAX_TAGS, MAX_TITLE, nsName } from "./limits";
+import { b64urlDecode, b64urlEncode } from "./encoding";
+import { bounded, BRIEF_BUDGET, docPath, GATHER_BUDGET, MAX_BODY, MAX_COMMIT_MESSAGE, MAX_DOC_TYPE, MAX_GLOB, MAX_LINKS_JSON, MAX_PATH, MAX_PR_BODY, MAX_PR_TITLE, MAX_QUERY, MAX_REF, MAX_REPO_SELECTOR, MAX_REPOS_JSON, MAX_ROWS, MAX_SHA, MAX_TAGS, MAX_TITLE, nsName, SEARCH_ROWS } from "./limits";
 import { assembleBody } from "./write-modes";
 
 const SERVER_INFO = { name: "capsid", version: "1.0.0" };
 
 function ok(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+}
+
+// A BOUNDED READ, defined once.
+//
+// Every read that can return an unknown number of rows asks the store for one MORE
+// row than it will return. That extra row is the only reliable way to distinguish
+// "there were exactly `limit` rows" from "there were more and you are holding a
+// prefix", and it costs one row.
+//
+// Shape follows search_code, which already got this right: the count, the cap that
+// produced it, a truncated flag, and when it fires, a note saying what to do. A
+// boolean alone is not actionable, and a bare array cannot say anything at all.
+function boundedRows<T>(rows: T[], limit: number, advice: string) {
+  const truncated = rows.length > limit;
+  const kept = truncated ? rows.slice(0, limit) : rows;
+  return {
+    count: kept.length,
+    limit,
+    truncated,
+    ...(truncated ? { note: `Returned the first ${limit} rows; there are more. ${advice}` } : {}),
+    documents: kept,
+  };
 }
 
 function fail(message: string) {
@@ -439,7 +463,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
   server.registerTool(
     "list",
     {
-      description: "List documents with optional namespace, type, and status filters. Returns metadata rows without bodies: id, namespace, path, title, type, status, tags and timestamps.",
+      description: `List documents with optional namespace, type, and status filters. Returns metadata rows without bodies under \`documents\`: id, namespace, path, title, type, status, tags and timestamps. Bounded to ${MAX_ROWS} rows; when there are more it sets truncated:true with a note, so a short list is never mistaken for a complete one.`,
       inputSchema: {
         namespace: nsName.optional(),
         type: bounded(MAX_DOC_TYPE).optional(),
@@ -460,11 +484,20 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
           `SELECT id, namespace, path, title, type, status, tags, created_at, updated_at
            FROM documents
            WHERE (?1 IS NULL OR namespace = ?1) AND (?2 IS NULL OR type = ?2) AND (?3 IS NULL OR status = ?3)
-           ORDER BY namespace, path`
+           ORDER BY namespace, path
+           LIMIT ?4`
         )
-        .bind(namespace ?? null, type ?? null, status ?? null)
+        .bind(namespace ?? null, type ?? null, status ?? null, MAX_ROWS + 1)
         .all();
-      return ok(results);
+      return ok(
+        boundedRows(
+          results,
+          MAX_ROWS,
+          namespace
+            ? "Narrow with type or status, or use find with a path glob."
+            : "Narrow with namespace (the usual case), type or status, or use find with a path glob."
+        )
+      );
     }
   );
 
@@ -494,7 +527,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       inputSchema: { namespace: nsName },
     },
     async ({ namespace }) => {
-      const BUDGET = 40_000;
+      const BUDGET = BRIEF_BUDGET;
       const doc = (ns: string, path: string) =>
         db
           .prepare("SELECT namespace, path, title, type, body, updated_at FROM documents WHERE namespace = ?1 AND path = ?2")
@@ -1200,7 +1233,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
   server.registerTool(
     "find",
     {
-      description: "Find documents whose path matches a glob pattern (SQLite GLOB, e.g. 'notes/*.md'). Optional namespace filter.",
+      description: `Find documents whose path matches a glob pattern (SQLite GLOB, e.g. 'notes/*.md'). Optional namespace filter. Returns matches under \`documents\`, bounded to ${MAX_ROWS} rows; when there are more it sets truncated:true with a note.`,
       inputSchema: { namespace: nsName.optional(), glob: bounded(MAX_GLOB) },
     },
     async ({ namespace, glob }) => {
@@ -1209,18 +1242,19 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
           `SELECT namespace, path, title, type, status, updated_at
            FROM documents
            WHERE path GLOB ?1 AND (?2 IS NULL OR namespace = ?2)
-           ORDER BY namespace, path`
+           ORDER BY namespace, path
+           LIMIT ?3`
         )
-        .bind(glob, namespace ?? null)
+        .bind(glob, namespace ?? null, MAX_ROWS + 1)
         .all();
-      return ok(results);
+      return ok(boundedRows(results, MAX_ROWS, "Tighten the glob, or add a namespace filter."));
     }
   );
 
   server.registerTool(
     "search",
     {
-      description: "Full text search across all documents (FTS5, ranked by bm25). Optional namespace and type filters. This is the cross-project search.",
+      description: `Full text search across all documents (FTS5, ranked by bm25). Optional namespace and type filters. This is the cross-project search. Returns the top ${SEARCH_ROWS} matches under \`documents\`; when more matched it sets truncated:true, so a full page of hits is never mistaken for the whole answer.`,
       inputSchema: {
         query: bounded(MAX_QUERY),
         namespace: nsName.optional(),
@@ -1239,17 +1273,19 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
                AND (?2 IS NULL OR d.namespace = ?2)
                AND (?3 IS NULL OR d.type = ?3)
              ORDER BY bm25(documents_fts)
-             LIMIT 25`
+             LIMIT ?4`
           )
-          .bind(match, namespace ?? null, type ?? null)
+          .bind(match, namespace ?? null, type ?? null, SEARCH_ROWS + 1)
           .all();
+      const bound = (rows: unknown[]) =>
+        boundedRows(rows, SEARCH_ROWS, "Add a namespace or type filter, or make the query more specific.");
       try {
-        return ok((await run(query)).results);
+        return ok(bound((await run(query)).results));
       } catch {
         // Hyphens, quotes, and bare AND/OR/NOT are FTS5 syntax. Retry the whole
         // query as a quoted phrase so plain text is always a safe input.
         try {
-          return ok((await run(`"${query.replace(/"/g, '""')}"`)).results);
+          return ok(bound((await run(`"${query.replace(/"/g, '""')}"`)).results));
         } catch (err) {
           return fail(`search failed (check FTS5 query syntax): ${err instanceof Error ? err.message : String(err)}`);
         }
@@ -1441,12 +1477,54 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
           )
           .bind(namespace)
           .all();
-        // Rough packet size so a driving LLM knows when a gather will not fit
-        // its context and it should consolidate in batches instead.
-        const packetChars = [core, ...wiki.results, ...raw.results, ...rules.results].reduce(
-          (sum, row) => sum + String((row as { body?: unknown } | null)?.body ?? "").length,
-          0
-        );
+        // BOUNDED, not merely measured. This used to compute a size and WARN over
+        // 150KB, which is not a bound: the packets measured over it routinely
+        // (recova 213KB, dustinedwards 330KB on 2026-08-17), so the warning fired
+        // on the normal case and the response was oversized anyway.
+        //
+        // Trim order follows what gather is FOR. The client needs core (the thing
+        // being updated), the unconsolidated docs (the input being compiled), and
+        // the wiki (current state). The wiki is the largest section and the most
+        // re-readable one document at a time, so it stubs first. Unconsolidated
+        // bodies are held back last, oldest kept, because oldest-first is both the
+        // compile order and the batching advice this tool already gives.
+        //
+        // core and rules are never trimmed: they are the rules of the job.
+        type PacketRow = { namespace?: unknown; path?: unknown; body?: unknown };
+        const bodyChars = (row: unknown) => String((row as PacketRow | null)?.body ?? "").length;
+        const sumChars = (rows: unknown[]) => rows.reduce<number>((sum, r) => sum + bodyChars(r), 0);
+        const toStub = (row: unknown) => {
+          const r = row as PacketRow;
+          return { ...(row as object), body: `(trimmed for size: read ${String(r.namespace)}/${String(r.path)})` };
+        };
+
+        const trimmed: string[] = [];
+        const fixed = bodyChars(core) + sumChars(rules.results);
+        let wikiOut: unknown[] = wiki.results;
+        if (fixed + sumChars(wiki.results) + sumChars(raw.results) > GATHER_BUDGET) {
+          wikiOut = wiki.results.map(toStub);
+          trimmed.push(`${wiki.results.length} wiki bodies (concept and decision docs; read them individually by path)`);
+        }
+
+        // Keep whole documents, never half a body: a truncated markdown document
+        // is worse than an honest stub, because the client cannot tell it is
+        // reading a fragment.
+        let running = fixed + sumChars(wikiOut);
+        let heldBack = 0;
+        const unconsolidatedOut = raw.results.map((row) => {
+          if (running + bodyChars(row) <= GATHER_BUDGET) {
+            running += bodyChars(row);
+            return row;
+          }
+          heldBack++;
+          return toStub(row);
+        });
+        if (heldBack > 0) {
+          trimmed.push(
+            `${heldBack} of ${raw.results.length} unconsolidated bodies (the oldest were kept, which is the compile order; finalize this batch and call gather again for the rest)`
+          );
+        }
+        const packetChars = fixed + sumChars(wikiOut) + sumChars(unconsolidatedOut);
         // Batch-two item 10: prose counts checked against the artifacts they
         // describe. Standing docs only; episodics record history and their
         // numbers were right when written. FLAG, never correct: the claims come
@@ -1466,16 +1544,16 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
           mode: "gather",
           namespace,
           core: core ?? null,
-          wiki: wiki.results,
-          unconsolidated: raw.results,
+          wiki: wikiOut,
+          unconsolidated: unconsolidatedOut,
           rules: rules.results,
           dangling_edges: danglingEdges.results,
           authoritative_counts: authoritativeFor(namespace),
           count_claims: countClaims,
           packet_chars: packetChars,
-          ...(packetChars > 150_000
-            ? { warning: "large packet: consider consolidating the oldest unconsolidated docs first, in batches, using read on individual paths" }
-            : {}),
+          budget: GATHER_BUDGET,
+          truncated: trimmed.length > 0,
+          ...(trimmed.length ? { trimmed } : {}),
         });
       }
 
@@ -1745,29 +1823,27 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
     ({ namespace, repo, limit }) => guarded(() => ciStatus(env, namespace, repo, { limit, logTail: operator }))
   );
 
+  // Template metadata spreads onto every listed resource, so it is stated ONCE and
+  // applied by both the read registration and the list handler below.
+  const RESOURCE_METADATA = { title: "Capsid documents", mimeType: "text/markdown" };
+
   // Resources: every document is addressable context at capsid://<namespace>/<path>.
   // Read-only, same visibility as the read tool. The D1 queries run lazily, only
   // when a client actually calls resources/list or resources/read.
   server.registerResource(
     "document",
     new ResourceTemplate("capsid://{namespace}/{+path}", {
-      list: async () => {
-        const { results } = await db
-          .prepare("SELECT namespace, path, title FROM documents ORDER BY namespace, path")
-          .all<{ namespace: string; path: string; title: string | null }>();
-        return {
-          resources: results.map((row) => ({
-            uri: `capsid://${row.namespace}/${row.path}`,
-            name: `${row.namespace}/${row.path}`,
-            title: row.title ?? undefined,
-            mimeType: "text/markdown",
-          })),
-        };
-      },
+      // LISTING IS SERVED BY THE RAW HANDLER BELOW, not from here, and the reason
+      // is worth stating: McpServer builds its ListResources reply as
+      // `{ resources: [...] }` and discards every other field the callback
+      // returns, including _meta AND nextCursor. A list callback therefore has no
+      // way to say it was truncated, so capping it here would have made document
+      // 501 unreachable with nothing in the response admitting it.
+      list: undefined,
     }),
     // Template metadata spreads onto every listed resource, so keep it to
     // fields that are true per document.
-    { title: "Capsid documents", mimeType: "text/markdown" },
+    RESOURCE_METADATA,
     async (uri, variables) => {
       const namespace = String(variables.namespace);
       const path = String(variables.path);
@@ -1779,6 +1855,58 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       return { contents: [{ uri: uri.href, mimeType: "text/markdown", text: row.body ?? "" }] };
     }
   );
+
+  // resources/list, served directly for the same reason prompts are: the request
+  // itself is needed and the McpServer wrapper does not pass it through. Here that
+  // request carries the CURSOR, which is what makes the bound safe rather than a
+  // ceiling on what the store can expose.
+  //
+  // Keyset pagination, not OFFSET: the cursor names the last (namespace, path)
+  // returned and the next page asks for rows after it, compared as a TUPLE. A
+  // single concatenated key would be wrong, because 'a-x' sorts before 'a' once a
+  // separator is glued on ('-' is below '/') and rows would be skipped.
+  //
+  // This overrides the handler McpServer installs. It is safe only while every
+  // resource is served by the one template below; a statically registered resource
+  // would be silently dropped. test/bounded-reads.test.ts pins that.
+  server.server.setRequestHandler(ListResourcesRequestSchema, async (request) => {
+    const cursor = request.params?.cursor;
+    let afterNs = "";
+    let afterPath = "";
+    if (typeof cursor === "string" && cursor.length > 0) {
+      try {
+        const parsed = JSON.parse(b64urlDecode(cursor)) as { n?: unknown; p?: unknown };
+        afterNs = String(parsed.n ?? "");
+        afterPath = String(parsed.p ?? "");
+      } catch {
+        throw new McpError(ErrorCode.InvalidParams, "invalid resources/list cursor; omit it to start from the beginning");
+      }
+    }
+    const { results } = await db
+      .prepare(
+        `SELECT namespace, path, title FROM documents
+         WHERE (?1 = '' AND ?2 = '') OR (namespace > ?1 OR (namespace = ?1 AND path > ?2))
+         ORDER BY namespace, path
+         LIMIT ?3`
+      )
+      .bind(afterNs, afterPath, MAX_ROWS + 1)
+      .all<{ namespace: string; path: string; title: string | null }>();
+    const more = results.length > MAX_ROWS;
+    const kept = more ? results.slice(0, MAX_ROWS) : results;
+    const last = kept[kept.length - 1];
+    return {
+      resources: kept.map((row) => ({
+        // Template metadata first, per-document fields second: the same order the
+        // McpServer wrapper used, so a document's own title still wins.
+        ...RESOURCE_METADATA,
+        uri: `capsid://${row.namespace}/${row.path}`,
+        name: `${row.namespace}/${row.path}`,
+        title: row.title ?? undefined,
+        mimeType: "text/markdown",
+      })),
+      ...(more && last ? { nextCursor: b64urlEncode(JSON.stringify({ n: last.namespace, p: last.path })) } : {}),
+    };
+  });
 
   // Prompts: reusable templates stored as type 'prompt' documents whose bodies
   // use {{variable}} placeholders. Handled at the protocol level (McpServer only
