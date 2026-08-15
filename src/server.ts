@@ -5,8 +5,8 @@ import {
   ListPromptsRequestSchema,
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
-import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { z } from "zod";
+import type { Env, Props } from "./env";
 import {
   ciStatus,
   createBranch,
@@ -28,35 +28,6 @@ import { validateDocStatus, validateDocType } from "./doc-meta";
 import { authoritativeFor, scanCountClaims } from "./counts";
 import { bounded, docPath, MAX_BODY, MAX_COMMIT_MESSAGE, MAX_DOC_TYPE, MAX_GLOB, MAX_LINKS_JSON, MAX_PATH, MAX_PR_BODY, MAX_PR_TITLE, MAX_QUERY, MAX_REF, MAX_REPO_SELECTOR, MAX_REPOS_JSON, MAX_SHA, MAX_TAGS, MAX_TITLE, nsName } from "./limits";
 import { assembleBody } from "./write-modes";
-
-export interface Env {
-  DB: D1Database;
-  APP_KV: KVNamespace;
-  MEDIA: R2Bucket;
-  OAUTH_KV: KVNamespace;
-  OAUTH_PROVIDER: OAuthHelpers;
-  OPERATOR_KEY_HASH: string;
-  GITHUB_CLIENT_ID: string;
-  GITHUB_CLIENT_SECRET: string;
-  COOKIE_ENCRYPTION_KEY: string;
-  ADMIN_GITHUB_LOGIN: string;
-  // GitHub App for repo fallthrough (read and write). The private key is a Worker
-  // secret; the client id is a plain var. There is deliberately no pinned
-  // installation id: it is resolved per owner and repo (see src/github.ts).
-  GITHUB_APP_CLIENT_ID: string;
-  GITHUB_APP_PRIVATE_KEY: string;
-  // Deploy provenance, stamped by scripts/deploy.mjs at deploy time (--var),
-  // not committed. Absent when deployed by bare wrangler.
-  BUILD_SHA?: string;
-  BUILD_DIRTY?: string;
-  BUILT_AT?: string;
-}
-
-export interface Props extends Record<string, unknown> {
-  id: number;
-  login: string;
-  name: string | null;
-}
 
 const SERVER_INFO = { name: "capsid", version: "1.0.0" };
 

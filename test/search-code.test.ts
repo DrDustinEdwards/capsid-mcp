@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { searchCode } from "../src/github.ts";
+import { fakeEnv, fakeKv, withFetch, type FetchCall, type Route } from "./fakes.ts";
 
 // search_code walks a repo tree and greps every blob, one HTTP request per
 // candidate file. That makes it the tool most likely to run out of GitHub quota
@@ -18,19 +19,20 @@ import { searchCode } from "../src/github.ts";
 // These tests fix the distinction the tool must preserve: "not found" and
 // "could not check" are different answers, and only one of them is a finding.
 
+// Env and the HTTP stub come from ./fakes.ts (quality audit 6.2). The local
+// withFetch here was the second of two copies; the shared one records every call,
+// which is what this file's cap tests already needed, so the fetched-blob list is
+// derived from the recorded calls rather than maintained separately.
+
 function makeEnv() {
-  return {
+  return fakeEnv({
     DB: {
       prepare: () => ({
         bind: () => ({ first: async () => ({ repos: JSON.stringify([{ repo: "owner/repo", label: "primary" }]) }) }),
       }),
     },
-    APP_KV: {
-      get: async (k: string) => (k.startsWith("gh:token:") ? "test-token" : null),
-      put: async () => {},
-      delete: async () => {},
-    },
-  } as never;
+    APP_KV: fakeKv({ seedToken: true }).kv,
+  });
 }
 
 const TREE_PATH = "/repos/owner/repo/git/trees/main";
@@ -47,40 +49,37 @@ function blob(text: string) {
   return { encoding: "base64", content: Buffer.from(text, "utf8").toString("base64") };
 }
 
-// Routes by pathname; blobStatus lets a test fail specific blob fetches.
-async function withFetch(
+// Builds the route map the shared stub takes. The stub records every call, so the
+// list of blob paths actually requested is DERIVED from those calls rather than
+// tracked separately: one source of truth for "what did the scan fetch".
+//
+// fetchedBlobs is how a cap is proven. files_scanned is the tool's own account of
+// itself, and a cap reporting 1 while fetching 3 still burns three requests of the
+// quota the cap exists to protect.
+const blobsOf = (calls: FetchCall[], paths: string[]) =>
+  calls
+    .filter((c) => c.path.includes("/git/blobs/sha"))
+    .map((c) => paths[Number(c.path.split("/git/blobs/sha")[1])]);
+
+async function withTree(
   opts: { paths: string[]; contents: Record<string, string>; blobStatus?: Record<string, number> },
-  // `fetchedBlobs` is the list of file paths whose blob was actually requested, in
-  // order. A cap is only proven by the request that was NOT made: files_scanned is
-  // the tool's own account of itself, and a cap that reported 1 while fetching 3
-  // would still burn three requests of the quota the cap exists to protect.
-  fn: (fetchedBlobs: string[]) => Promise<void>
+  fn: (calls: FetchCall[]) => Promise<void>
 ) {
-  const original = globalThis.fetch;
-  const fetchedBlobs: string[] = [];
-  globalThis.fetch = (async (url: string) => {
-    const { pathname } = new URL(url);
-    if (pathname === REPO_PATH) return new Response(JSON.stringify({ default_branch: "main" }), { status: 200 });
-    if (pathname === TREE_PATH) return new Response(JSON.stringify(tree(opts.paths)), { status: 200 });
-    const m = pathname.match(/\/git\/blobs\/sha(\d+)$/);
-    if (m) {
-      const path = opts.paths[Number(m[1])];
-      fetchedBlobs.push(path);
-      const status = opts.blobStatus?.[path];
-      if (status) return new Response(JSON.stringify({ message: "boom" }), { status });
-      return new Response(JSON.stringify(blob(opts.contents[path] ?? "")), { status: 200 });
-    }
-    return new Response("unrouted", { status: 500 });
-  }) as typeof fetch;
-  try {
-    await fn(fetchedBlobs);
-  } finally {
-    globalThis.fetch = original;
-  }
+  const routes: Record<string, Route> = {
+    [`GET ${REPO_PATH}`]: { body: { default_branch: "main" } },
+    [`GET ${TREE_PATH}`]: { body: tree(opts.paths) },
+  };
+  opts.paths.forEach((path, i) => {
+    const status = opts.blobStatus?.[path];
+    routes[`GET ${REPO_PATH}/git/blobs/sha${i}`] = status
+      ? { status, body: { message: "boom" } }
+      : { body: blob(opts.contents[path] ?? "") };
+  });
+  await withFetch(routes, fn);
 }
 
 test("a match is found when every blob is readable", async () => {
-  await withFetch(
+  await withTree(
     { paths: ["a.ts", "b.ts"], contents: { "a.ts": "const EMAIL_QUEUE = 1;", "b.ts": "nothing here" } },
     async () => {
       const r = (await searchCode(makeEnv(), "ns", "EMAIL_QUEUE")) as { total_results: number; items: unknown[] };
@@ -91,7 +90,7 @@ test("a match is found when every blob is readable", async () => {
 });
 
 test("rate-limited blob fetch ABORTS the scan instead of returning empty", async () => {
-  await withFetch(
+  await withTree(
     {
       paths: ["a.ts", "b.ts"],
       contents: { "a.ts": "const EMAIL_QUEUE = 1;", "b.ts": "x" },
@@ -114,7 +113,7 @@ test("rate-limited blob fetch ABORTS the scan instead of returning empty", async
 });
 
 test("429 aborts too", async () => {
-  await withFetch(
+  await withTree(
     { paths: ["a.ts"], contents: { "a.ts": "x" }, blobStatus: { "a.ts": 429 } },
     async () => {
       await assert.rejects(() => searchCode(makeEnv(), "ns", "anything"), /aborted/i);
@@ -123,7 +122,7 @@ test("429 aborts too", async () => {
 });
 
 test("401 aborts too: a revoked token is not an empty repository", async () => {
-  await withFetch(
+  await withTree(
     { paths: ["a.ts"], contents: { "a.ts": "x" }, blobStatus: { "a.ts": 401 } },
     async () => {
       await assert.rejects(() => searchCode(makeEnv(), "ns", "anything"), /aborted/i);
@@ -135,7 +134,7 @@ test("a survivable per-file error does NOT abort, but is reported", async () => 
   // A 404 on one blob (a raced deletion) is genuinely per-file, so the scan
   // continues. It must still be visible: "0 results over 2 files" and "0 results
   // over 2 files, 1 unreadable" are different claims.
-  await withFetch(
+  await withTree(
     {
       paths: ["gone.ts", "here.ts"],
       contents: { "here.ts": "const EMAIL_QUEUE = 1;" },
@@ -157,7 +156,7 @@ test("a survivable per-file error does NOT abort, but is reported", async () => 
 test("a clean zero-result scan reports no unreadable files at all", async () => {
   // Guards the guard: if unreadable_files were always set, the field above would
   // prove nothing.
-  await withFetch({ paths: ["a.ts"], contents: { "a.ts": "nothing" } }, async () => {
+  await withTree({ paths: ["a.ts"], contents: { "a.ts": "nothing" } }, async () => {
     const r = (await searchCode(makeEnv(), "ns", "EMAIL_QUEUE")) as {
       total_results: number;
       unreadable_files?: number;
@@ -181,10 +180,10 @@ const THREE = ["a.ts", "b.ts", "c.ts"];
 const CONTENTS = { "a.ts": "needle here", "b.ts": "needle again", "c.ts": "needle third" };
 
 test("max_files 1 stops after ONE blob and reports where to resume", async () => {
-  await withFetch({ paths: THREE, contents: CONTENTS }, async (fetchedBlobs) => {
+  await withTree({ paths: THREE, contents: CONTENTS }, async (calls) => {
     const result = await searchCode(makeEnv(), "ns", "needle", { maxFiles: 1 });
     // The cap is proven by the request that was not made.
-    assert.deepEqual(fetchedBlobs, ["a.ts"], "the cap did not stop the scan: it fetched more than one blob");
+    assert.deepEqual(blobsOf(calls, THREE), ["a.ts"], "the cap did not stop the scan: it fetched more than one blob");
     assert.equal(result.candidates, 3);
     assert.equal(result.files_scanned, 1);
     assert.equal(result.truncated, true);
@@ -195,9 +194,9 @@ test("max_files 1 stops after ONE blob and reports where to resume", async () =>
 });
 
 test("resuming at next_start scans the next file and nothing before it", async () => {
-  await withFetch({ paths: THREE, contents: CONTENTS }, async (fetchedBlobs) => {
+  await withTree({ paths: THREE, contents: CONTENTS }, async (calls) => {
     const result = await searchCode(makeEnv(), "ns", "needle", { maxFiles: 1, start: 1 });
-    assert.deepEqual(fetchedBlobs, ["b.ts"], "a resumed scan re-read a file it had already searched");
+    assert.deepEqual(blobsOf(calls, THREE), ["b.ts"], "a resumed scan re-read a file it had already searched");
     assert.equal(result.start, 1);
     assert.equal(result.files_scanned, 1);
     assert.equal(result.next_start, 2);
@@ -209,9 +208,9 @@ test("the last page is not reported as truncated", async () => {
   // The boundary the off-by-one lives at: after the third file there is nothing
   // left, so truncated must be false and next_start must be absent. A cap that
   // reports more work when there is none sends a caller into an endless resume.
-  await withFetch({ paths: THREE, contents: CONTENTS }, async (fetchedBlobs) => {
+  await withTree({ paths: THREE, contents: CONTENTS }, async (calls) => {
     const result = await searchCode(makeEnv(), "ns", "needle", { maxFiles: 1, start: 2 });
-    assert.deepEqual(fetchedBlobs, ["c.ts"]);
+    assert.deepEqual(blobsOf(calls, THREE), ["c.ts"]);
     assert.equal(result.truncated, false);
     assert.equal(result.next_start, undefined);
     assert.equal(result.note, undefined);
@@ -219,10 +218,10 @@ test("the last page is not reported as truncated", async () => {
 });
 
 test("max_results stops the scan too, and says more may exist", async () => {
-  await withFetch({ paths: THREE, contents: CONTENTS }, async (fetchedBlobs) => {
+  await withTree({ paths: THREE, contents: CONTENTS }, async (calls) => {
     const result = await searchCode(makeEnv(), "ns", "needle", { maxResults: 1 });
     assert.equal(result.total_results, 1);
-    assert.deepEqual(fetchedBlobs, ["a.ts"], "the result cap did not stop the scan fetching further blobs");
+    assert.deepEqual(blobsOf(calls, THREE), ["a.ts"], "the result cap did not stop the scan fetching further blobs");
     assert.equal(result.truncated, true);
     assert.match(result.note ?? "", /max_results cap/);
   });
@@ -231,9 +230,9 @@ test("max_results stops the scan too, and says more may exist", async () => {
 test("an uncapped scan of the same tree reads everything, so the caps are what stopped it", async () => {
   // The negative control. Without it, every assertion above could be passing
   // because the fixture only ever had one readable file.
-  await withFetch({ paths: THREE, contents: CONTENTS }, async (fetchedBlobs) => {
+  await withTree({ paths: THREE, contents: CONTENTS }, async (calls) => {
     const result = await searchCode(makeEnv(), "ns", "needle", {});
-    assert.deepEqual(fetchedBlobs, THREE);
+    assert.deepEqual(blobsOf(calls, THREE), THREE);
     assert.equal(result.files_scanned, 3);
     assert.equal(result.total_results, 3);
     assert.equal(result.truncated, false);

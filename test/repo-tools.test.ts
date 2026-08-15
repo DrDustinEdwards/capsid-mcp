@@ -11,51 +11,15 @@ import {
   resolveRepo,
   writeRepoFile,
 } from "../src/github.ts";
+import { fakeEnv, fakeKv, withFetch, type Route } from "./fakes.ts";
 
-// A STATEFUL FAKE KV, and it is stateful on purpose (audit 2 batch C). The stub
-// here used to answer "test-token" for any gh:token: key and null for everything
-// else, with put and delete as no-ops. A read cache cannot be tested against a
-// store that never remembers anything: "the write invalidated the cache" and "the
-// cache never held anything" are the same observation, so the test would have
-// asserted nothing. This one holds real entries, records deletes, and supports the
-// prefix list the invalidator uses.
-//
-// seedToken keeps the old convenience (no JWT is minted) for tests that do not care
-// about token minting; the installation-resolution test turns it off so the real
-// path runs.
-function fakeKv(opts: { seedToken?: boolean } = {}) {
-  const { seedToken = true } = opts;
-  const store = new Map<string, string>();
-  const deleted: string[] = [];
-  return {
-    store,
-    deleted,
-    keysUnder: (prefix: string) => [...store.keys()].filter((k) => k.startsWith(prefix)),
-    kv: {
-      get: async (key: string, type?: string) => {
-        const raw = store.get(key) ?? (seedToken && key.startsWith("gh:token:") ? "test-token" : undefined);
-        if (raw === undefined) return null;
-        return type === "json" ? JSON.parse(raw) : raw;
-      },
-      put: async (key: string, value: string) => {
-        store.set(key, value);
-      },
-      delete: async (key: string) => {
-        deleted.push(key);
-        store.delete(key);
-      },
-      list: async ({ prefix }: { prefix: string }) => ({
-        keys: [...store.keys()].filter((k) => k.startsWith(prefix)).map((name) => ({ name })),
-        list_complete: true as const,
-      }),
-    },
-  };
-}
+// KV, Env and the HTTP stub all come from ./fakes.ts now (quality audit 6.2).
+// This file's local KV was the only one that parsed the "json" get type, seeded a
+// default installation token and supported list; all three survive the merge, and
+// the shared one adds failure injection and cursor pagination.
 
-// Minimal Env stub. resolveRepo reads DB; the GitHub paths read APP_KV and hit
-// GitHub via global fetch, which each test stubs.
-function makeEnv(repos: unknown[] | null, kv = fakeKv(), extra: Record<string, unknown> = {}) {
-  return {
+function makeEnv(repos: unknown[] | null, kv = fakeKv({ seedToken: true }), extra: Record<string, unknown> = {}) {
+  return fakeEnv({
     DB: {
       prepare: () => ({
         bind: () => ({ first: async () => (repos === null ? null : { repos: JSON.stringify(repos) }) }),
@@ -63,38 +27,7 @@ function makeEnv(repos: unknown[] | null, kv = fakeKv(), extra: Record<string, u
     },
     APP_KV: kv.kv,
     ...extra,
-  } as never;
-}
-
-type RouteSpec = { status?: number; body?: unknown; text?: string };
-type Route = RouteSpec | ((requestBody: unknown) => RouteSpec);
-
-// Route GitHub calls by "METHOD pathname" (query ignored) to a canned response.
-// Records the calls so a test can assert the request body that was sent. A route
-// may be a function, so a test can serve a body that CHANGES after a write, which
-// is the only way to tell a fresh read from a cached one.
-async function withFetch(
-  routes: Record<string, Route>,
-  fn: (calls: Array<{ method: string; path: string; body: unknown }>) => Promise<void> | void
-) {
-  const original = globalThis.fetch;
-  const calls: Array<{ method: string; path: string; body: unknown }> = [];
-  globalThis.fetch = (async (url: string, init?: RequestInit) => {
-    const method = (init?.method ?? "GET").toUpperCase();
-    const parsed = new URL(url);
-    const body = init?.body ? JSON.parse(init.body as string) : undefined;
-    calls.push({ method, path: parsed.pathname, body });
-    const route = routes[`${method} ${parsed.pathname}`];
-    if (!route) return new Response(`no route for ${method} ${parsed.pathname}`, { status: 500 });
-    const spec = typeof route === "function" ? route(body) : route;
-    const payload = spec.text !== undefined ? spec.text : spec.body === undefined ? "" : JSON.stringify(spec.body);
-    return new Response(payload, { status: spec.status ?? 200 });
-  }) as typeof fetch;
-  try {
-    await fn(calls);
-  } finally {
-    globalThis.fetch = original;
-  }
+  });
 }
 
 const b64 = (text: string) => Buffer.from(text, "utf8").toString("base64");
@@ -270,7 +203,7 @@ const READ_PREFIX = "gh:get:/repos/o/r/";
 test("a read after a write returns the new content, not the cached body", async () => {
   // The end-to-end shape of the finding: read (caches), write, read again inside
   // the 60 second TTL. The second read used to serve the body the write replaced.
-  const kv = fakeKv();
+  const kv = fakeKv({ seedToken: true });
   const env = makeEnv(ONE_REPO, kv);
   let content = "OLD";
   await withFetch(
@@ -306,7 +239,7 @@ test("every mutating path invalidates that repo's cached reads", async () => {
     { name: "manage_pr merge", run: (env) => managePr(env, "ns", 5, "merge") },
   ];
   for (const c of cases) {
-    const kv = fakeKv();
+    const kv = fakeKv({ seedToken: true });
     const env = makeEnv(ONE_REPO, kv);
     // Two cached reads of this repo, plus one of a DIFFERENT repo under the same
     // owner: the sweep must be scoped to o/r and must not take o/rr with it.
@@ -344,7 +277,7 @@ test("a call that changes no content leaves the cache alone", async () => {
     { name: "manage_pr close", run: (env: never) => managePr(env, "ns", 5, "close") },
     { name: "create_branch", run: (env: never) => createBranch(env, "ns", "wip") },
   ]) {
-    const kv = fakeKv();
+    const kv = fakeKv({ seedToken: true });
     const env = makeEnv(ONE_REPO, kv);
     kv.store.set("gh:get:/repos/o/r/contents/doc.md", JSON.stringify({ status: 200, body: "{}" }));
     await withFetch(
@@ -366,7 +299,7 @@ test("reads of different refs are different cache entries", async () => {
   // The key carries the ref as a literal query, so a branch read cannot be served
   // from the default branch's entry. Stated as a test because the invalidation
   // design depends on it.
-  const kv = fakeKv();
+  const kv = fakeKv({ seedToken: true });
   const env = makeEnv(ONE_REPO, kv);
   await withFetch(
     {

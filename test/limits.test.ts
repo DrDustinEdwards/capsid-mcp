@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { test } from "node:test";
-import { timingSafeEqual } from "../src/auth.ts";
-import { b64urlDecode, b64urlEncode, base64Decode, base64Encode, bytesToHex } from "../src/encoding.ts";
-import { REPORT_PREFIX } from "../src/headers.ts";
 import { docPath, MAX_PATH, pathProblem } from "../src/limits.ts";
+import { sourceFiles } from "./source-files.ts";
 
-const src = (name: string) => readFileSync(join(import.meta.dirname, "..", "src", name), "utf8");
-
-// ---- the document path grammar (F29) ----------------------------------------
+// src/limits.ts: the document path grammar and the input bounds.
+//
+// This file used to hold five unrelated subjects (quality audit 6.6): the path
+// grammar, timingSafeEqual, the encoders, the REPORT_PREFIX dedupe and the
+// confirmation wiring. It was named after one of them, so four of the five were
+// findable only by reading it. They now live with the module they describe:
+// timingSafeEqual in auth.test.ts, the encoders in encoding.test.ts, and the
+// "one definition, imported rather than re-typed" guards in
+// source-conventions.test.ts.
 
 test("the grammar accepts the paths the store actually holds", () => {
   // Shapes measured in the live store on 2026-08-17, including the longest path
@@ -55,112 +57,64 @@ test("the zod schema carries the same grammar, with the reason", () => {
   assert.match(bad.error?.issues[0]?.message ?? "", /must not contain '\.\.'/);
 });
 
-test("every tool argument is bounded: no bare z.string() in the tool surface", () => {
-  // The self-enforcing half. A NEW unbounded field is the thing this catches; the
-  // fields fixed today are already fixed.
-  const server = src("server.ts");
-  const bare = server.split("\n").filter((line) => /z\.string\(\)/.test(line));
-  assert.deepEqual(bare, [], "an unbounded z.string() is back in src/server.ts; use bounded(...) from src/limits.ts");
-  // And the guard is not vacuous: the file must still contain schemas to check.
-  assert.ok(server.includes("bounded(MAX_BODY)"), "the scan matched nothing, so it proves nothing");
-  assert.ok(server.split("docPath").length - 1 >= 8, "docPath is barely used, so the grammar is probably not wired up");
-});
+// src/limits.ts is where `bounded` and `docPath` are BUILT, so it is the one file
+// that must contain a bare z.string(). Exempting it by name alone would hide a
+// genuinely unbounded field declared there later, so the exemption is PINNED: the
+// two definitional uses are named below, and a third one fails.
+const BOUNDING_PRIMITIVES = [
+  "export const docPath = z.string().superRefine",
+  "export const bounded = (max: number) => z.string().max(max);",
+];
 
-// ---- constant-time compares (F1) --------------------------------------------
+const BARE_Z_STRING = /z\.string\(\)/;
+const isComment = (line: string) => line.startsWith("//") || line.startsWith("*");
 
-test("timingSafeEqual accumulates rather than short-circuiting", () => {
-  // The behavioural test below pins the ANSWER, and an implementation of
-  // `return a === b` would give the same answers. The property that matters here
-  // is not observable from outside the function and timing assertions in a unit
-  // test are flaky, so the shape is what gets guarded: a running xor over every
-  // character, with no early return inside the loop.
-  const auth = src("auth.ts");
-  const body = auth.slice(auth.indexOf("export function timingSafeEqual"), auth.indexOf("export function isAdminUser"));
-  assert.match(body, /diff \|= a\.charCodeAt\(i\) \^ b\.charCodeAt\(i\)/, "timingSafeEqual no longer accumulates");
-  assert.doesNotMatch(body, /return a === b/, "timingSafeEqual short-circuits on ===");
-});
-
-test("timingSafeEqual agrees with === on the answer", () => {
-  assert.equal(timingSafeEqual("abc", "abc"), true);
-  assert.equal(timingSafeEqual("abc", "abd"), false);
-  assert.equal(timingSafeEqual("abc", "ab"), false);
-  assert.equal(timingSafeEqual("", ""), true);
-  // The first character differing must not be distinguishable by early return:
-  // both of these compare the whole string.
-  assert.equal(timingSafeEqual("zzz", "azz"), false);
-  assert.equal(timingSafeEqual("azz", "azy"), false);
-});
-
-test("the secret compares go through timingSafeEqual, not ===", () => {
-  // Shape check across both files, so a NEW compare of a secret is visible.
-  const auth = src("auth.ts");
-  const handler = src("github-handler.ts");
-  assert.ok(auth.includes("timingSafeEqual(readonly ? entry.slice(3) : entry, hash)"));
-  assert.match(handler, /timingSafeEqual\(sig, await hmacHex/);
-  assert.match(handler, /timingSafeEqual\(csrfCookie, csrf\)/);
-  assert.match(handler, /timingSafeEqual\(stateCookie, await sha256Hex/);
-  for (const [name, text] of [
-    ["auth.ts", auth],
-    ["github-handler.ts", handler],
-  ] as const) {
-    assert.doesNotMatch(text, /!== *\(await hmacHex/, `${name} still compares an hmac with !==`);
-    assert.doesNotMatch(text, /csrfCookie !== csrf/, `${name} still compares csrf with !==`);
+test("the bounding primitives are still exactly two, and still in limits.ts", () => {
+  // The pin behind the exemption in the next test. A third bare z.string() in
+  // limits.ts is not a primitive, it is an unbounded field, and it fails here.
+  const limits = sourceFiles().find((f) => f.name === "limits.ts");
+  assert.ok(limits, "src/limits.ts is gone");
+  const uses = limits.text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => !isComment(line) && BARE_Z_STRING.test(line));
+  assert.equal(
+    uses.length,
+    BOUNDING_PRIMITIVES.length,
+    `limits.ts has ${uses.length} bare z.string() uses: ${uses.join(" | ")}`
+  );
+  for (const primitive of BOUNDING_PRIMITIVES) {
+    assert.ok(limits.text.includes(primitive), `the bounding primitive "${primitive}" is gone from limits.ts`);
   }
 });
 
-// ---- deduped helpers (F21, F22, F23) ----------------------------------------
-
-test("one REPORT_PREFIX, imported by both the sink and the prune", () => {
-  const backup = src("backup.ts");
-  const handler = src("github-handler.ts");
-  assert.equal(REPORT_PREFIX, "reports/csp/");
-  for (const [name, text] of [
-    ["backup.ts", backup],
-    ["github-handler.ts", handler],
-  ] as const) {
-    assert.match(text, /from "\.\/headers"/, `${name} does not import the shared prefix`);
-    assert.doesNotMatch(text, /= "reports\/csp\/"/, `${name} still defines its own report prefix`);
-  }
-});
-
-test("one base64 and hex implementation, imported rather than re-typed", () => {
-  for (const name of ["github.ts", "github-handler.ts"]) {
-    const text = src(name);
-    assert.match(text, /from "\.\/encoding"/, `${name} does not use the shared encoders`);
-    assert.doesNotMatch(text, /btoa\(binary\)/, `${name} carries its own base64url encoder`);
-    assert.doesNotMatch(text, /toString\(16\)\.padStart\(2, "0"\)/, `${name} carries its own hex encoder`);
-  }
-  assert.doesNotMatch(src("auth.ts"), /toString\(16\)\.padStart\(2, "0"\)/);
-});
-
-test("the shared encoders round-trip, including non-ASCII and padding cases", () => {
-  for (const text of ["", "a", "ab", "abc", "hello world", "café ✓ 中文"]) {
-    assert.equal(b64urlDecode(b64urlEncode(text)), text, `b64url round-trip failed for ${text}`);
-    assert.equal(base64Decode(base64Encode(text)), text, `base64 round-trip failed for ${text}`);
-  }
-  // url-safe alphabet, no padding: this is what the JWT and the cookie depend on.
-  const encoded = b64urlEncode("??>>??>>");
-  assert.doesNotMatch(encoded, /[+/=]/);
-  // GitHub wraps its base64 across lines; atob rejects that without the strip.
-  assert.equal(base64Decode("aGVsbG8g\nd29ybGQ="), "hello world");
-  assert.equal(bytesToHex(new Uint8Array([0, 15, 16, 255])), "000f10ff");
-});
-
-// ---- one confirmation helper, and who uses it (F25) -------------------------
-
-test("every destructive tool goes through the one confirmation helper", () => {
-  const server = src("server.ts");
-  // confirmDestructive is called from exactly one place now: the helper.
-  const direct = server.split("await confirmDestructive(").length - 1;
-  assert.equal(direct, 1, "a tool still calls confirmDestructive directly instead of requireConfirmation");
-  // And the five destructive-class tools all reach it.
-  for (const marker of ["refusal", "restoreRefusal", "deleteRefusal", "moveRefusal", "finalizeRefusal"]) {
-    assert.ok(server.includes(`${marker} = await requireConfirmation(`), `${marker} is missing`);
-  }
-});
-
-test("move and lint finalize accept a confirm argument", () => {
-  const server = src("server.ts");
-  assert.match(server, /path: docPath, new_path: docPath, confirm: z\.boolean\(\)\.optional\(\)/);
-  assert.match(server, /consumed: z\.array\(docPath\)\.optional\(\),\s*\n\s*confirm: z\.boolean\(\)\.optional\(\)/);
+test("every tool argument is bounded: no bare z.string() anywhere in src/", () => {
+  // Widened from server.ts to the whole directory (quality audit 1.1). An
+  // unbounded field is unbounded wherever it is declared, and the day a tool
+  // schema is written in another module a server.ts-only scan reports green over
+  // a surface it never read.
+  //
+  // Widening it made the rule state itself for the first time. Scanning one file,
+  // it never had to say what "bare z.string()" excludes; over the whole directory
+  // it does, and the answer is: not a comment, and not the two primitives in
+  // limits.ts that the rule is built out of. Both exclusions are guarded, the
+  // second by the pin above, so neither can grow silently.
+  const offenders = sourceFiles()
+    .filter((f) => f.name !== "limits.ts")
+    .flatMap((f) =>
+      f.text
+        .split("\n")
+        .map((line, i) => ({ file: f.name, line: i + 1, text: line.trim() }))
+        .filter((l) => !isComment(l.text) && BARE_Z_STRING.test(l.text))
+    );
+  assert.deepEqual(
+    offenders.map((o) => `src/${o.file}:${o.line} ${o.text}`),
+    [],
+    "an unbounded z.string() is back; use bounded(...) from src/limits.ts"
+  );
+  // Vacuity guards: the scan has to be looking at real schemas, and at the
+  // grammar being wired up, or "no offenders" means "nothing was read".
+  const all = sourceFiles().map((f) => f.text).join("\n");
+  assert.ok(all.includes("bounded(MAX_BODY)"), "the scan matched nothing, so it proves nothing");
+  assert.ok(all.split("docPath").length - 1 >= 8, "docPath is barely used, so the grammar is probably not wired up");
 });

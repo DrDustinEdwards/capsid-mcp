@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { join } from "node:path";
+import { sourceFiles } from "./source-files.ts";
 
 // The two write-path invariants, guarded.
 //
@@ -21,8 +20,13 @@ import { join } from "node:path";
 // invariant 1's statements exist per tool). The behavioural half is
 // test/write-invariants.test.ts, which drives the real handlers against a fake D1
 // and asserts the statements are actually issued.
-
-const SOURCE = readFileSync(join(import.meta.dirname, "..", "src", "server.ts"), "utf8");
+//
+// IT SCANS EVERY FILE UNDER src/, not just server.ts (quality audit 1.1). These
+// are properties of a TOOL, and server.ts is only where the tools happen to live
+// today. A tool registered from a new module was invisible here and the suite
+// reported green over a surface it had never read. Widening it is also what lets
+// server.ts be split later without blinding the guard, which is the whole point
+// of this batch.
 
 const MUTATING_SQL = /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\b/i;
 const OPERATOR_GATE = "if (!operator)";
@@ -30,21 +34,41 @@ const OPERATOR_GATE = "if (!operator)";
 interface Block {
   tool: string;
   text: string;
+  file: string;
 }
 
 // Each registerTool call, from its name to the start of the next registration.
 // Crude on purpose: a parser would be more precise and would also be a second
 // implementation of TypeScript in a test file.
+//
+// Scanned per FILE rather than over a concatenation of all of src/, so a block
+// cannot run past the end of its own module and swallow the next file's text, and
+// so a failure names the file the offending tool lives in.
 function toolBlocks(): Block[] {
   const marker = "server.registerTool(";
-  const starts: number[] = [];
-  for (let i = SOURCE.indexOf(marker); i !== -1; i = SOURCE.indexOf(marker, i + 1)) starts.push(i);
-  const resourceStart = SOURCE.indexOf("server.registerResource(");
-  return starts.map((start, i) => {
-    const end = i + 1 < starts.length ? starts[i + 1] : resourceStart === -1 ? SOURCE.length : resourceStart;
-    const text = SOURCE.slice(start, end);
-    return { tool: text.match(/registerTool\(\s*\n?\s*"([^"]+)"/)?.[1] ?? `#${i}`, text };
-  });
+  const blocks: Block[] = [];
+  for (const { name, text } of sourceFiles()) {
+    const starts: number[] = [];
+    for (let i = text.indexOf(marker); i !== -1; i = text.indexOf(marker, i + 1)) starts.push(i);
+    if (starts.length === 0) continue;
+    const resourceStart = text.indexOf("server.registerResource(");
+    for (let i = 0; i < starts.length; i++) {
+      const start = starts[i];
+      // The block ends at the next registration, or at the resource registration
+      // if that comes first, or at the end of the file.
+      const bounds = [
+        i + 1 < starts.length ? starts[i + 1] : text.length,
+        resourceStart > start ? resourceStart : text.length,
+      ];
+      const body = text.slice(start, Math.min(...bounds));
+      blocks.push({
+        file: name,
+        text: body,
+        tool: body.match(/registerTool\(\s*\n?\s*"([^"]+)"/)?.[1] ?? `${name}#${i}`,
+      });
+    }
+  }
+  return blocks;
 }
 
 const BLOCKS = toolBlocks();
@@ -56,10 +80,16 @@ test("the block scan found the whole tool surface", () => {
   for (const name of ["write", "delete", "move", "lint", "restore", "read", "search"]) {
     assert.ok(BLOCKS.some((b) => b.tool === name), `did not parse a block for the ${name} tool`);
   }
+  // And the walk itself reached the whole directory. sourceFiles() throws below
+  // its own floor; this is the second half, asserting the scan is not reading one
+  // file that happens to contain everything today.
+  assert.ok(sourceFiles().length >= 10, "the src/ walk collapsed to a handful of files");
 });
 
 test("every tool whose handler contains mutating SQL is gated on the write grant", () => {
-  const ungated = BLOCKS.filter((b) => MUTATING_SQL.test(b.text) && !b.text.includes(OPERATOR_GATE)).map((b) => b.tool);
+  const ungated = BLOCKS.filter((b) => MUTATING_SQL.test(b.text) && !b.text.includes(OPERATOR_GATE)).map(
+    (b) => `${b.tool} (src/${b.file})`
+  );
   assert.deepEqual(
     ungated,
     [],
@@ -80,8 +110,12 @@ test("the gate check is not vacuous: several tools are found to be mutating", ()
 test("the one mutating helper outside a tool handler carries the gate itself", () => {
   // guardedWrite writes the audit row for the repo tools, so their own blocks
   // contain no SQL and the scan above cannot see them. The gate has to be here.
-  const helper = SOURCE.slice(SOURCE.indexOf("const guardedWrite"), SOURCE.indexOf("const REPO_ARG"));
-  assert.ok(helper.length > 200, "could not locate guardedWrite");
+  // Located by search rather than by filename, so moving it to another module
+  // keeps the guard rather than silently losing it.
+  const owner = sourceFiles().find((f) => f.text.includes("const guardedWrite"));
+  assert.ok(owner, "could not locate guardedWrite anywhere under src/");
+  const helper = owner.text.slice(owner.text.indexOf("const guardedWrite"), owner.text.indexOf("const REPO_ARG"));
+  assert.ok(helper.length > 200, `could not bound guardedWrite in src/${owner.name}`);
   assert.ok(MUTATING_SQL.test(helper), "guardedWrite no longer writes the audit row");
   assert.ok(helper.includes(OPERATOR_GATE), "guardedWrite lost its operator gate: every repo write tool is now open to ro: keys");
 });

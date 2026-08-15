@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isAdminUser, operatorGrant, sha256Hex, operatorIdentity } from "../src/auth.ts";
+import { isAdminUser, operatorGrant, sha256Hex, operatorIdentity, timingSafeEqual } from "../src/auth.ts";
+import { sourceFiles } from "./source-files.ts";
 
 const req = (key?: string) =>
   new Request("https://capsid.example/ops/mcp", {
@@ -106,4 +107,33 @@ test("operatorGrant still answers exactly as before", async () => {
   const env = { OPERATOR_KEY_HASH: await sha256Hex("write-key") };
   assert.equal(await operatorGrant(keyRequest("write-key"), env), "write");
   assert.equal(await operatorGrant(keyRequest("nope"), env), null);
+});
+
+// ---- timingSafeEqual, moved here from limits.test.ts (quality audit 6.6) ------
+//
+// It is an auth helper and it lives in src/auth.ts; it was findable only inside a
+// file named for the input-bounds module.
+
+test("timingSafeEqual accumulates rather than short-circuiting", () => {
+  // The behavioural test below pins the ANSWER, and an implementation of
+  // `return a === b` would give the same answers. The property that matters is not
+  // observable from outside the function and timing assertions in a unit test are
+  // flaky, so the shape is what gets guarded: a running xor over every character,
+  // with no early return inside the loop.
+  const auth = sourceFiles().find((f) => f.name === "auth.ts")!.text;
+  const body = auth.slice(auth.indexOf("export function timingSafeEqual"), auth.indexOf("export function isAdminUser"));
+  assert.ok(body.length > 100, "could not bound timingSafeEqual in src/auth.ts");
+  assert.match(body, /diff \|= a\.charCodeAt\(i\) \^ b\.charCodeAt\(i\)/, "timingSafeEqual no longer accumulates");
+  assert.doesNotMatch(body, /return a === b/, "timingSafeEqual short-circuits on ===");
+});
+
+test("timingSafeEqual agrees with === on the answer", () => {
+  assert.equal(timingSafeEqual("abc", "abc"), true);
+  assert.equal(timingSafeEqual("abc", "abd"), false);
+  assert.equal(timingSafeEqual("abc", "ab"), false);
+  assert.equal(timingSafeEqual("", ""), true);
+  // The first character differing must not be distinguishable by early return:
+  // both of these compare the whole string.
+  assert.equal(timingSafeEqual("zzz", "azz"), false);
+  assert.equal(timingSafeEqual("azz", "azy"), false);
 });

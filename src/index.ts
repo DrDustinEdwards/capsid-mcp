@@ -5,7 +5,8 @@ import { runBackup } from "./backup";
 import { callerIp, checkRegistrationRate } from "./dcr-rate-limit";
 import { defaultHandler } from "./github-handler";
 import { withSecurityHeaders } from "./headers";
-import { buildServer, type Env, type Props } from "./server";
+import type { Env, Props } from "./env";
+import { buildServer } from "./server";
 
 const apiHandler = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {

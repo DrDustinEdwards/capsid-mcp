@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { buildServer } from "../src/server.ts";
+import { fakeD1, fakeEnv, type FakeD1Rows, type Recorded } from "./fakes.ts";
 
 // THE BEHAVIOURAL HALF of the write-path invariants. test/invariants.test.ts reads
 // the source; this file DRIVES the real tool handlers over a real MCP connection
@@ -18,11 +19,13 @@ import { buildServer } from "../src/server.ts";
 // a database and proves nothing about SQL correctness; it proves which statements a
 // handler emits, which is precisely what the invariants are about.
 
-interface Recorded {
-  sql: string;
-  params: unknown[];
-  via: "batch" | "direct";
-}
+// The store is the SHARED row-backed fake from ./fakes.ts (quality audit 6.1 and
+// 6.2). It replaces a local D1 dialect that answered on SQL shape alone: `WHERE id
+// = ?1` returned version 42 whatever id was asked for, and `SELECT 1 AS ok FROM
+// documents` answered ok for a row that did not exist. Every lookup assertion was
+// therefore really asserting that the handler had issued SOME statement. The rows
+// are real now and the WHERE clauses resolve against the bound values, so asking
+// for the wrong path or the wrong version id gets nothing back.
 
 interface FakeOptions {
   namespaceExists?: boolean;
@@ -36,107 +39,82 @@ interface FakeOptions {
   // a racing write lands, and with a 90 second elicitation sitting in it, it is
   // not small.
   raceAfterPreRead?: (live: LiveState) => void;
+  failBatchMatching?: RegExp;
 }
 
+// The race hook's view of the store. It is a thin projection over the rows so the
+// existing call sites keep reading as "another writer changed the body", while the
+// rows underneath are what the guards actually evaluate against.
 interface LiveState {
   body: string | null;
   exists: boolean;
   updatedAt: string;
 }
 
-// The guard statements the server arms. Recognised by SQL shape so the fake can
-// evaluate the predicate the way SQLite would, rather than assuming it passed.
-//
-// EXTENSION NOTE (audit 2 batch A). Until now this fake recorded statements and
-// returned success unconditionally, so it could not express a race at all: every
-// batch "succeeded" whatever the store contained. Two things were added, both
-// minimal and both load-bearing for the tests below. First, batch() now
-// EVALUATES the three guard shapes against current state and throws the real NOT
-// NULL violation when one fires, which is what D1 does. Second, mutable live
-// state plus a raceBeforeCommit hook, so a test can put a competing write in the
-// exact window the predicate exists to close. Without both, a predicate test
-// would be asserting against a store that cannot disagree with it, which is the
-// vacuous-guard shape this repo has been bitten by four times.
-const GUARD_ERROR = "NOT NULL constraint failed: document_versions.document_id";
+const DOC = { namespace: "capsid", path: "doc.md" };
+const VERSION_ID = 42;
 
-function guardFires(sql: string, params: unknown[], live: LiveState): boolean {
-  const flat = sql.replace(/\s+/g, " ");
-  if (!/INSERT INTO document_versions \(document_id, namespace, path\) SELECT NULL/i.test(flat)) return false;
-  if (/AND body IS \?3/i.test(flat)) return !(live.exists && live.body === params[2]); // requireBodyUnchanged
-  if (/WHERE EXISTS/i.test(flat)) return live.exists; // requireMissing
-  return !live.exists; // requireExists
-}
-
-function fakeDb(opts: FakeOptions = {}) {
-  const {
-    namespaceExists = true,
-    body: priorBody = "prior body",
-    updatedAt = "2020-01-01 00:00:00",
-    exists = true,
-    raceAfterPreRead,
-  } = opts;
-  const recorded: Recorded[] = [];
-  const live: LiveState = { body: priorBody as string | null, exists, updatedAt };
-  const doc = () => ({ id: 7, title: "Prior title", body: live.body, type: "note", status: "published", tags: "a,b", updated_at: live.updatedAt });
-
-  let raced = false;
-  const answer = (sql: string) => {
-    if (/FROM namespaces/i.test(sql)) return namespaceExists ? { namespace: "capsid" } : null;
-    if (/FROM document_versions WHERE id/i.test(sql)) {
-      return { id: 42, document_id: 7, namespace: "capsid", path: "doc.md", title: "Old title", body: "old body", snapshot_at: "2026-08-01 00:00:00" };
-    }
-    if (/SELECT 1 AS ok FROM documents/i.test(sql)) return { ok: 1 };
-    if (/FROM documents/i.test(sql)) {
-      // The commit-time read of updated_at is NOT the pre-read, so it must see
-      // whatever the racing writer left behind.
-      const isPreRead = !/SELECT updated_at FROM documents/i.test(sql);
-      const value = live.exists ? doc() : null;
-      if (isPreRead && raceAfterPreRead && !raced) {
-        raced = true;
-        raceAfterPreRead(live);
-      }
-      return value;
-    }
-    return null;
-  };
-
-  const stmt = (sql: string, params: unknown[] = []) => ({
-    sql,
-    params,
-    bind: (...bound: unknown[]) => stmt(sql, bound),
-    first: async () => answer(sql),
-    all: async () => ({ results: /FROM document_links/i.test(sql) ? [] : [answer(sql)].filter(Boolean), meta: { changes: 0 } }),
-    run: async () => {
-      recorded.push({ sql, params, via: "direct" });
-      return { meta: { changes: 1 } };
-    },
-  });
-
+function connectOptions(opts: FakeOptions) {
+  const { namespaceExists = true, body = "prior body", updatedAt = "2020-01-01 00:00:00", exists = true } = opts;
+  const documents = exists
+    ? [
+        { id: 7, ...DOC, title: "Prior title", body, type: "note", status: "published", tags: "a,b", updated_at: updatedAt },
+        // lint finalize only archives episodic and source docs, so the fixture
+        // carries one for it to consume (quality audit 6.3).
+        { id: 8, namespace: "capsid", path: "ep.md", title: "An episodic", body: "ep body", type: "episodic", status: "published", tags: null, updated_at: updatedAt },
+      ]
+    : [];
   return {
-    recorded,
-    live,
-    db: {
-      prepare: (sql: string) => stmt(sql),
-      batch: async (statements: Array<{ sql: string; params: unknown[] }>) => {
-        for (const s of statements) {
-          // A guard that fires aborts the transaction, so nothing this batch
-          // would have written is recorded. That is the property under test.
-          if (guardFires(s.sql, s.params, live)) throw new Error(GUARD_ERROR);
-          recorded.push({ sql: s.sql, params: s.params, via: "batch" });
+    documents,
+    versions: [
+      { id: VERSION_ID, document_id: 7, ...DOC, title: "Old title", body: "old body", snapshot_at: "2026-08-01 00:00:00" },
+    ],
+    namespaces: namespaceExists ? [{ namespace: "capsid", repos: "[]" }] : [],
+    failBatchMatching: opts.failBatchMatching,
+    raceAfterPreRead: opts.raceAfterPreRead
+      ? (rows: FakeD1Rows, target: { namespace: string; path: string }) => {
+          const at = () => rows.documents.find((d) => d.namespace === target.namespace && d.path === target.path);
+          const live: LiveState = {
+            get body() {
+              return at()?.body ?? null;
+            },
+            set body(value: string | null) {
+              const row = at();
+              if (row) row.body = value;
+              else rows.documents.push({ id: 7, ...target, title: "Racing title", body: value, updated_at: updatedAt });
+            },
+            get updatedAt() {
+              return at()?.updated_at ?? updatedAt;
+            },
+            set updatedAt(value: string) {
+              const row = at();
+              if (row) row.updated_at = value;
+            },
+            get exists() {
+              return Boolean(at());
+            },
+            set exists(value: boolean) {
+              if (value && !at()) {
+                rows.documents.push({ id: 7, ...target, title: "Racing title", body: null, updated_at: updatedAt });
+              } else if (!value) {
+                const i = rows.documents.findIndex((d) => d.namespace === target.namespace && d.path === target.path);
+                if (i !== -1) rows.documents.splice(i, 1);
+              }
+            },
+          };
+          opts.raceAfterPreRead!(live);
         }
-        return statements.map(() => ({ results: [], meta: { changes: 1 } }));
-      },
-    },
+      : undefined,
   };
 }
 
 async function connect(operator: boolean, opts: FakeOptions = {}) {
-  const { recorded, db, live } = fakeDb(opts);
-  const server = buildServer({ DB: db } as never, operator, "test:guard");
+  const { rows, recorded, db } = fakeD1(connectOptions(opts));
+  const server = buildServer(fakeEnv({ DB: db }), operator, "test:guard");
   const client = new Client({ name: "invariant-test", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-  return { client, recorded, live, close: () => client.close() };
+  return { client, recorded, rows, close: () => client.close() };
 }
 
 const call = async (client: Client, name: string, args: Record<string, unknown>) =>
@@ -149,7 +127,7 @@ const sqlFor = (recorded: Recorded[]) => recorded.map((r) => r.sql.replace(/\s+/
 // The four tools that overwrite, remove or rename a document, and what each one must
 // issue. Adding a mutating tool without adding it here is the gap the source guard in
 // invariants.test.ts covers from the other side.
-const MUTATORS = [
+const MUTATORS: Array<{ tool: string; args: Record<string, unknown>; requires: RegExp[]; refusesUnregisteredWith?: RegExp }> = [
   {
     tool: "write",
     args: { namespace: "capsid", path: "doc.md", title: "New", body: "new body", confirm: true },
@@ -172,6 +150,22 @@ const MUTATORS = [
     args: { namespace: "capsid", path: "doc.md", new_path: "moved.md", confirm: true },
     // A rename has no body to snapshot; the audit row is the record.
     requires: [/INSERT INTO audit_log/],
+  },
+  {
+    // lint finalize is the WIDEST mutation in the file: one call renames every
+    // consumed document. It was never driven behaviourally, only source-scanned
+    // (quality audit 6.3), which for the widest mutation is the wrong way round.
+    tool: "lint",
+    args: { namespace: "capsid", mode: "finalize", consumed: ["ep.md"], confirm: true },
+    // Archiving is a rename, so there is no body to snapshot; the audit row is
+    // the record, exactly as for move.
+    requires: [/INSERT INTO audit_log/],
+    // finalize refuses an unregistered namespace by a DIFFERENT route from the
+    // other four: it does not call requireRegisteredNamespace, it fails its own
+    // per-path existence check, because a document in an unregistered namespace
+    // cannot be found to archive. Same refusal, same "nothing written", different
+    // message. Asserted as it actually behaves rather than as the others do.
+    refusesUnregisteredWith: /not found/,
   },
 ];
 
@@ -253,7 +247,7 @@ test("write, delete and move all refuse an unregistered namespace, and write not
   // restore was excluded here until 2026-08-17 (audit 2, F31). It checks the
   // namespace like every other mutator, so the exclusion was hiding nothing and
   // the loop is now whole.
-  for (const { tool, args } of MUTATORS) {
+  for (const { tool, args, refusesUnregisteredWith } of MUTATORS) {
     const { client, recorded, close } = await connect(true, { namespaceExists: false });
     const result = (await client.callTool({
       name: tool,
@@ -261,7 +255,7 @@ test("write, delete and move all refuse an unregistered namespace, and write not
     })) as { isError?: boolean; content: Array<{ text: string }> };
     await close();
     assert.equal(result.isError, true, `${tool} accepted an unregistered namespace`);
-    assert.match(result.content[0].text, /unknown namespace/);
+    assert.match(result.content[0].text, refusesUnregisteredWith ?? /unknown namespace/);
     assert.deepEqual(recorded, [], `${tool} wrote statements for an unregistered namespace`);
   }
 });
@@ -502,6 +496,103 @@ test("restore writes the VERSION body, and snapshots the LIVE one", async () => 
   );
 });
 
+// ---- history, driven rather than described (quality audit 6.3) --------------
+//
+// history was never behaviourally tested. Its scoping rule ("namespace and path
+// are part of the lookup on purpose: an id alone would let a caller walk every
+// snapshot in the store") was asserted by a comment in src/server.ts and by
+// nothing else, and could not have been tested before, because the old fake
+// returned the same version row for every id, namespace and path.
+
+test("history lists the versions of the document asked for", async () => {
+  const { client, close } = await connect(true);
+  const result = await call(client, "history", { namespace: "capsid", path: "doc.md" });
+  await close();
+  assert.ok(!result.isError, `history failed: ${result.content?.[0]?.text}`);
+  const out = JSON.parse(result.content[0].text) as { versions: Array<{ id: number }>; live: unknown };
+  assert.deepEqual(out.versions.map((v) => v.id), [42], "history did not return the document's own snapshot");
+  assert.ok(out.live, "history did not report the live document");
+});
+
+test("history returns nothing for a path with no snapshots", async () => {
+  const { client, close } = await connect(true);
+  const result = await call(client, "history", { namespace: "capsid", path: "ep.md" });
+  await close();
+  const out = JSON.parse(result.content[0].text) as { versions: unknown[] };
+  assert.deepEqual(out.versions, [], "a document's history leaked another document's snapshots");
+});
+
+test("fetching a version by id is scoped to its own document", async () => {
+  // The same id, asked for under a path it does not belong to. Under the old fake
+  // this returned the body anyway, which is the walk-the-store shape the scoping
+  // exists to prevent.
+  const { client, close } = await connect(true);
+  const wrongPath = await call(client, "history", { namespace: "capsid", path: "ep.md", version_id: 42 });
+  await close();
+  assert.equal(wrongPath.isError, true, "a snapshot was readable through a document it does not belong to");
+  assert.match(wrongPath.content[0].text, /no version 42/);
+});
+
+test("fetching a version by id returns that version's body", async () => {
+  const { client, close } = await connect(true);
+  const result = await call(client, "history", { namespace: "capsid", path: "doc.md", version_id: 42 });
+  await close();
+  assert.ok(!result.isError, `history by id failed: ${result.content?.[0]?.text}`);
+  const out = JSON.parse(result.content[0].text) as { id: number; body: string; bytes: number };
+  assert.equal(out.id, 42);
+  assert.equal(out.body, "old body");
+  assert.equal(out.bytes, "old body".length);
+});
+
+// ---- the fake can now DISAGREE (quality audit 6.1) ---------------------------
+//
+// Three tests that could not have failed before. The old fake answered on SQL
+// shape alone: `FROM document_versions WHERE id` returned version 42 for any id,
+// `FROM documents WHERE namespace = ?1 AND path = ?2` returned the one document
+// for any path, and `SELECT 1 AS ok FROM documents` answered ok unconditionally.
+// A handler that looked up the wrong row got the right answer anyway, so the
+// lookup could not be tested at all: what looked like coverage was the fake
+// agreeing with whatever it was asked.
+
+test("a version id that does not exist is refused, not silently substituted", async () => {
+  const { client, recorded, close } = await connect(true);
+  const result = await call(client, "restore", {
+    namespace: "capsid", path: "doc.md", version_id: 99, confirm: true,
+  });
+  await close();
+  assert.equal(result.isError, true, "restore accepted a version id that does not exist");
+  assert.match(result.content[0].text, /no version 99/);
+  assert.deepEqual(recorded, [], "a restore of a missing version still wrote statements");
+});
+
+test("a version belonging to another document is not reachable by id", async () => {
+  // namespace and path are part of the version lookup on purpose: an id alone
+  // would let a caller walk every snapshot in the store by incrementing a number.
+  // Under the old fake this passed for any id, path or namespace, so the property
+  // was asserted by the tool's description and by nothing else.
+  const { client, close } = await connect(true);
+  const result = await call(client, "restore", {
+    namespace: "capsid", path: "some-other-doc.md", version_id: 42, confirm: true,
+  });
+  await close();
+  assert.equal(result.isError, true, "a snapshot was reachable from a document it does not belong to");
+  assert.match(result.content[0].text, /no version 42/);
+});
+
+test("a document that does not exist is not found at a path that does", async () => {
+  // delete reads the row before it does anything. The old fake returned the one
+  // document for every path, so a delete of a path that has never existed reported
+  // success and issued a snapshot of a body it invented.
+  const { client, recorded, close } = await connect(true);
+  const result = await call(client, "delete", {
+    namespace: "capsid", path: "never-existed.md", confirm: true,
+  });
+  await close();
+  assert.equal(result.isError, true, "delete accepted a path with no document");
+  assert.match(result.content[0].text, /not found/);
+  assert.deepEqual(recorded, [], "a delete of a missing document still wrote statements");
+});
+
 test("restore accepts if_match and refuses a stale one", async () => {
   const stale = await connect(true, { body: "prior body" });
   const staleRes = await call(stale.client, "restore", {
@@ -585,13 +676,10 @@ test("the concurrency warning is read at COMMIT time, not from the pre-read", as
 // rethrew that, so the tool call rejected while delete, move and finalize all
 // answered with a normal error result. Same failure, two shapes.
 async function connectExploding(sql: RegExp) {
-  const { db, recorded } = fakeDb();
-  const inner = db.batch;
-  db.batch = async (statements: Array<{ sql: string; params: unknown[] }>) => {
-    if (statements.some((st) => sql.test(st.sql))) throw new Error("D1_ERROR: database is locked");
-    return inner(statements);
-  };
-  const server = buildServer({ DB: db } as never, true, "test:guard");
+  // Failure injection is a capability of the shared fake now, rather than a
+  // monkey-patch over a local one.
+  const { db, recorded } = fakeD1(connectOptions({ failBatchMatching: sql }));
+  const server = buildServer(fakeEnv({ DB: db }), true, "test:guard");
   const client = new Client({ name: "f30-test", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -603,6 +691,7 @@ const F30_CASES = [
   { tool: "restore", args: { namespace: "capsid", path: "doc.md", version_id: 42, confirm: true } },
   { tool: "delete", args: { namespace: "capsid", path: "doc.md", confirm: true } },
   { tool: "move", args: { namespace: "capsid", path: "doc.md", new_path: "moved.md", confirm: true } },
+  { tool: "lint", args: { namespace: "capsid", mode: "finalize", consumed: ["ep.md"], confirm: true } },
 ];
 
 for (const { tool, args } of F30_CASES) {
@@ -629,8 +718,8 @@ test("write_repo_file reports success with a warning when the audit insert fails
   // guardedWrite commits to GitHub and THEN writes its audit row, and the two
   // cannot share a transaction. When the row failed, the caller was told the tool
   // failed, and the natural response to that is a retry, which is a second commit.
-  const { db } = fakeDb();
-  db.prepare = ((sql: string) => {
+  const { db } = fakeD1(connectOptions({}));
+  (db as { prepare: unknown }).prepare = ((sql: string) => {
     const base = { bind: () => base, first: async () => null, all: async () => ({ results: [], meta: { changes: 0 } }), run: async () => ({ meta: { changes: 1 } }) } as Record<string, unknown>;
     if (/INSERT INTO audit_log/i.test(sql)) {
       base.run = async () => {

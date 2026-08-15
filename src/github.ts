@@ -6,7 +6,7 @@
 // over the live GitHub REST API. No PAT, no clone.
 
 import { b64urlFromBytes, b64urlEncode, base64Decode, base64Encode } from "./encoding";
-import type { Env } from "./server";
+import type { Env } from "./env";
 
 const GH = "https://api.github.com";
 const GH_HEADERS: Record<string, string> = {

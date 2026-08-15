@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { DOC_STATUSES, DOC_TYPES, validateDocStatus, validateDocType } from "../src/doc-meta.ts";
+import { sourceFiles } from "./source-files.ts";
 
 // Pinned so adding or removing a status is a deliberate edit here, not a silent
 // widening. Fails in both directions: a missing entry and an orphaned one.
@@ -22,12 +23,17 @@ test("'closed' is a valid status", () => {
 // because the archive/ prefix is the ONLY thing that takes a document out of
 // memory. A closed task is finished, not forgotten.
 test("closure does not remove a document from the lint loop", () => {
-  const src = readFileSync(join(import.meta.dirname, "..", "src", "server.ts"), "utf8");
-  const closedFilters = src.match(/status\s*!=\s*'closed'/g) ?? [];
+  // Scanned across all of src/ (quality audit 1.1): a second closed-filter added
+  // in another module is exactly as damaging as one added here, and would have
+  // been invisible to a scan of server.ts alone.
+  const perFile = sourceFiles()
+    .map((f) => ({ name: f.name, hits: (f.text.match(/status\s*!=\s*'closed'/g) ?? []).length }))
+    .filter((f) => f.hits > 0);
+  const closedFilters = perFile.reduce((sum, f) => sum + f.hits, 0);
   assert.equal(
-    closedFilters.length,
+    closedFilters,
     1,
-    `expected exactly one 'status != closed' filter (brief's task query), found ${closedFilters.length}. If the lint loop grew one, a closed document just fell out of memory.`
+    `expected exactly one 'status != closed' filter (brief's task query), found ${closedFilters} in ${perFile.map((f) => `src/${f.name}`).join(", ")}. If the lint loop grew one, a closed document just fell out of memory.`
   );
 });
 

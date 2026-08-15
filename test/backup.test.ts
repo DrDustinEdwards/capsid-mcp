@@ -3,6 +3,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { runBackup, TABLES } from "../src/backup.ts";
+import { fakeD1, fakeEnv, fakeKv, fakeR2, type FakeD1Options } from "./fakes.ts";
 
 // FTS5 derives documents_fts from documents and the sync triggers rebuild it on
 // import, so the virtual table and its shadow tables are never exported.
@@ -57,101 +58,17 @@ test("the FTS5 virtual table and its shadow tables are not exported", () => {
 // reports an INFLATED meta.changes, because that is what D1 does here (the FTS5
 // triggers inflate it) and it is the number the run must NOT be reading.
 
-interface FakeR2 {
-  objects: Map<string, string>;
-  deleted: string[][];
-  bucket: R2Bucket;
-}
+// The fakes are shared now (quality audit 6.2). What used to be three local
+// implementations here is one import; the capabilities this file relied on
+// (recorded deletes per call, recorded puts with their ttl, an FTS probe that can
+// miss, inflated meta.changes on the prune batch) all survive in the merged
+// version, and it gained cursor pagination, which no fake had.
 
-function fakeR2(seed: Record<string, string> = {}): FakeR2 {
-  const objects = new Map<string, string>(Object.entries(seed));
-  const deleted: string[][] = [];
-  const bucket = {
-    put: async (key: string, value: string) => {
-      objects.set(key, value);
-      return {};
-    },
-    list: async ({ prefix }: { prefix: string }) => ({
-      objects: [...objects.keys()].filter((k) => k.startsWith(prefix)).map((key) => ({ key })),
-      truncated: false as const,
-    }),
-    delete: async (keys: string | string[]) => {
-      const list = Array.isArray(keys) ? keys : [keys];
-      deleted.push(list);
-      for (const key of list) objects.delete(key);
-    },
-  } as unknown as R2Bucket;
-  return { objects, deleted, bucket };
-}
-
-interface FakeKv {
-  store: Map<string, string>;
-  puts: Array<{ key: string; value: string; ttl?: number }>;
-  kv: KVNamespace;
-}
-
-function fakeKv(seed: Record<string, string> = {}): FakeKv {
-  const store = new Map<string, string>(Object.entries(seed));
-  const puts: Array<{ key: string; value: string; ttl?: number }> = [];
-  const kv = {
-    get: async (key: string) => store.get(key) ?? null,
-    put: async (key: string, value: string, opts?: { expirationTtl?: number }) => {
-      puts.push({ key, value, ttl: opts?.expirationTtl });
-      store.set(key, value);
-    },
-    delete: async (key: string) => {
-      store.delete(key);
-    },
-  } as unknown as KVNamespace;
-  return { store, puts, kv };
-}
-
-interface FakeDbOptions {
-  docs?: Array<{ namespace: string; path: string; body: string | null }>;
-  // The pinned FTS probe finds its document. False stands in for an empty or
-  // damaged index, which is the case a plain row count cannot see.
-  ftsHit?: boolean;
-  versionsDue?: number;
-  auditDue?: number;
-}
-
-function fakeDb(opts: FakeDbOptions = {}) {
-  const { docs = [], ftsHit = true, versionsDue = 0, auditDue = 0 } = opts;
-  const batches: string[][] = [];
-  const counts = [versionsDue, auditDue];
-  let countCall = 0;
-  const stmt = (sql: string) => ({
-    sql,
-    bind: () => stmt(sql),
-    first: async () => (/documents_fts MATCH/i.test(sql) && ftsHit ? { path: "conventions.md" } : null),
-    all: async () => ({
-      results: /SELECT \* FROM documents\b/i.test(sql) ? docs : [],
-      meta: { changes: 0 },
-    }),
-    run: async () => ({ meta: { changes: 0 } }),
-  });
-  return {
-    batches,
-    db: {
-      prepare: (sql: string) => stmt(sql),
-      batch: async (statements: Array<{ sql: string }>) => {
-        batches.push(statements.map((s) => s.sql.replace(/\s+/g, " ").trim()));
-        countCall = 0;
-        return statements.map((s) => ({
-          // Inflated on purpose: this is the number F37 says must not be trusted.
-          meta: { changes: 999 },
-          results: /SELECT COUNT/i.test(s.sql) ? [{ n: counts[countCall++] ?? 0 }] : [],
-        }));
-      },
-    } as unknown as D1Database,
-  };
-}
-
-function makeEnv(dbOpts: FakeDbOptions, seedR2: Record<string, string> = {}, seedKv: Record<string, string> = {}) {
+function makeEnv(dbOpts: FakeD1Options, seedR2: Record<string, string> = {}, seedKv: Record<string, string> = {}) {
   const r2 = fakeR2(seedR2);
-  const kv = fakeKv(seedKv);
-  const { db, batches } = fakeDb(dbOpts);
-  return { env: { DB: db, MEDIA: r2.bucket, APP_KV: kv.kv } as never, r2, kv, batches };
+  const kv = fakeKv({ seed: seedKv });
+  const { db, batches } = fakeD1(dbOpts);
+  return { env: fakeEnv({ DB: db, MEDIA: r2.bucket, APP_KV: kv.kv }), r2, kv, batches };
 }
 
 // Captures console.error so a test can assert the run was LOUD, not just that it
@@ -178,7 +95,7 @@ const MIRROR = {
 };
 
 test("a healthy run dumps one object per table, keyed by TABLES", async () => {
-  const { env, r2 } = makeEnv({ docs: DOCS }, MIRROR);
+  const { env, r2 } = makeEnv({ documents: DOCS }, MIRROR);
   const result = await runBackup(env);
   assert.equal(result.ran, true);
   if (!result.ran) return;
@@ -195,7 +112,7 @@ test("a healthy run dumps one object per table, keyed by TABLES", async () => {
 });
 
 test("a healthy run prunes genuinely stale markdown and keeps the current mirror", async () => {
-  const { env, r2 } = makeEnv({ docs: DOCS }, MIRROR);
+  const { env, r2 } = makeEnv({ documents: DOCS }, MIRROR);
   const result = await runBackup(env);
   assert.equal(result.ran, true);
   if (!result.ran) return;
@@ -210,7 +127,7 @@ test("a healthy run prunes genuinely stale markdown and keeps the current mirror
 test("an empty documents read refuses the prune, loudly, and deletes nothing", async () => {
   // The dangerous case: the SELECT SUCCEEDS and returns no rows. Every mirror object
   // is then "stale" and the old code deleted all of them in one call.
-  const { env, r2 } = makeEnv({ docs: [] }, MIRROR);
+  const { env, r2 } = makeEnv({ documents: [] }, MIRROR);
   const { result, logged } = await captureErrors(() => runBackup(env));
   assert.equal(result.ran, true);
   if (!result.ran) return;
@@ -228,7 +145,7 @@ test("an empty documents read refuses the prune, loudly, and deletes nothing", a
 });
 
 test("a failing FTS probe refuses the prune even when documents has rows", async () => {
-  const { env, r2 } = makeEnv({ docs: DOCS, ftsHit: false }, MIRROR);
+  const { env, r2 } = makeEnv({ documents: DOCS, ftsHit: false }, MIRROR);
   const { result, logged } = await captureErrors(() => runBackup(env));
   assert.equal(result.ran, true);
   if (!result.ran) return;
@@ -239,7 +156,7 @@ test("a failing FTS probe refuses the prune even when documents has rows", async
 });
 
 test("a second concurrent runner exits named and touches nothing", async () => {
-  const { env, r2, kv, batches } = makeEnv({ docs: DOCS }, MIRROR, {
+  const { env, r2, kv, batches } = makeEnv({ documents: DOCS }, MIRROR, {
     "backup:lease": "2026-08-17T09:00:00.000Z",
   });
   const { result, logged } = await captureErrors(() => runBackup(env));
@@ -256,7 +173,7 @@ test("a second concurrent runner exits named and touches nothing", async () => {
 });
 
 test("the lease carries an expiry and is released when the run ends", async () => {
-  const { env, kv } = makeEnv({ docs: DOCS }, MIRROR);
+  const { env, kv } = makeEnv({ documents: DOCS }, MIRROR);
   await runBackup(env);
   assert.equal(kv.puts.length, 1);
   assert.equal(kv.puts[0].key, "backup:lease");
@@ -267,7 +184,7 @@ test("the lease carries an expiry and is released when the run ends", async () =
 });
 
 test("the lease is released even when the run throws", async () => {
-  const { env, kv } = makeEnv({ docs: DOCS }, MIRROR);
+  const { env, kv } = makeEnv({ documents: DOCS }, MIRROR);
   (env as unknown as { MEDIA: R2Bucket }).MEDIA = {
     put: async () => {
       throw new Error("r2 exploded");
@@ -281,7 +198,7 @@ test("the lease is released even when the run throws", async () => {
 });
 
 test("versions_pruned and audit_pruned come from a COUNT, not meta.changes", async () => {
-  const { env, batches } = makeEnv({ docs: DOCS, versionsDue: 3, auditDue: 7 }, MIRROR);
+  const { env, batches } = makeEnv({ documents: DOCS, dueCounts: [3, 7] }, MIRROR);
   const result = await runBackup(env);
   assert.equal(result.ran, true);
   if (!result.ran) return;
@@ -310,7 +227,7 @@ test("dump retention keeps the newest runs whole, counting runs and not objects"
     runIds.push(id);
     for (const table of TABLES) seed[`backups/json/${id}/${table}.json`] = "{}";
   }
-  const { env, r2 } = makeEnv({ docs: DOCS }, seed);
+  const { env, r2 } = makeEnv({ documents: DOCS }, seed);
   const result = await runBackup(env);
   assert.equal(result.ran, true);
   if (!result.ran) return;
@@ -336,7 +253,7 @@ test("a pre-change flat dump key ages as its own single-object run", async () =>
   for (let day = 1; day <= 20; day++) {
     seed[`backups/json/2020-01-${String(day).padStart(2, "0")}T00-00-00-000Z.json`] = "{}";
   }
-  const { env, r2 } = makeEnv({ docs: DOCS }, seed);
+  const { env, r2 } = makeEnv({ documents: DOCS }, seed);
   const result = await runBackup(env);
   assert.equal(result.ran, true);
   if (!result.ran) return;

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { join } from "node:path";
 import { AUTHORITATIVE, scanCountClaims } from "../src/counts.ts";
+import { sourceFiles } from "./source-files.ts";
 
 const CAPSID = AUTHORITATIVE.capsid;
 import { securityHeadersFor } from "../src/headers.ts";
@@ -14,13 +15,23 @@ import { securityHeadersFor } from "../src/headers.ts";
 
 const read = (p: string) => readFileSync(join(import.meta.dirname, p), "utf8");
 
-test("tools count matches the registrations in server.ts", () => {
-  const src = read("../src/server.ts");
-  const registered = src.match(/server\.registerTool\(/g) ?? [];
+// The tool count is a property of the SURFACE, not of one file (quality audit
+// 1.1). Counting registrations in server.ts alone would read 24 forever the day a
+// tool is registered from another module, and the authoritative number in
+// counts.ts would be quietly wrong in the direction that matters: too low.
+
+test("tools count matches the registrations across all of src/", () => {
+  const perFile = sourceFiles()
+    .map((f) => ({ name: f.name, n: (f.text.match(/server\.registerTool\(/g) ?? []).length }))
+    .filter((f) => f.n > 0);
+  const registered = perFile.reduce((sum, f) => sum + f.n, 0);
+  // Vacuity guard: a walk that found no registrations at all would otherwise
+  // compare 0 against 0 the day counts.ts is also emptied.
+  assert.ok(registered > 0, "no registerTool calls found anywhere under src/; the scan is broken");
   assert.equal(
-    registered.length,
+    registered,
     CAPSID.tools,
-    `server.ts registers ${registered.length} tools but counts.ts says ${CAPSID.tools}`
+    `src/ registers ${registered} tools (${perFile.map((f) => `${f.name}: ${f.n}`).join(", ")}) but counts.ts says ${CAPSID.tools}`
   );
 });
 

@@ -4,32 +4,13 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { APPROVAL_MAX_AGE_SECONDS, approvalTag } from "../src/approval.ts";
 import { callerIp, checkRegistrationRate, MAX_PER_DAY, MAX_PER_HOUR } from "../src/dcr-rate-limit.ts";
+import { fakeKv } from "./fakes.ts";
 
 const src = (name: string) => readFileSync(join(import.meta.dirname, "..", "src", name), "utf8");
 
-// A KV that holds real counters, and can be told to fail. The failure mode is the
-// point of half these tests: a limiter that cannot read its store must not be able
-// to stop a registration.
-function fakeKv(opts: { failGet?: boolean; failPut?: boolean; corrupt?: boolean; seed?: Record<string, string> } = {}) {
-  const store = new Map<string, string>(Object.entries(opts.seed ?? {}));
-  const puts: Array<{ key: string; value: string; ttl?: number }> = [];
-  return {
-    store,
-    puts,
-    kv: {
-      get: async (key: string) => {
-        if (opts.failGet) throw new Error("KV get exploded");
-        if (opts.corrupt) return "not-a-number";
-        return store.get(key) ?? null;
-      },
-      put: async (key: string, value: string, o?: { expirationTtl?: number }) => {
-        if (opts.failPut) throw new Error("KV put exploded");
-        puts.push({ key, value, ttl: o?.expirationTtl });
-        store.set(key, value);
-      },
-    } as unknown as KVNamespace,
-  };
-}
+// The KV is the shared fake now (quality audit 6.2). Its failure injection came
+// from this file's local copy and is what makes the limiter's fail-open paths
+// testable at all; the merged version keeps it and adds list plus pagination.
 
 const NOW = new Date("2026-08-17T14:30:00.000Z");
 const HOUR_KEY = "dcr:rate:h:1.2.3.4:2026-08-17T14";
@@ -95,7 +76,9 @@ test("the limiter FAILS OPEN when the counter write throws", async () => {
 test("the limiter FAILS OPEN on a corrupt counter value", async () => {
   // Corrupted at the store, not at a key name this test guessed: a change to the
   // key layout must not turn this into a test that passes by reading nothing.
-  const kv = fakeKv({ corrupt: true });
+  // The shared fake takes the corrupt VALUE rather than a boolean, so a test can
+  // say what kind of corruption it means.
+  const kv = fakeKv({ corrupt: "not-a-number" });
   const verdict = await checkRegistrationRate(kv.kv, "1.2.3.4", NOW);
   assert.deepEqual(verdict, { allowed: true });
 });

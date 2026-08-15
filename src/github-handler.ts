@@ -5,7 +5,8 @@ import { isAdminUser, operatorGrant, operatorIdentity, sha256Hex, timingSafeEqua
 import { runBackup } from "./backup";
 import { b64urlDecode, b64urlEncode, bytesToHex } from "./encoding";
 import { REPORT_PATH, REPORT_PREFIX } from "./headers";
-import { buildServer, type Env } from "./server";
+import type { Env } from "./env";
+import { buildServer } from "./server";
 import { probeFts } from "./store-probe";
 
 const GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize";

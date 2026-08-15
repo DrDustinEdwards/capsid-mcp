@@ -1,4 +1,4 @@
-import type { Env } from "./server";
+import type { Env } from "./env";
 import { REPORT_PREFIX } from "./headers";
 import { probeFts } from "./store-probe";
 
