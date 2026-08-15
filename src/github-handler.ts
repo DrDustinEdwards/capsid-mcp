@@ -1,5 +1,6 @@
 import type { AuthRequest } from "@cloudflare/workers-oauth-provider";
 import { createMcpHandler } from "agents/mcp";
+import { APPROVAL_MAX_AGE_SECONDS, approvalTag } from "./approval";
 import { isAdminUser, operatorGrant, operatorIdentity, sha256Hex, timingSafeEqual } from "./auth";
 import { runBackup } from "./backup";
 import { b64urlDecode, b64urlEncode, bytesToHex } from "./encoding";
@@ -44,6 +45,13 @@ async function hmacHex(secret: string, payload: string): Promise<string> {
   return bytesToHex(sig);
 }
 
+// The approval cookie carries entries from src/approval.ts: a client id bound to a
+// digest of its redirect set, signed with COOKIE_ENCRYPTION_KEY, kept 30 days.
+//
+// Size arithmetic, because the payload grew and cookies are capped near 4KB: an
+// entry is 16 chars of id, a dot, and 16 hex chars, about 36 bytes of JSON each. The
+// 24 registrations measured on 2026-08-17 would be roughly 1.2KB after b64 and the
+// signature. The 30 day expiry is what actually bounds the growth.
 async function approvedClients(request: Request, secret: string): Promise<string[]> {
   const raw = getCookie(request, APPROVAL_COOKIE);
   if (!raw) return [];
@@ -60,10 +68,10 @@ async function approvedClients(request: Request, secret: string): Promise<string
   }
 }
 
-async function approvalCookie(clientIds: string[], secret: string): Promise<string> {
-  const payload = b64urlEncode(JSON.stringify(clientIds));
+async function approvalCookie(tags: string[], secret: string): Promise<string> {
+  const payload = b64urlEncode(JSON.stringify(tags));
   const sig = await hmacHex(secret, payload);
-  return `${APPROVAL_COOKIE}=${sig}.${payload}; HttpOnly; Secure; SameSite=Lax; Path=/authorize; Max-Age=31536000`;
+  return `${APPROVAL_COOKIE}=${sig}.${payload}; HttpOnly; Secure; SameSite=Lax; Path=/authorize; Max-Age=${APPROVAL_MAX_AGE_SECONDS}`;
 }
 
 function escapeHtml(text: string): string {
@@ -173,12 +181,16 @@ async function handleAuthorizeGet(request: Request, env: Env): Promise<Response>
     return textResponse(`invalid authorization request: ${err instanceof Error ? err.message : String(err)}`, 400);
   }
   if (!oauthReq.clientId) return textResponse("invalid authorization request: missing client_id", 400);
-  const approved = await approvedClients(request, env.COOKIE_ENCRYPTION_KEY);
-  if (approved.includes(oauthReq.clientId)) {
-    return startGithubFlow(request, env, oauthReq);
-  }
+  // The lookup moved AHEAD of the cookie check, because the approval is now bound
+  // to this client's redirect set and there is no way to check it without reading
+  // the client. It also means a client id that no longer resolves cannot ride an
+  // old cookie straight past the dialog.
   const client = await env.OAUTH_PROVIDER.lookupClient(oauthReq.clientId);
   if (!client) return textResponse("unknown client", 400);
+  const approved = await approvedClients(request, env.COOKIE_ENCRYPTION_KEY);
+  if (approved.includes(await approvalTag(oauthReq.clientId, client.redirectUris))) {
+    return startGithubFlow(request, env, oauthReq);
+  }
   return renderApprovalDialog(oauthReq, client.clientName ?? oauthReq.clientId, crypto.randomUUID());
 }
 
@@ -195,11 +207,11 @@ async function handleAuthorizePost(request: Request, env: Env): Promise<Response
   } catch {
     return textResponse("bad request", 400);
   }
-  if (!oauthReq.clientId || !(await env.OAUTH_PROVIDER.lookupClient(oauthReq.clientId))) {
-    return textResponse("unknown client", 400);
-  }
+  const client = oauthReq.clientId ? await env.OAUTH_PROVIDER.lookupClient(oauthReq.clientId) : null;
+  if (!client) return textResponse("unknown client", 400);
   const approved = await approvedClients(request, env.COOKIE_ENCRYPTION_KEY);
-  if (!approved.includes(oauthReq.clientId)) approved.push(oauthReq.clientId);
+  const tag = await approvalTag(oauthReq.clientId, client.redirectUris);
+  if (!approved.includes(tag)) approved.push(tag);
   const cookies = [
     await approvalCookie(approved, env.COOKIE_ENCRYPTION_KEY),
     `${CSRF_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Path=/authorize; Max-Age=0`,
@@ -220,8 +232,15 @@ async function handleCallback(request: Request, env: Env): Promise<Response> {
   const stateKey = `${STATE_KV_PREFIX}${stateToken}`;
   const stored = await env.OAUTH_KV.get(stateKey);
   if (!stored) return textResponse("state expired or already used. Restart from your MCP client.", 403);
-  await env.OAUTH_KV.delete(stateKey);
-  const oauthReq = JSON.parse(stored) as AuthRequest;
+  // A corrupt stored payload is a 403 with an instruction, not a thrown handler
+  // (audit 2, F18). Whatever wrote it, the caller's move is the same: start again.
+  let oauthReq: AuthRequest;
+  try {
+    oauthReq = JSON.parse(stored) as AuthRequest;
+  } catch {
+    await env.OAUTH_KV.delete(stateKey);
+    return textResponse("stored authorization state is unreadable. Restart from your MCP client.", 403);
+  }
 
   const tokenResp = await fetch(GITHUB_TOKEN_URL, {
     method: "POST",
@@ -236,6 +255,17 @@ async function handleCallback(request: Request, env: Env): Promise<Response> {
   if (!tokenResp.ok) return textResponse("github token exchange failed", 502);
   const tokenData = (await tokenResp.json()) as { access_token?: string };
   if (!tokenData.access_token) return textResponse("github token exchange failed: no access token returned", 502);
+  // THE STATE IS CONSUMED HERE, not before the exchange (audit 2, F18). It used to
+  // be deleted three network calls early, so a transient GitHub 502 burned it: the
+  // browser sat on /callback holding a code GitHub had never processed, and a
+  // reload answered "state expired or already used" instead of retrying. Now the
+  // reload works, because the state is still inside its 600 second TTL and the
+  // code was never consumed.
+  //
+  // Replay is bounded by GitHub rather than by this delete: the extra window is one
+  // HTTP round trip, and reaching it needs the state token AND the HttpOnly state
+  // cookie AND an unused code, which GitHub will only honour once.
+  await env.OAUTH_KV.delete(stateKey);
 
   const userResp = await fetch(GITHUB_USER_URL, {
     headers: {

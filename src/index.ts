@@ -2,6 +2,7 @@ import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { createMcpHandler } from "agents/mcp";
 import { isAdminUser } from "./auth";
 import { runBackup } from "./backup";
+import { callerIp, checkRegistrationRate } from "./dcr-rate-limit";
 import { defaultHandler } from "./github-handler";
 import { withSecurityHeaders } from "./headers";
 import { buildServer, type Env, type Props } from "./server";
@@ -67,6 +68,16 @@ function withCacheDefault(response: Response, pathname: string): Response {
 // carry one, they always have, and the projection was wrong.
 const CLIENT_REGISTRATION_TTL_SECONDS = 90 * 24 * 60 * 60;
 
+// The registration callback gets {clientMetadata, request} and NO env, and the
+// provider is constructed here at module scope where env does not exist yet. So the
+// env is stashed by the fetch handler below on its way past.
+//
+// This is safe rather than clever: every request in an isolate is handed the SAME
+// env object, so the assignment is idempotent and there is nothing per-request to
+// race. If it is somehow unset, the limiter is skipped and says so, which is the
+// same fail-open posture the limiter itself takes.
+let currentEnv: Env | null = null;
+
 const provider = new OAuthProvider({
   apiRoute: "/mcp",
   apiHandler,
@@ -75,10 +86,32 @@ const provider = new OAuthProvider({
   tokenEndpoint: "/token",
   clientRegistrationEndpoint: "/register",
   clientRegistrationTTL: CLIENT_REGISTRATION_TTL_SECONDS,
+  // Rate limit on the one unauthenticated write path this Worker exposes. Returning
+  // an object rejects with the library's own error response; returning nothing
+  // allows. See src/dcr-rate-limit.ts for the measured thresholds and for why every
+  // failure path in it allows the registration.
+  clientRegistrationCallback: async ({ request }) => {
+    const env = currentEnv;
+    if (!env) {
+      console.error("DCR_RATE_LIMIT_UNAVAILABLE env was not available, allowing");
+      return;
+    }
+    const ip = callerIp(request);
+    const verdict = await checkRegistrationRate(env.APP_KV, ip, new Date());
+    if (verdict.allowed) return;
+    console.error(`DCR_RATE_LIMITED ${ip} hit the ${verdict.window} limit (${verdict.count} of ${verdict.limit})`);
+    return {
+      code: "access_denied",
+      status: 429,
+      description: `Too many client registrations from this address: ${verdict.count} in the last ${verdict.window}, limit ${verdict.limit}. Retry later.`,
+    };
+  },
 });
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    // Seen by the registration callback, which the library calls without an env.
+    currentEnv = env;
     const response = await provider.fetch(request, env, ctx);
     // Both wrappers sit here, at the only point that sees every response: this
     // handler's own, everything github-handler returns, and everything
