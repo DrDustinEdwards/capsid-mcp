@@ -267,7 +267,7 @@ test("/health and the backup preflight probe the index through one module", () =
   // from the one the live gate asserts, and the drift would only surface on the day
   // the store was actually broken.
   const src = (name: string) => readFileSync(join(import.meta.dirname, "..", "src", name), "utf8");
-  for (const name of ["github-handler.ts", "backup.ts"]) {
+  for (const name of ["routes.ts", "backup.ts"]) {
     assert.match(src(name), /from "\.\/store-probe"/, `${name} does not use the shared probe`);
     assert.doesNotMatch(src(name), /documents_fts MATCH/, `${name} carries its own copy of the FTS probe`);
   }

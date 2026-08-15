@@ -71,7 +71,7 @@ test("NOTHING is enforced that is meant to be Report-Only", () => {
   for (const cls of ["html", "json", "other"] as const) {
     const h = securityHeadersFor(cls);
     assert.equal(h["Cross-Origin-Opener-Policy"], undefined, `${cls} enforces COOP without a ruling`);
-    // The consent dialog sets its own enforced CSP in github-handler.ts and that
+    // The consent dialog sets its own enforced CSP in routes.ts and that
     // one is ruled. This layer must never add an enforced CSP of its own.
     assert.equal(h["Content-Security-Policy"], undefined, `${cls} enforces a CSP from the header layer`);
   }

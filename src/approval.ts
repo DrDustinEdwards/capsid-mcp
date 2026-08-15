@@ -1,6 +1,6 @@
 // What the consent approval cookie actually records (audit 2, F2).
 //
-// Pulled out of github-handler.ts so the binding can be driven directly by a test.
+// Pulled out of routes.ts so the binding can be driven directly by a test.
 // It is the security property of the cookie, and a security property asserted only
 // by reading the source next to it is asserted weakly.
 

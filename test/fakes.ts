@@ -215,6 +215,20 @@ export interface FakeD1 {
 // aborts the batch with the same NOT NULL violation, which is what D1 does.
 const GUARD_ERROR = "NOT NULL constraint failed: document_versions.document_id";
 
+// COLUMN PROJECTION. The fake used to hand back whole rows whatever the SELECT
+// list said, which made `SELECT *` and a named column list indistinguishable, so
+// no test could tell which one a handler had issued (quality audit 7.3 is exactly
+// that distinction). Applied only to a plain comma-separated identifier list: a
+// SELECT carrying a function call or an alias is returned whole, because parsing
+// those here would be a second SQL implementation and a source of wrong answers.
+function project(sql: string, row: Record<string, unknown>): Record<string, unknown> {
+  const list = sql.replace(/\s+/g, " ").match(/^SELECT (.+?) FROM /i)?.[1];
+  if (!list || list.trim() === "*" || /[(*]/.test(list)) return row;
+  const columns = list.split(",").map((c) => c.trim());
+  if (!columns.every((c) => /^[a-z_][a-z0-9_]*$/i.test(c))) return row;
+  return Object.fromEntries(columns.map((c) => [c, row[c]]));
+}
+
 // Literal-and-star glob matching, written out rather than compiled to a RegExp so
 // no pattern character needs escaping. Anchored at both ends, like GLOB.
 function globMatch(pattern: string, value: string): boolean {
@@ -257,6 +271,10 @@ export function fakeD1(opts: FakeD1Options = {}): FakeD1 {
       tags: null,
       updated_at: "2020-01-01 00:00:00",
       created_at: "2020-01-01 00:00:00",
+      // Present on the real table and NULL on every live row. Carried here so a
+      // handler that goes back to SELECT * is visibly handing them out again.
+      frontmatter: null,
+      publish_at: null,
       ...d,
     })),
     versions: opts.versions ?? [],
@@ -306,7 +324,7 @@ export function fakeD1(opts: FakeD1Options = {}): FakeD1 {
       // would hand the handler the winner's body, its guard would match, and every
       // predicate test would pass for the wrong reason.
       const isPreRead = !/SELECT updated_at FROM documents/i.test(flat);
-      const snapshot = asOk ? (row ? { ok: 1 } : null) : row ? { ...row } : null;
+      const snapshot = asOk ? (row ? { ok: 1 } : null) : row ? project(flat, { ...row }) : null;
       if (isPreRead && opts.raceAfterPreRead && !raced) {
         raced = true;
         opts.raceAfterPreRead(rows, { namespace, path });
@@ -329,6 +347,18 @@ export function fakeD1(opts: FakeD1Options = {}): FakeD1 {
       return [];
     }
     if (/FROM document_links/i.test(flat)) {
+      // brief asks for one document's edges in each direction and writes the path
+      // as a LITERAL, binding only the namespace. backlinks binds both and wants
+      // either direction. Told apart by the clause, or brief's two edge reads come
+      // back empty because the fake looked for a path of `undefined`.
+      const literalPath = flat.match(/(from|to)_path = '([^']+)'/i);
+      if (literalPath) {
+        const [, direction, path] = literalPath;
+        const namespace = params[0] as string;
+        return direction.toLowerCase() === "from"
+          ? rows.links.filter((l) => l.from_ns === namespace && l.from_path === path)
+          : rows.links.filter((l) => l.to_ns === namespace && l.to_path === path);
+      }
       const [namespace, path] = params as [string, string];
       return rows.links.filter(
         (l) =>
@@ -403,6 +433,13 @@ export function fakeD1(opts: FakeD1Options = {}): FakeD1 {
         const wanted = pathIn[1].split(",").map((t) => t.trim().replace(/'/g, ""));
         out = out.filter((d) => wanted.includes(d.path));
       }
+      // brief pins its type as a literal equality rather than an IN list, and
+      // excludes exactly one status the same way. Both resolved here, or brief's
+      // four section reads all come back holding every document in the namespace.
+      const literalType = flat.match(/type = '([^']+)'/i);
+      if (literalType) out = out.filter((d) => d.type === literalType[1]);
+      const notStatus = flat.match(/status != '([^']+)'/i);
+      if (notStatus) out = out.filter((d) => d.status !== notStatus[1]);
       const types = flat.match(/type IN \(([^)]+)\)/i);
       if (types) {
         const wanted = types[1].split(",").map((t) => t.trim().replace(/'/g, ""));
@@ -410,8 +447,13 @@ export function fakeD1(opts: FakeD1Options = {}): FakeD1 {
       }
       if (/path NOT LIKE 'archive\/%'/i.test(flat)) out = out.filter((d) => !d.path.startsWith("archive/"));
       if (/ORDER BY created_at/i.test(flat)) out.sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+      else if (/ORDER BY updated_at/i.test(flat)) out.sort((a, b) => String(a.updated_at).localeCompare(String(b.updated_at)));
       else out.sort((a, b) => a.namespace.localeCompare(b.namespace) || a.path.localeCompare(b.path));
-      return out.slice(0, limit);
+      if (/ORDER BY \w+ DESC/i.test(flat)) out.reverse();
+      // Some queries bind their LIMIT and some write it inline; honour both, or a
+      // literal one is silently ignored and the fake over-answers.
+      const literalLimit = flat.match(/LIMIT (\d+)/i);
+      return out.slice(0, literalLimit ? Number(literalLimit[1]) : limit).map((r) => project(flat, r as unknown as Record<string, unknown>));
     }
     if (/FROM document_versions WHERE namespace/i.test(flat)) {
       const [namespace, path] = params as [string, string];

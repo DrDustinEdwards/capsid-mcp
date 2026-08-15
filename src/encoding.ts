@@ -1,7 +1,7 @@
 // Byte encodings, defined once (audit 2, F22 and F23).
 //
 // Before this module there were three base64url encoders and two hex encoders
-// across src/github.ts and src/github-handler.ts, all written from the same
+// across src/github.ts and src/routes.ts, all written from the same
 // four-line recipe. Duplicated crypto-adjacent helpers are not a tidiness problem:
 // they drift, and the copy nobody looked at is the one that mishandles the padding
 // or the high byte. One definition, one place to fix.

@@ -30,7 +30,7 @@ test("one REPORT_PREFIX, and no file defines its own", () => {
   // sides simply stopped using the prefix.
   const importers = sourceFiles().filter((f) => /REPORT_PREFIX/.test(f.text) && f.name !== "headers.ts").map((f) => f.name);
   assert.ok(
-    importers.includes("backup.ts") && importers.includes("github-handler.ts"),
+    importers.includes("backup.ts") && importers.includes("routes.ts"),
     `expected both the prune and the sink to use REPORT_PREFIX, found: ${importers.join(", ")}`
   );
 });
@@ -38,7 +38,7 @@ test("one REPORT_PREFIX, and no file defines its own", () => {
 test("every secret compare goes through timingSafeEqual, in every file", () => {
   // The specific compares, still where they belong.
   const auth = sourceFiles().find((f) => f.name === "auth.ts")!.text;
-  const handler = sourceFiles().find((f) => f.name === "github-handler.ts")!.text;
+  const handler = sourceFiles().find((f) => f.name === "routes.ts")!.text;
   assert.ok(auth.includes("timingSafeEqual(readonly ? entry.slice(3) : entry, hash)"));
   assert.match(handler, /timingSafeEqual\(sig, await hmacHex/);
   assert.match(handler, /timingSafeEqual\(csrfCookie, csrf\)/);

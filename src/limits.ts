@@ -38,11 +38,22 @@
 
 import { z } from "zod";
 
+// THE DOCUMENT PATH BOUND. Repo file paths are bounded by this number too, but
+// they are deliberately NOT held to docPath's grammar (quality audit 7.2): a
+// GitHub path is whatever the repo contains, and this grammar is about what may
+// become a D1 key, an R2 object key and an edge endpoint. Repo tools take
+// bounded(MAX_PATH); only Capsid documents take docPath.
 export const MAX_PATH = 512;
 export const MAX_TITLE = 1024;
 export const MAX_TAGS = 1024;
 export const MAX_NAMESPACE = 64;
 export const MAX_DOC_TYPE = 64;
+// `status` had been bounded by MAX_DOC_TYPE since there was one number and two
+// fields (quality audit 2.3). They are different vocabularies, and a bound named
+// after the other one is a rule nobody can check: the next person tightening
+// document types would have silently retuned the status field too. Same value
+// today, stated separately so they can move apart.
+export const MAX_DOC_STATUS = 64;
 export const MAX_BODY = 1_000_000;
 export const MAX_LINKS_JSON = 8192;
 export const MAX_REPOS_JSON = 4096;
@@ -80,6 +91,14 @@ export const BRIEF_BUDGET = 40_000;
 // the section gather itself tells the caller to batch.
 export const GATHER_BUDGET = 150_000;
 
+// search_code's ceiling, here rather than inside searchCode (quality audit 2.4).
+// It lived as a local const, so the tool description quoting "max 200" was a
+// second copy of the number that nothing could keep honest. Both the clamp and
+// the prose read this now.
+export const MAX_SCAN_CAP = 200;
+export const DEFAULT_SCAN_RESULTS = 20;
+export const DEFAULT_SCAN_FILES = 200;
+
 // Control characters, including the newline and tab that would otherwise ride
 // through a path and out into an R2 key and every log line that quotes it.
 function hasControlChar(text: string): boolean {
@@ -106,6 +125,12 @@ export function pathProblem(path: string): string | null {
 
 // The one document path schema. Every tool that names a document uses it, so the
 // grammar cannot be enforced in one place and forgotten in another.
+//
+// It is NOT the GitHub path grammar and must not become it. A repo file path is
+// whatever the repo already contains, and refusing to read one because Capsid
+// dislikes its shape would make the repo tools unable to reach real files. This
+// grammar governs what may become a D1 key, an R2 mirror key and a typed edge
+// endpoint, which is a different question with a different blast radius.
 export const docPath = z.string().superRefine((value, ctx) => {
   const problem = pathProblem(value);
   if (problem) ctx.addIssue({ code: "custom", message: problem });

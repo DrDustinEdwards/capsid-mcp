@@ -126,7 +126,7 @@ test("the rejection is wired to the library's registration callback", () => {
 // ---- 1. F18: the state is consumed after the exchange, not before ------------
 
 test("the state delete follows the GitHub token exchange", () => {
-  const handler = src("github-handler.ts");
+  const handler = src("routes.ts");
   const callback = handler.slice(handler.indexOf("async function handleCallback"));
   const readAt = callback.indexOf("await env.OAUTH_KV.get(stateKey)");
   const exchangeAt = callback.indexOf("await fetch(GITHUB_TOKEN_URL");
@@ -144,7 +144,7 @@ test("the state delete follows the GitHub token exchange", () => {
 });
 
 test("a corrupt stored state answers 403 instead of throwing", () => {
-  const handler = src("github-handler.ts");
+  const handler = src("routes.ts");
   const callback = handler.slice(handler.indexOf("async function handleCallback"));
   // The parse is guarded and the guard returns the restart instruction.
   assert.match(callback, /try \{\s*oauthReq = JSON\.parse\(stored\) as AuthRequest;\s*\} catch \{/);
@@ -155,13 +155,13 @@ test("a corrupt stored state answers 403 instead of throwing", () => {
 
 test("the approval cookie lives 30 days, not a year", () => {
   assert.equal(APPROVAL_MAX_AGE_SECONDS, 2_592_000);
-  const handler = src("github-handler.ts");
+  const handler = src("routes.ts");
   assert.match(handler, /Max-Age=\$\{APPROVAL_MAX_AGE_SECONDS\}/);
   assert.doesNotMatch(handler, /Max-Age=31536000/, "the one year approval cookie is back");
 });
 
 test("an approval is bound to the client's redirect set, not the bare id", () => {
-  const handler = src("github-handler.ts");
+  const handler = src("routes.ts");
   // Both sides use the tag: the check and the store.
   assert.match(handler, /approved\.includes\(await approvalTag\(oauthReq\.clientId, client\.redirectUris\)\)/);
   assert.match(handler, /const tag = await approvalTag\(oauthReq\.clientId, client\.redirectUris\);/);
@@ -171,7 +171,7 @@ test("an approval is bound to the client's redirect set, not the bare id", () =>
 test("the client is resolved before the cookie can skip the dialog", () => {
   // Order matters: a client id that no longer resolves must not ride an old cookie
   // past the consent screen.
-  const handler = src("github-handler.ts");
+  const handler = src("routes.ts");
   const get = handler.slice(handler.indexOf("async function handleAuthorizeGet"), handler.indexOf("async function handleAuthorizePost"));
   const lookupAt = get.indexOf("lookupClient(oauthReq.clientId)");
   const approvedAt = get.indexOf("await approvedClients(");

@@ -51,7 +51,7 @@ test("live gate count matches the distinct gates in verify-live.mjs", () => {
 // be derived from both (quality audit 5.2).
 //
 // src/headers.ts emits five of them. The sixth, the enforced CSP, is set by the
-// consent dialog itself in src/github-handler.ts, because that policy was ruled on
+// consent dialog itself in src/routes.ts, because that policy was ruled on
 // separately and withSecurityHeaders deliberately preserves a header that is
 // already present.
 //
@@ -67,7 +67,7 @@ const isEnforcedSecurityHeader = (name: string) =>
 // The header names the consent dialog sets on its own Response, read from source.
 // Scoped to renderApprovalDialog so no other Response in the file can leak in.
 function consentDialogHeaders(): string[] {
-  const src = read("../src/github-handler.ts");
+  const src = read("../src/routes.ts");
   const start = src.indexOf("function renderApprovalDialog");
   assert.ok(start !== -1, "renderApprovalDialog is gone; this derivation needs rewriting");
   const end = src.indexOf("async function startGithubFlow", start);

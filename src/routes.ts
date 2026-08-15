@@ -1,3 +1,14 @@
+// THE WORKER'S HTTP SURFACE that is not the MCP protocol itself.
+//
+// Named github-handler.ts until 2026-08-17, which described about a third of it
+// (quality audit 1.4): it also owns /health, /csp-report, /ops/mcp and
+// /ops/backup. A file named after one of its jobs is a file people stop reading
+// when looking for the other three, and /health and the report sink had both been
+// added here precisely because nobody wanted to argue about where they belonged.
+//
+// What is still true to the old name: the OAuth defaultHandler below drives the
+// GitHub login and approval flow, which is how a human client is admitted.
+
 import type { AuthRequest } from "@cloudflare/workers-oauth-provider";
 import { createMcpHandler } from "agents/mcp";
 import { APPROVAL_MAX_AGE_SECONDS, approvalTag } from "./approval";

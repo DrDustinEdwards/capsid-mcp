@@ -2,7 +2,7 @@
 //
 // These lived in src/server.ts until 2026-08-17 (quality audit 1.3). Every leaf
 // module needs Env, so every leaf imported the root: github.ts, backup.ts and
-// github-handler.ts all did `import type { Env } from "./server"` while server.ts
+// routes.ts all did `import type { Env } from "./server"` while server.ts
 // imports github.ts at run time. The runtime graph was never cyclic because the
 // imports were type-only and erased, but the TYPE graph was, and the practical
 // cost was that the environment contract could not be read without opening the

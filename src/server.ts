@@ -28,7 +28,7 @@ import { parseLinks } from "./links";
 import { validateDocStatus, validateDocType } from "./doc-meta";
 import { authoritativeFor, scanCountClaims } from "./counts";
 import { b64urlDecode, b64urlEncode } from "./encoding";
-import { bounded, BRIEF_BUDGET, docPath, GATHER_BUDGET, MAX_BODY, MAX_COMMIT_MESSAGE, MAX_DOC_TYPE, MAX_GLOB, MAX_LINKS_JSON, MAX_PATH, MAX_PR_BODY, MAX_PR_TITLE, MAX_QUERY, MAX_REF, MAX_REPO_SELECTOR, MAX_REPOS_JSON, MAX_ROWS, MAX_SHA, MAX_TAGS, MAX_TITLE, nsName, SEARCH_ROWS } from "./limits";
+import { bounded, BRIEF_BUDGET, DEFAULT_SCAN_FILES, DEFAULT_SCAN_RESULTS, docPath, GATHER_BUDGET, MAX_BODY, MAX_DOC_STATUS, MAX_COMMIT_MESSAGE, MAX_DOC_TYPE, MAX_GLOB, MAX_LINKS_JSON, MAX_PATH, MAX_PR_BODY, MAX_PR_TITLE, MAX_QUERY, MAX_REF, MAX_REPO_SELECTOR, MAX_REPOS_JSON, MAX_ROWS, MAX_SCAN_CAP, MAX_SHA, MAX_TAGS, MAX_TITLE, nsName, SEARCH_ROWS } from "./limits";
 import { assembleBody } from "./write-modes";
 
 const SERVER_INFO = { name: "capsid", version: "1.0.0" };
@@ -467,7 +467,7 @@ async function requireConfirmation(
 // Renaming it to writeGrant would have fixed the declaration and left every CALL
 // still saying `true`. Taking the grant itself fixes both, and it removes a
 // conversion: src/auth.ts already resolves an operator key to exactly this union,
-// and github-handler flattened it to a boolean on the way in.
+// and routes.ts flattened it to a boolean on the way in.
 export type ToolGrant = "write" | "read";
 
 export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServer {
@@ -483,7 +483,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
       inputSchema: {
         namespace: nsName.optional(),
         type: bounded(MAX_DOC_TYPE).optional(),
-        status: bounded(MAX_DOC_TYPE).optional(),
+        status: bounded(MAX_DOC_STATUS).optional(),
       },
     },
     async ({ namespace, type, status }) => {
@@ -524,8 +524,22 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
       inputSchema: { namespace: nsName, path: docPath },
     },
     async ({ namespace, path }) => {
+      // NAMED COLUMNS, the same set `list` returns plus the body (quality audit
+      // 7.3). SELECT * here meant `read` was the one tool still handing back
+      // frontmatter and publish_at, two columns from the original CMS-shaped
+      // schema that nothing reads or writes and that `list` deliberately dropped
+      // on 2026-08-13. Re-measured 2026-08-17: both are still NULL on all 559
+      // documents. One tool advertising a scheduling feature that does not exist,
+      // while its sibling does not, is the drift naming the columns prevents.
+      //
+      // They stay IN THE TABLE, for the same reason as before: dropping a column
+      // means a migration, a rebuild of the FTS triggers and a change to the
+      // backup table guard, to reclaim nothing.
       const row = await db
-        .prepare("SELECT * FROM documents WHERE namespace = ?1 AND path = ?2")
+        .prepare(
+          `SELECT id, namespace, path, title, type, status, tags, created_at, updated_at, body
+           FROM documents WHERE namespace = ?1 AND path = ?2`
+        )
         .bind(namespace, path)
         .first();
       return row ? ok(row) : fail(`not found: ${namespace}/${path}`);
@@ -539,7 +553,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
     "brief",
     {
       description:
-        "One-call session start for a namespace. Returns capsid/conventions.md, capsid/repo-structure.md, the namespace core.md, its open task docs (non-archived and not status closed), the 3 most recent episodics, and the typed edges on core.md, each with updated_at so staleness shows. Read-only assembly, no reasoning. Size-bounded near 40KB; if trimmed, the `trimmed` field lists what was dropped to metadata. Doing the start-ritual reads by hand stays a valid fallback.",
+        `One-call session start for a namespace. Returns capsid/conventions.md, capsid/repo-structure.md, the namespace core.md, its open task docs (non-archived and not status closed), the 3 most recent episodics, and the typed edges on core.md, each with updated_at so staleness shows. Read-only assembly, no reasoning. Size-bounded near ${Math.round(BRIEF_BUDGET / 1000)}KB; if trimmed, the \`trimmed\` field lists what was dropped to metadata. Doing the start-ritual reads by hand stays a valid fallback.`,
       inputSchema: { namespace: nsName },
     },
     async ({ namespace }) => {
@@ -559,8 +573,18 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
       // editorial state, it does not mark a task done, so filtering on
       // 'published' here hid 21 of 32 non-archived task docs, including every
       // 'active' and 'ready' one. archive/ is the only exclusion.
-      const openTasks = (
-        await db
+      // The four remaining reads run TOGETHER (quality audit 9.5). They were four
+      // sequential awaits, so brief cost four D1 round trips in series on the call
+      // every session makes first. None of them depends on another's result, and
+      // the trim arithmetic below needs all four before it can do anything, so
+      // there is nothing to interleave with and nothing to lose by waiting once.
+      const [openTasksResult, recentEpisodicsResult, coreOutResult, coreInResult] = await Promise.all([
+        // Not filtered on status, and it must stay that way: same ruling as the
+        // unconsolidated counter and the gather query (2aefceb). status records
+        // editorial state, it does not mark a task done, so filtering on
+        // 'published' here hid 21 of 32 non-archived task docs, including every
+        // 'active' and 'ready' one. archive/ is the only exclusion.
+        db
           .prepare(
             // The closure predicate below is the ONLY status filter in this
             // query, and it is not a return of the bug 94b8528 fixed. That one
@@ -577,28 +601,26 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
             "SELECT namespace, path, title, type, body, updated_at FROM documents WHERE namespace = ?1 AND type = 'task' AND status != 'closed' AND path NOT LIKE 'archive/%' ORDER BY updated_at DESC"
           )
           .bind(namespace)
-          .all<{ namespace: string; path: string; title: string | null; type: string | null; body: string | null; updated_at: string }>()
-      ).results;
-      const recentEpisodics = (
-        await db
+          .all<{ namespace: string; path: string; title: string | null; type: string | null; body: string | null; updated_at: string }>(),
+        db
           .prepare(
             "SELECT namespace, path, title, type, body, updated_at FROM documents WHERE namespace = ?1 AND type = 'episodic' AND path NOT LIKE 'archive/%' ORDER BY created_at DESC LIMIT 3"
           )
           .bind(namespace)
-          .all<{ namespace: string; path: string; title: string | null; type: string | null; body: string | null; updated_at: string }>()
-      ).results;
-      const coreOut = (
-        await db
+          .all<{ namespace: string; path: string; title: string | null; type: string | null; body: string | null; updated_at: string }>(),
+        db
           .prepare("SELECT type, to_ns, to_path FROM document_links WHERE from_ns = ?1 AND from_path = 'core.md' ORDER BY type, to_ns, to_path")
           .bind(namespace)
-          .all()
-      ).results;
-      const coreIn = (
-        await db
+          .all(),
+        db
           .prepare("SELECT type, from_ns, from_path FROM document_links WHERE to_ns = ?1 AND to_path = 'core.md' ORDER BY type, from_ns, from_path")
           .bind(namespace)
-          .all()
-      ).results;
+          .all(),
+      ]);
+      const openTasks = openTasksResult.results;
+      const recentEpisodics = recentEpisodicsResult.results;
+      const coreOut = coreOutResult.results;
+      const coreIn = coreInResult.results;
 
       // Stay under budget by trimming the largest, most re-readable sections to
       // metadata first (episodics, then task bodies), and report what was cut.
@@ -661,7 +683,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
         replace_with: bounded(MAX_BODY).optional(),
         type: bounded(MAX_DOC_TYPE).optional(),
         tags: bounded(MAX_TAGS).optional(),
-        status: bounded(MAX_DOC_TYPE).optional(),
+        status: bounded(MAX_DOC_STATUS).optional(),
         confirm: z.boolean().optional(),
         links: bounded(MAX_LINKS_JSON).optional(),
         if_match: bounded(MAX_SHA).optional(),
@@ -728,10 +750,12 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
       const staleIfMatch = await commit.precheckIfMatch();
       if (staleIfMatch) return fail(staleIfMatch);
 
-      // Body assembly, per mode. Pure and unit-tested in ./write-modes. Every
-      // mode returns the FULL new body, so the write path below is unchanged and
-      // both invariants (version snapshot, audit row) apply identically to all
-      // three.
+      // Body assembly, per mode. Pure and unit-tested in ./write-modes. All FOUR
+      // modes return the FULL new body, so the write path below is unchanged and
+      // both invariants (version snapshot, audit row) apply identically to every
+      // one of them. meta is the mode worth naming here: it returns the stored
+      // body BYTE-IDENTICAL, which is its whole contract, and it is the one mode
+      // the dash normalizer below is skipped for.
       const assembled = assembleBody({
         mode: writeMode,
         exists: Boolean(prior),
@@ -1727,8 +1751,8 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
         namespace: nsName,
         path_prefix: bounded(MAX_PATH).optional().describe("Only scan files whose path starts with this prefix, e.g. 'app/lib/billing'."),
         ref: bounded(MAX_REF).optional().describe("Branch, tag, or sha to search. Defaults to the default branch."),
-        max_results: z.number().int().positive().optional().describe("Cap on returned matches (default 20, max 200)."),
-        max_files: z.number().int().positive().optional().describe("Cap on files fetched and scanned (default 200, max 200). A wider sweep resumes with start, because each file costs one GitHub request against the App installation's quota; narrowing path_prefix is cheaper."),
+        max_results: z.number().int().positive().optional().describe(`Cap on returned matches (default ${DEFAULT_SCAN_RESULTS}, max ${MAX_SCAN_CAP}).`),
+        max_files: z.number().int().positive().optional().describe(`Cap on files fetched and scanned (default ${DEFAULT_SCAN_FILES}, max ${MAX_SCAN_CAP}). A wider sweep resumes with start, because each file costs one GitHub request against the App installation's quota; narrowing path_prefix is cheaper.`),
         start: z.number().int().nonnegative().optional().describe("Candidate-file offset to resume a truncated scan; pass the previous result's next_start."),
         repo: bounded(MAX_REPO_SELECTOR).optional().describe(REPO_ARG),
       },

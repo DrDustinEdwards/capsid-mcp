@@ -40,7 +40,7 @@ export const REPORT_PATH = "/csp-report";
 export const REPORTING_ENDPOINTS = `csp="${REPORT_PATH}"`;
 // The R2 prefix the report sink writes to and the backup cron prunes. It lives
 // beside REPORT_PATH because it was two separate literals, one in src/backup.ts and
-// one in src/github-handler.ts (audit 2, F21). Intake and prune have to agree: if
+// one in src/routes.ts (audit 2, F21). Intake and prune have to agree: if
 // one is edited alone, either reports accumulate forever under a prefix nothing
 // reaps, or the prune deletes under a prefix nothing writes and reports silently
 // grow at the other one.

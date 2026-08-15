@@ -6,6 +6,7 @@
 // over the live GitHub REST API. No PAT, no clone.
 
 import { b64urlFromBytes, b64urlEncode, base64Decode, base64Encode } from "./encoding";
+import { DEFAULT_SCAN_FILES, DEFAULT_SCAN_RESULTS, MAX_SCAN_CAP } from "./limits";
 import type { Env } from "./env";
 
 const GH = "https://api.github.com";
@@ -185,10 +186,12 @@ async function invalidateRepoReads(env: Env, owner: string, repo: string): Promi
   try {
     do {
       const page = await env.APP_KV.list({ prefix, cursor });
-      for (const key of page.keys) {
-        await env.APP_KV.delete(key.name);
-        deleted++;
-      }
+      // Per PAGE, not per key (quality audit 9.4). The deletes within a page are
+      // independent of each other, and this runs on the write path where a caller
+      // is waiting. Pages stay sequential because the next cursor is only known
+      // once the current page returns.
+      await Promise.all(page.keys.map((key) => env.APP_KV.delete(key.name)));
+      deleted += page.keys.length;
       cursor = page.list_complete ? undefined : page.cursor;
     } while (cursor);
   } catch (err) {
@@ -391,9 +394,8 @@ export async function searchCode(
   // it, because the cost is per file FETCHED, not per candidate listed. Over the
   // cap it clamps rather than refusing, because the result already reports
   // truncation honestly and carries a next_start to resume from.
-  const MAX_SCAN_CAP = 200;
-  const maxResults = Math.min(opts.maxResults && opts.maxResults > 0 ? opts.maxResults : 20, MAX_SCAN_CAP);
-  const maxFiles = Math.min(opts.maxFiles && opts.maxFiles > 0 ? opts.maxFiles : 200, MAX_SCAN_CAP);
+  const maxResults = Math.min(opts.maxResults && opts.maxResults > 0 ? opts.maxResults : DEFAULT_SCAN_RESULTS, MAX_SCAN_CAP);
+  const maxFiles = Math.min(opts.maxFiles && opts.maxFiles > 0 ? opts.maxFiles : DEFAULT_SCAN_FILES, MAX_SCAN_CAP);
   const start = opts.start && opts.start > 0 ? Math.floor(opts.start) : 0;
   const pathPrefix = (opts.pathPrefix ?? "").replace(/^\/+/, "");
 
@@ -586,9 +588,9 @@ async function putFile(
   });
   if (!resp.ok) throw new Error(`commit failed (${resp.status}): ${await resp.text()}`);
   const data = (await resp.json()) as { commit: { sha: string }; content: { sha: string } };
-  // Both write modes reach the repo through here, so one call covers write_repo_file
-  // direct and pr alike.
-  await invalidateRepoReads(env, owner, repo);
+  // Invalidation is NOT here any more: commitOnBranch owns it for every mutation
+  // that goes through the shared dance, so there is one site rather than one per
+  // verb (quality audit 1.5).
   return { commitSha: data.commit.sha, fileSha: data.content.sha };
 }
 
@@ -645,6 +647,68 @@ function branchSlug(path: string): string {
   return path.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "file";
 }
 
+// THE REPO MUTATION DANCE, once (quality audit 1.5).
+//
+// write_repo_file and delete_repo_file are the same six steps with a different
+// verb in the middle: resolve the repo, find the default branch, cut a work branch
+// in pr mode, mutate, INVALIDATE THE READ CACHE, and open a PR in pr mode. They
+// were written out twice, and the specific hazard is the fifth step: a stale read
+// cache serves the pre-write body for up to 60 seconds, and the third mutation to
+// be added here would have had to remember a call that nothing enforces.
+// Invalidation now happens once, in this function, on a path neither verb can
+// skip.
+//
+// Response SHAPING deliberately stays with each caller. The two responses really
+// do differ (write carries a fileSha, delete does not, and write's pr mode omits
+// it), and folding those differences in here would either change what a caller
+// sees or push per-verb conditionals into the shared step.
+async function commitOnBranch<R>(
+  env: Env,
+  namespace: string,
+  path: string,
+  message: string,
+  mode: "pr" | "direct",
+  branch: string | undefined,
+  repoSelector: string | undefined,
+  op: {
+    branchPrefix: string;
+    fallbackTitle: string;
+    prBody: string;
+    mutate: (owner: string, repo: string, target: string) => Promise<R>;
+  }
+): Promise<{
+  base: { repo: string; mode: "pr" | "direct"; branch: string; path: string };
+  result: R;
+  pr: { number: number; url: string } | null;
+}> {
+  const { owner, repo } = await resolveRepo(env, namespace, repoSelector);
+  const defaultBranch = await getDefaultBranch(env, owner, repo);
+  const target =
+    mode === "direct"
+      ? branch || defaultBranch
+      : branch || `${op.branchPrefix}${branchSlug(path)}-${Date.now().toString(36)}`;
+
+  if (mode === "pr") {
+    const headSha = await getRefSha(env, owner, repo, defaultBranch);
+    await ensureBranch(env, owner, repo, target, headSha);
+  }
+
+  const result = await op.mutate(owner, repo, target);
+
+  // The commit has landed, so every cached read of this repo is now potentially
+  // stale. Swept here, for both verbs, before the PR is opened.
+  await invalidateRepoReads(env, owner, repo);
+
+  const base = { repo: `${owner}/${repo}`, mode, branch: target, path };
+  if (mode === "direct") return { base, result, pr: null };
+
+  const title = message.split("\n")[0] || op.fallbackTitle;
+  // Pass the resolved repo full name so the PR lands on the same repo the file
+  // was committed to, not the namespace default.
+  const pr = await openPr(env, namespace, title, target, defaultBranch, op.prBody, `${owner}/${repo}`);
+  return { base, result, pr: { number: pr.number, url: pr.url } };
+}
+
 export async function writeRepoFile(
   env: Env,
   namespace: string,
@@ -655,31 +719,17 @@ export async function writeRepoFile(
   branch?: string,
   repoSelector?: string
 ) {
-  const { owner, repo } = await resolveRepo(env, namespace, repoSelector);
-  const defaultBranch = await getDefaultBranch(env, owner, repo);
-
-  if (mode === "direct") {
-    const target = branch || defaultBranch;
-    const res = await putFile(env, owner, repo, path, content, message, target);
-    return { repo: `${owner}/${repo}`, mode: "direct", branch: target, path, ...res };
-  }
-
-  const work = branch || `capsid/${branchSlug(path)}-${Date.now().toString(36)}`;
-  const headSha = await getRefSha(env, owner, repo, defaultBranch);
-  await ensureBranch(env, owner, repo, work, headSha);
-  const res = await putFile(env, owner, repo, path, content, message, work);
-  const title = message.split("\n")[0] || `Update ${path}`;
-  // Pass the resolved repo full name so the PR lands on the same repo the file
-  // was committed to, not the namespace default.
-  const pr = await openPr(env, namespace, title, work, defaultBranch, `Automated change to \`${path}\` via Capsid.`, `${owner}/${repo}`);
-  return {
-    repo: `${owner}/${repo}`,
-    mode: "pr",
-    branch: work,
-    path,
-    commitSha: res.commitSha,
-    pr: { number: pr.number, url: pr.url },
-  };
+  const { base, result, pr } = await commitOnBranch(env, namespace, path, message, mode, branch, repoSelector, {
+    branchPrefix: "capsid/",
+    fallbackTitle: `Update ${path}`,
+    prBody: `Automated change to \`${path}\` via Capsid.`,
+    mutate: (owner, repo, target) => putFile(env, owner, repo, path, content, message, target),
+  });
+  // direct carries the file sha as well as the commit sha; pr mode never has.
+  // That asymmetry is preserved rather than tidied, because tidying it would
+  // change what a caller receives.
+  if (!pr) return { ...base, ...result };
+  return { ...base, commitSha: result.commitSha, pr };
 }
 
 // Delete a file from a namespace's repo. PR mode (default) commits the deletion
@@ -694,40 +744,28 @@ export async function deleteRepoFile(
   branch?: string,
   repoSelector?: string
 ) {
-  const { owner, repo } = await resolveRepo(env, namespace, repoSelector);
-  const defaultBranch = await getDefaultBranch(env, owner, repo);
-  const target =
-    mode === "direct" ? branch || defaultBranch : branch || `capsid/rm-${branchSlug(path)}-${Date.now().toString(36)}`;
-
-  if (mode === "pr") {
-    const headSha = await getRefSha(env, owner, repo, defaultBranch);
-    await ensureBranch(env, owner, repo, target, headSha);
-  }
-
-  const sha = await getFileSha(env, owner, repo, path, target);
-  if (!sha) throw new Error(`delete_repo_file: ${path} does not exist on ${owner}/${repo}@${target}`);
-  const resp = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/contents/${encodePath(path)}`, {
-    method: "DELETE",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message, sha, branch: target }),
+  const { base, result, pr } = await commitOnBranch(env, namespace, path, message, mode, branch, repoSelector, {
+    branchPrefix: "capsid/rm-",
+    fallbackTitle: `Delete ${path}`,
+    prBody: `Delete \`${path}\` via Capsid.`,
+    mutate: async (owner, repo, target) => {
+      // GitHub's contents DELETE needs the CURRENT file sha, so a missing file is
+      // an error rather than a no-op. Read on the target branch, which in pr mode
+      // is the work branch just cut from the default.
+      const sha = await getFileSha(env, owner, repo, path, target);
+      if (!sha) throw new Error(`delete_repo_file: ${path} does not exist on ${owner}/${repo}@${target}`);
+      const resp = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/contents/${encodePath(path)}`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message, sha, branch: target }),
+      });
+      if (!resp.ok) throw new Error(`delete failed (${resp.status}): ${await resp.text()}`);
+      const data = (await resp.json()) as { commit: { sha: string } };
+      return { commitSha: data.commit.sha };
+    },
   });
-  if (!resp.ok) throw new Error(`delete failed (${resp.status}): ${await resp.text()}`);
-  const data = (await resp.json()) as { commit: { sha: string } };
-  await invalidateRepoReads(env, owner, repo);
-
-  if (mode === "direct") {
-    return { repo: `${owner}/${repo}`, mode: "direct", branch: target, path, commitSha: data.commit.sha };
-  }
-  const title = message.split("\n")[0] || `Delete ${path}`;
-  const pr = await openPr(env, namespace, title, target, defaultBranch, `Delete \`${path}\` via Capsid.`, `${owner}/${repo}`);
-  return {
-    repo: `${owner}/${repo}`,
-    mode: "pr",
-    branch: target,
-    path,
-    commitSha: data.commit.sha,
-    pr: { number: pr.number, url: pr.url },
-  };
+  if (!pr) return { ...base, commitSha: result.commitSha };
+  return { ...base, commitSha: result.commitSha, pr };
 }
 
 // Merge or close an open pull request. Merging can trigger CI deploys in repos
