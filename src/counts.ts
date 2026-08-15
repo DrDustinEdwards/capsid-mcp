@@ -24,7 +24,10 @@
 // overwrite and delete had been snapshotting to document_versions since day one and
 // nothing could read a snapshot back without raw SQL.
 //
-// liveGates moved 8 to 9 the same day: /health gained a D1 and FTS probe, so a
+// liveGates moved 9 to 10 on 2026-08-17: gate 2b reads a long-lived canary client
+// record out of OAUTH_KV, bounding time-to-detect on a vanished-record recurrence
+// at the six-hour schedule interval instead of the user-visible symptom.
+// liveGates moved 8 to 9 before that: /health gained a D1 and FTS probe, so a
 // deploy that unbinds the store now goes red.
 // KEYED BY NAMESPACE, and that is the whole point rather than a formality. These
 // numbers are derived from CAPSID'S artifacts: registerTool calls in src/server.ts,
@@ -51,7 +54,7 @@ export interface AuthoritativeCounts {
 export const AUTHORITATIVE: Record<string, AuthoritativeCounts> = {
   capsid: {
     tools: 24,
-    liveGates: 9,
+    liveGates: 10,
     htmlEnforcedHeaders: 6,
     htmlReportOnlyHeaders: 1,
   },

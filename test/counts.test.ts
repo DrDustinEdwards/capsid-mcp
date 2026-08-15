@@ -133,11 +133,15 @@ test("archived documents are exempt", () => {
 test("the 'N of M gates' form is judged on the TOTAL, not the numerator", () => {
   // "6 of 8 gates" states the artifact has 8 gates, which is correct, and that 6
   // passed, which is a run result and none of this lint's business.
-  assert.deepEqual(scanCountClaims([{ path: "core.md", type: "core", body: "6 of 9 gates passed" }], "capsid"), []);
+  // Both fixtures DERIVE the total from counts.ts rather than restating it. They
+  // used to spell it 9, so adding gate 2b broke this test for a reason that had
+  // nothing to do with what it checks: whether the N or the M is judged.
+  const total = CAPSID.liveGates;
+  assert.deepEqual(scanCountClaims([{ path: "core.md", type: "core", body: `6 of ${total} gates passed` }], "capsid"), []);
   const stale = scanCountClaims([{ path: "core.md", type: "core", body: "6 of 6 gates passed" }], "capsid");
   assert.equal(stale.length, 1);
   assert.equal(stale[0].states, "6");
-  assert.equal(stale[0].authoritative, "9");
+  assert.equal(stale[0].authoritative, String(total));
 });
 
 test("'all seven' is flagged when it is about headers", () => {

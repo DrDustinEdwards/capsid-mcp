@@ -48,3 +48,33 @@ export const R2 = { name: "capsid-media" };
 // ABSENT from config, not ones present with a wrong value, and a placeholder
 // client id would break every repo tool.
 export const GITHUB_APP_CLIENT_ID = "Iv23lik2O8SPPksxbc6O";
+
+// THE LIVE-GATE CANARY, a real OAuth client record that exists only to be read.
+//
+// WHY. On 2026-08-17 a client: record disappeared from OAUTH_KV with no request in
+// the window that could account for it; five hypotheses were ruled out and no cause
+// was found. Nothing watched that keyspace, so the only way such a loss surfaces is
+// the user-visible symptom: 400 on /authorize, invalid_client on /token, at whatever
+// moment the owner next tries to connect. Reading this one key on every live-gate
+// run bounds time-to-detect at the schedule interval, six hours, instead.
+//
+// IT HAS NO EXPIRY, AND THAT IS THE POINT. Every /register client carries the 90 day
+// clientRegistrationTTL, and a canary that can expire on its own has a SECOND,
+// legitimate reason to be absent, which is exactly the ambiguity it exists to
+// remove. It is the same defect the reaper had: an outcome that cannot distinguish
+// data loss from a normal one is not evidence of anything. The TTL policy exists to
+// bound ACCUMULATION from open unauthenticated DCR; this is one record, minted once
+// on 2026-08-17, and the gate asserts it stays non-expiring.
+//
+// Minted through the real POST /register path so the record shape is whatever the
+// provider library writes, then rewritten byte-identically with the expiry removed:
+//   wrangler kv key get "client:<id>" --namespace-id <OAUTH_KV> --remote --text > canary.json
+//   wrangler kv key put "client:<id>" --namespace-id <OAUTH_KV> --remote --path canary.json
+//
+// The reaper cannot touch it: that script deletes only the id recorded in
+// PROBE_CLIENT_FILE by gate 2 of the same run, and never lists the namespace.
+export const CANARY_CLIENT = {
+  id: "eZK0jwhRDvjSc_SN",
+  name: "capsid live-gate canary (do not delete; asserted by verify-live gate 2b)",
+};
+

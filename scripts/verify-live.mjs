@@ -25,6 +25,8 @@
 //      Cloudflare propagation is not instant. Gate 4 polls to an expected value.
 
 import { writeFileSync } from "node:fs";
+import { CANARY_CLIENT, OAUTH_KV } from "./bindings.mjs";
+import { canaryReport, checkCanary } from "./canary-lib.mjs";
 
 const ORIGIN = (process.argv[2] ?? "https://capsid.dustin-edwards.workers.dev").replace(/\/$/, "");
 // Overridable because CI needs a longer budget than an interactive run: the sha
@@ -98,6 +100,61 @@ async function gateRegister() {
     writeFileSync(process.env.PROBE_CLIENT_FILE, clientId, "utf8");
   }
   return passed ? clientId : null;
+}
+
+// Gate 2b: the canary client record is still there.
+//
+// WHAT IT BUYS. On 2026-08-17 a client: record vanished from OAUTH_KV with no
+// request in the window that could account for it. Nothing watched that keyspace,
+// so the only way such a loss surfaces is the user-visible symptom: 400 on
+// /authorize, invalid_client on /token, at the moment the owner next connects.
+// Reading one long-lived record every run bounds time-to-detect at the schedule
+// interval, six hours.
+//
+// WHY IT READS KV DIRECTLY RATHER THAN ASKING THE WORKER. Driving /authorize with
+// the canary id would be the more end-to-end check and a strictly worse signal: a
+// missing client and a KV outage both come back as an error page, so the gate could
+// not say which it saw. The KV REST API answers with a STATUS, and the status is
+// the whole distinction:
+//
+//   200        the record is there                    PASS
+//   404        the record is GONE                     FAIL, and it is data loss
+//   anything   the store could not be read at all     FAIL, and it is NOT data loss
+//
+// That third case is the one worth being careful about. A bad token, an expired
+// secret or a Cloudflare API blip says nothing about whether the record exists, and
+// reporting it as "canary missing" would manufacture an anomaly out of an
+// infrastructure hiccup. Same distinction the reaper now makes, for the same reason.
+//
+// NO CREDENTIALS means the gate asserts nothing and says so, rather than passing
+// quietly or failing an interactive run that was never going to have a token.
+// The gate label is written out at every record() call rather than held in a
+// variable. test/counts.test.ts counts DISTINCT literal labels to check the gate
+// total, so a label behind a variable is a gate the count cannot see.
+//
+// The decision itself lives in ./canary-lib.mjs so it can be tested; this function
+// is the wiring, and it does the one thing the library cannot: decide what to do
+// when there are no credentials to read KV with.
+async function gateCanary() {
+  const account = process.env.CLOUDFLARE_ACCOUNT_ID;
+  const token = process.env.CLOUDFLARE_API_TOKEN;
+  const key = `client:${CANARY_CLIENT.id}`;
+
+  // NO CREDENTIALS means the gate asserts nothing and SAYS so, rather than passing
+  // quietly or failing an interactive run that was never going to have a token.
+  if (!account || !token) {
+    record("2b canary client record", true, `SKIPPED: no CLOUDFLARE_ACCOUNT_ID/CLOUDFLARE_API_TOKEN, so ${key} was not read. This run asserts nothing about it.`);
+    return;
+  }
+
+  const result = await checkCanary({
+    fetchImpl: fetch,
+    base: `https://api.cloudflare.com/client/v4/accounts/${account}/storage/kv/namespaces/${OAUTH_KV.id}`,
+    clientId: CANARY_CLIENT.id,
+    auth: { Authorization: `Bearer ${token}` },
+  });
+  const { passed, detail } = canaryReport(result, CANARY_CLIENT.id, OAUTH_KV.name);
+  record("2b canary client record", passed, detail);
 }
 
 // Gate 1b: the store is bound and the FTS index is intact.
@@ -309,6 +366,7 @@ async function gateGithubRedirect(clientId, form) {
 const clientId = await (async () => {
   await gateHealth();
   await gateStore();
+  await gateCanary();
   return gateRegister();
 })();
 
