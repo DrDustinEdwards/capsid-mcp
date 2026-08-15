@@ -17,13 +17,18 @@ export const MAX_PER_DAY = 100;
 
 const PREFIX = "dcr:rate:";
 
-export interface RateVerdict {
-  allowed: boolean;
-  // Null when allowed, or when the check could not run. Names which window fired.
-  window?: "hour" | "day";
-  count?: number;
-  limit?: number;
-}
+// A DISCRIMINATED UNION, so a refusal cannot exist without its reason (quality
+// audit 3.3).
+//
+// This was one interface with `allowed: boolean` and three optional fields, which
+// meant `{ allowed: false }` typechecked. The only consumer interpolates all three
+// into the 429 body, so that value renders as "undefined in the last undefined,
+// limit undefined": a refusal that cannot tell the caller what it hit or when to
+// retry. Splitting the type makes that shape unconstructible rather than merely
+// discouraged, and narrows the fields for the renderer after one `allowed` check.
+export type RateVerdict =
+  | { allowed: true }
+  | { allowed: false; window: "hour" | "day"; count: number; limit: number };
 
 // Fixed windows keyed by the clock, not a sliding log. Two reads and two writes per
 // registration, and no cursor to maintain. The cost is the usual fixed-window edge:

@@ -11,6 +11,9 @@ import {
   resolveRepo,
   writeRepoFile,
 } from "../src/github.ts";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { buildServer } from "../src/server.ts";
 import { fakeEnv, fakeKv, withFetch, type Route } from "./fakes.ts";
 
 // KV, Env and the HTTP stub all come from ./fakes.ts now (quality audit 6.2).
@@ -467,6 +470,67 @@ test("ci_status still withholds the log tail from a read-only key", async () => 
       assert.equal(failed.log_tail_unavailable, undefined);
       // And the log was never fetched, so it cannot leak by another route.
       assert.equal(calls.some((c) => c.path.includes("/logs")), false);
+    }
+  );
+});
+
+// THE WIRING, not just the function (quality audit 2.2, found by a plant).
+//
+// The four tests above call ciStatus directly and pin both log-tail behaviours,
+// so they pass whatever the TOOL hands the function. Replacing `logTail: mayWrite`
+// with `logTail: true` in the tool registration went green across the whole suite:
+// every ro: key would have received CI job logs, which is exactly what the
+// withheld message exists to prevent, and nothing noticed. This drives the tool
+// through a server built with a read grant, which is the only way to see it.
+test("a read-grant server does not hand the CI log tail to ci_status", async () => {
+  await withFetch(
+    {
+      "GET /repos/o/r/actions/runs": { body: FAILED_RUNS },
+      "GET /repos/o/r/actions/runs/42/jobs": { body: JOBS_OK },
+      "GET /repos/o/r/actions/jobs/9/logs": { text: "a secret from the build log" },
+    },
+    async (calls) => {
+      const server = buildServer(makeEnv(ONE_REPO), "read", "test:ro");
+      const client = new Client({ name: "grant-test", version: "1.0.0" });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+      const result = (await client.callTool({
+        name: "ci_status",
+        arguments: { namespace: "ns" },
+      })) as { content: Array<{ text: string }> };
+      await client.close();
+      const failed = (JSON.parse(result.content[0].text) as { failed_run: FailedRun }).failed_run;
+      assert.match(failed.log_tail_withheld ?? "", /read-only key/);
+      assert.equal(failed.log_tail, undefined);
+      // The strongest form: the log was never REQUESTED, so it cannot leak by any
+      // other route, however the response is later assembled.
+      assert.equal(calls.some((c) => c.path.includes("/logs")), false, "a read-grant call fetched the job log");
+    }
+  );
+});
+
+test("a write-grant server does hand the log tail through, so the gate is a gate", async () => {
+  // The other side. A wiring that withheld from everyone would pass the test above
+  // and silently remove the capability from the keys that are meant to have it.
+  await withFetch(
+    {
+      "GET /repos/o/r/actions/runs": { body: FAILED_RUNS },
+      "GET /repos/o/r/actions/runs/42/jobs": { body: JOBS_OK },
+      "GET /repos/o/r/actions/jobs/9/logs": { text: "the last line" },
+    },
+    async () => {
+      const server = buildServer(makeEnv(ONE_REPO), "write", "test:rw");
+      const client = new Client({ name: "grant-test", version: "1.0.0" });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+      const result = (await client.callTool({
+        name: "ci_status",
+        arguments: { namespace: "ns" },
+      })) as { content: Array<{ text: string }> };
+      await client.close();
+      const failed = (JSON.parse(result.content[0].text) as { failed_run: FailedRun }).failed_run;
+      assert.match(failed.log_tail ?? "", /the last line/);
+      assert.equal(failed.log_tail_withheld, undefined);
     }
   );
 });

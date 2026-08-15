@@ -24,7 +24,7 @@ import { sourceFile } from "./source-files.ts";
 
 async function connect(opts: FakeD1Options = {}) {
   const { db, reads } = fakeD1(opts);
-  const server = buildServer(fakeEnv({ DB: db }), true, "test:bounds");
+  const server = buildServer(fakeEnv({ DB: db }), "write", "test:bounds");
   const client = new Client({ name: "bounds-test", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);

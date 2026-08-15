@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { assembleBody } from "../src/write-modes.ts";
+import { type AssembleInput, assembleBody, narrowWrite } from "../src/write-modes.ts";
 
 // Batch-two item 4. These cover the two things append and patch have to get
 // right to be trusted with a 60KB canon document: the anchor guard must refuse
@@ -219,3 +219,72 @@ test("patch keeps a realistic canon fragment byte-exact", () => {
   assert.equal(result.body.split("Ruled 2026-08-13.").length - 1, 1);
   assert.equal(result.body.split("# Costs").length - 1, 1);
 });
+
+// ---- the narrow shape (quality audit 3.1) -----------------------------------
+
+// AssembleInput used to be one interface with every field optional, so
+// { mode: "patch", body } and { mode: "replace" } with no title both typechecked
+// and every assembly branch re-established by hand which fields it could trust.
+// It is a discriminated union now, and these are the two halves of that claim:
+// the illegal shapes do not compile, and the legal ones still carry their fields.
+
+test("an illegal mode/field combination does not COMPILE", () => {
+  // @ts-expect-error mode 'replace' cannot exist without a title
+  const noTitle: AssembleInput = { mode: "replace", exists: false, priorBody: null, body: "b" };
+  // @ts-expect-error mode 'patch' has no body field
+  const patchWithBody: AssembleInput = { mode: "patch", exists: true, priorBody: "x", find: "a", replace_with: "b", body: "no" };
+  // @ts-expect-error mode 'meta' carries no find
+  const metaWithFind: AssembleInput = { mode: "meta", exists: true, priorBody: "x", find: "a" };
+  // @ts-expect-error mode 'append' cannot exist without a body
+  const appendNoBody: AssembleInput = { mode: "append", exists: true, priorBody: "x" };
+  // Referenced so they are not unused; the assertions above are the compiler's.
+  assert.deepEqual([noTitle.mode, patchWithBody.mode, metaWithFind.mode, appendNoBody.mode], [
+    "replace",
+    "patch",
+    "meta",
+    "append",
+  ]);
+});
+
+test("narrowWrite turns a loose wire request into the shape assembly needs", () => {
+  const narrowed = narrowWrite({ mode: "patch", exists: true, priorBody: "hello world", find: "world", replace_with: "there" });
+  assert.ok(!("error" in narrowed));
+  assert.equal(narrowed.mode, "patch");
+  // The fields are REQUIRED on the narrow type, which is what lets assembly stop
+  // re-checking them.
+  if (narrowed.mode === "patch") {
+    assert.equal(narrowed.find, "world");
+    assert.equal(narrowed.replace_with, "there");
+  }
+});
+
+test("narrowWrite is where a mode/field mismatch is refused, not assembly", () => {
+  // These must keep being REFUSED rather than ignored. The wire is loose on
+  // purpose, so a client really can send them, and the union only removes the
+  // shape from the code AFTER this point.
+  const cases: Array<[Parameters<typeof narrowWrite>[0], RegExp]> = [
+    [{ mode: "meta", exists: true, priorBody: "x", body: "nope" }, /does not take body/],
+    [{ mode: "append", exists: true, priorBody: "x", body: "a", find: "f" }, /belong to mode 'patch', not 'append'/],
+    [{ mode: "patch", exists: true, priorBody: "x", find: "f", replace_with: "r", body: "b" }, /takes find and replace_with, not body/],
+    [{ mode: "replace", exists: true, priorBody: "x", body: "b" }, /needs both title and body/],
+  ];
+  for (const [req, expected] of cases) {
+    const result = narrowWrite(req);
+    assert.ok("error" in result, `${req.mode} accepted an illegal field combination`);
+    assert.match(result.error, expected);
+  }
+});
+
+test("error precedence did not move: replace reports its missing title before existence", () => {
+  // mode 'replace' is checked BEFORE the existence test, so creating a document
+  // without a title says so rather than "cannot replace a document that does not
+  // exist". Every other mode reports the missing document first.
+  const replace = narrowWrite({ mode: "replace", exists: false, priorBody: null, body: "b" });
+  assert.ok("error" in replace);
+  assert.match(replace.error, /needs both title and body/);
+
+  const append = narrowWrite({ mode: "append", exists: false, priorBody: null });
+  assert.ok("error" in append);
+  assert.match(append.error, /cannot append a document that does not exist/);
+});
+

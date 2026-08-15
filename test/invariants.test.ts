@@ -29,7 +29,7 @@ import { sourceFiles } from "./source-files.ts";
 // of this batch.
 
 const MUTATING_SQL = /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\b/i;
-const OPERATOR_GATE = "if (!operator)";
+const OPERATOR_GATE = "if (!mayWrite)";
 
 interface Block {
   tool: string;
@@ -117,7 +117,7 @@ test("the one mutating helper outside a tool handler carries the gate itself", (
   const helper = owner.text.slice(owner.text.indexOf("const guardedWrite"), owner.text.indexOf("const REPO_ARG"));
   assert.ok(helper.length > 200, `could not bound guardedWrite in src/${owner.name}`);
   assert.ok(MUTATING_SQL.test(helper), "guardedWrite no longer writes the audit row");
-  assert.ok(helper.includes(OPERATOR_GATE), "guardedWrite lost its operator gate: every repo write tool is now open to ro: keys");
+  assert.ok(helper.includes(OPERATOR_GATE), "guardedWrite lost its write gate: every repo write tool is now open to ro: keys");
 });
 
 test("every tool that overwrites or removes a document snapshots and audits it", () => {

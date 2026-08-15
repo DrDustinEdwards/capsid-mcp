@@ -456,7 +456,23 @@ async function requireConfirmation(
 // the key's sha256 and not the key. The 1,631 rows written before 2026-08-11
 // keep their literal 'operator' value; there is no backfill, because inventing
 // an attribution for them would be worse than an honest unknown.
-export function buildServer(env: Env, operator: boolean, actor: string): McpServer {
+// THE GRANT, NOT A BOOLEAN (quality audit 2.2).
+//
+// This parameter used to be `operator: boolean`, and it read as a lie at every
+// call site: `buildServer(env, true, ...)` looks like "this is the operator
+// server", when what it means is "this grant may write". A read-only ro: key IS
+// an operator, so the name asserted the opposite of the thing it gated on, and
+// the next person to add a tool had to read the body to find out which.
+//
+// Renaming it to writeGrant would have fixed the declaration and left every CALL
+// still saying `true`. Taking the grant itself fixes both, and it removes a
+// conversion: src/auth.ts already resolves an operator key to exactly this union,
+// and github-handler flattened it to a boolean on the way in.
+export type ToolGrant = "write" | "read";
+
+export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServer {
+  // One definition of "may this caller write", so no tool can invent its own.
+  const mayWrite = grant === "write";
   const server = new McpServer(SERVER_INFO);
   const db = env.DB;
 
@@ -652,7 +668,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       },
     },
     async ({ namespace, path, title, body, mode, find, replace_with, type, tags, status, confirm, links, if_match }) => {
-      if (!operator) return fail(DENIED);
+      if (!mayWrite) return fail(DENIED);
       const writeMode = mode ?? "replace";
       const typeError = type === undefined ? null : validateDocType(type);
       if (typeError) return fail(typeError);
@@ -862,9 +878,13 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       if (conflict) return fail(conflict);
       // Warn, do not reject, when an edge points at a document that does not
       // exist. Rejecting would block the legitimate case of asserting an edge
-      // before its target is written, and edges may also address repo files
-      // rather than Capsid documents. But a silent dangling edge is how 23 of
+      // before its target is written. But a silent dangling edge is how 23 of
       // them accumulated unnoticed before 2026-08-10, so the write says so.
+      //
+      // This used to add "and edges may also address repo files rather than
+      // Capsid documents" as a second reason. That was withdrawn on 2026-08-17:
+      // an edge has nowhere to put a repo or a ref, so it could never address one.
+      // The endpoint grammar is enforced in parseLinks, which records the ruling.
       // The lint loop reports these per namespace; this is the same check at
       // the moment the edge is created.
       let danglingTargets: string[] = [];
@@ -994,7 +1014,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       },
     },
     async ({ namespace, path, version_id, confirm, if_match }) => {
-      if (!operator) return fail(DENIED);
+      if (!mayWrite) return fail(DENIED);
       const nsError = await requireRegisteredNamespace(db, namespace);
       if (nsError) return fail(nsError);
       const version = await db
@@ -1119,7 +1139,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       inputSchema: { namespace: nsName, path: docPath, confirm: z.boolean().optional() },
     },
     async ({ namespace, path, confirm }) => {
-      if (!operator) return fail(DENIED);
+      if (!mayWrite) return fail(DENIED);
       const nsError = await requireRegisteredNamespace(db, namespace);
       if (nsError) return fail(nsError);
       const prior = await db
@@ -1177,7 +1197,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       inputSchema: { namespace: nsName, path: docPath, new_path: docPath, confirm: z.boolean().optional() },
     },
     async ({ namespace, path, new_path, confirm }) => {
-      if (!operator) return fail(DENIED);
+      if (!mayWrite) return fail(DENIED);
       const nsError = await requireRegisteredNamespace(db, namespace);
       if (nsError) return fail(nsError);
       // Existence and the edge count are both read BEFORE the batch, deliberately.
@@ -1336,7 +1356,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       },
     },
     async ({ namespace, repo, label, repos }) => {
-      if (!operator) return fail(DENIED);
+      if (!mayWrite) return fail(DENIED);
       const ns = namespace.trim();
       if (!ns) return fail("namespace is required");
       let list: Array<{ repo: string; label: string }>;
@@ -1386,7 +1406,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       inputSchema: { namespace: nsName, repos: bounded(MAX_REPOS_JSON) },
     },
     async ({ namespace, repos }) => {
-      if (!operator) return fail(DENIED);
+      if (!mayWrite) return fail(DENIED);
       const ns = namespace.trim();
       if (!ns) return fail("namespace is required");
       const parsed = parseReposList(repos);
@@ -1557,7 +1577,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
         });
       }
 
-      if (!operator) return fail(DENIED);
+      if (!mayWrite) return fail(DENIED);
       const paths = [...new Set(consumed ?? [])];
       if (paths.length === 0) {
         return fail("finalize requires consumed: the episodic/source paths that were compiled into the wiki");
@@ -1638,7 +1658,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
     path: string | null,
     fn: () => Promise<Record<string, unknown>>
   ) => {
-    if (!operator) return fail(DENIED);
+    if (!mayWrite) return fail(DENIED);
     let result: Record<string, unknown>;
     try {
       result = await fn();
@@ -1820,7 +1840,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
         limit: z.number().int().positive().optional().describe("How many recent runs to return (default 10, max 20)."),
       },
     },
-    ({ namespace, repo, limit }) => guarded(() => ciStatus(env, namespace, repo, { limit, logTail: operator }))
+    ({ namespace, repo, limit }) => guarded(() => ciStatus(env, namespace, repo, { limit, logTail: mayWrite }))
   );
 
   // Template metadata spreads onto every listed resource, so it is stated ONCE and

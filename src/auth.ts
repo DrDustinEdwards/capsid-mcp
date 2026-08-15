@@ -26,7 +26,7 @@ export function timingSafeEqual(a: string, b: string): boolean {
 
 // OPERATOR_KEY_HASH holds one or more comma-separated sha256 hex hashes.
 // A plain entry admits a full (write) operator; an entry prefixed "ro:" admits
-// a read-only client, which exercises the operator=false path on every gated
+// a read-only client, which exercises the "read" grant path on every gated
 // tool. Revoke a key by removing its hash; the other keys keep working. The
 // original single-hash secret still parses as one write entry.
 export type OperatorGrant = "write" | "read" | null;

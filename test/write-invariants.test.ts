@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { buildServer } from "../src/server.ts";
+import { buildServer, type ToolGrant } from "../src/server.ts";
 import { fakeD1, fakeEnv, type FakeD1Rows, type Recorded } from "./fakes.ts";
 import { sourceFile } from "./source-files.ts";
 
@@ -109,9 +109,9 @@ function connectOptions(opts: FakeOptions) {
   };
 }
 
-async function connect(operator: boolean, opts: FakeOptions = {}) {
+async function connect(grant: ToolGrant, opts: FakeOptions = {}) {
   const { rows, recorded, batches, db } = fakeD1(connectOptions(opts));
-  const server = buildServer(fakeEnv({ DB: db }), operator, "test:guard");
+  const server = buildServer(fakeEnv({ DB: db }), grant, "test:guard");
   const client = new Client({ name: "invariant-test", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -172,7 +172,7 @@ const MUTATORS: Array<{ tool: string; args: Record<string, unknown>; requires: R
 
 for (const { tool, args, requires } of MUTATORS) {
   test(`${tool} issues its snapshot and audit statements`, async () => {
-    const { client, recorded, close } = await connect(true);
+    const { client, recorded, close } = await connect("write");
     const result = (await client.callTool({ name: tool, arguments: args })) as { isError?: boolean; content: Array<{ text: string }> };
     await close();
     assert.ok(!result.isError, `${tool} returned an error: ${result.content?.[0]?.text}`);
@@ -189,7 +189,7 @@ for (const { tool, args, requires } of MUTATORS) {
     // record can disagree: move worked that way until 2026-08-13, which left a
     // rename with no log entry possible in one direction and a log entry for a
     // rename that never happened in the other.
-    const { client, recorded, close } = await connect(true);
+    const { client, recorded, close } = await connect("write");
     await client.callTool({ name: tool, arguments: args });
     await close();
     const direct = recorded.filter((r) => r.via === "direct");
@@ -203,7 +203,7 @@ for (const { tool, args, requires } of MUTATORS) {
 
 test("a read-only key cannot reach any mutating tool, and writes nothing", async () => {
   for (const { tool, args } of MUTATORS) {
-    const { client, recorded, close } = await connect(false);
+    const { client, recorded, close } = await connect("read");
     const result = (await client.callTool({ name: tool, arguments: args })) as { isError?: boolean; content: Array<{ text: string }> };
     await close();
     assert.equal(result.isError, true, `${tool} did not refuse a read-only key`);
@@ -214,7 +214,7 @@ test("a read-only key cannot reach any mutating tool, and writes nothing", async
 });
 
 test("write refuses when if_match does not describe the stored body", async () => {
-  const { client, recorded, close } = await connect(true);
+  const { client, recorded, close } = await connect("write");
   const result = (await client.callTool({
     name: "write",
     arguments: { namespace: "capsid", path: "doc.md", title: "New", body: "new body", confirm: true, if_match: "0".repeat(64) },
@@ -232,7 +232,7 @@ test("write accepts the if_match it just handed out", async () => {
   // fake store reports it, is accepted.
   const { createHash } = await import("node:crypto");
   const sha = createHash("sha256").update("prior body").digest("hex");
-  const { client, recorded, close } = await connect(true);
+  const { client, recorded, close } = await connect("write");
   const result = (await client.callTool({
     name: "write",
     arguments: { namespace: "capsid", path: "doc.md", title: "New", body: "new body", confirm: true, if_match: sha },
@@ -249,7 +249,7 @@ test("write, delete and move all refuse an unregistered namespace, and write not
   // namespace like every other mutator, so the exclusion was hiding nothing and
   // the loop is now whole.
   for (const { tool, args, refusesUnregisteredWith } of MUTATORS) {
-    const { client, recorded, close } = await connect(true, { namespaceExists: false });
+    const { client, recorded, close } = await connect("write", { namespaceExists: false });
     const result = (await client.callTool({
       name: tool,
       arguments: { ...args, namespace: "typoed-ns" },
@@ -273,7 +273,7 @@ test("mode meta leaves the body byte-identical, wide dash and all", async () => 
   // it with the literal character, which is the guard working.
   const EM_DASH = String.fromCharCode(0x2014);
   const dashed = `a body with an em ${EM_DASH} dash in it`;
-  const { client, recorded, close } = await connect(true, { body: dashed });
+  const { client, recorded, close } = await connect("write", { body: dashed });
   const result = (await client.callTool({
     name: "write",
     arguments: { namespace: "capsid", path: "doc.md", mode: "meta", status: "closed" },
@@ -301,7 +301,7 @@ const recently = (minutesAgo: number) =>
   new Date(Date.now() - minutesAgo * 60_000).toISOString().slice(0, 19).replace("T", " ");
 
 async function writeAndRead(opts: Record<string, unknown>, args: Record<string, unknown> = {}) {
-  const { client, close } = await connect(true, opts);
+  const { client, close } = await connect("write", opts);
   const result = (await client.callTool({
     name: "write",
     arguments: { namespace: "capsid", path: "doc.md", title: "New", body: "new body", confirm: true, ...args },
@@ -334,7 +334,7 @@ test("a guarded write never warns, however recent", async () => {
 });
 
 test("the warning NEVER refuses the write", async () => {
-  const { client, recorded, close } = await connect(true, { updatedAt: recently(5) });
+  const { client, recorded, close } = await connect("write", { updatedAt: recently(5) });
   const result = (await client.callTool({
     name: "write",
     arguments: { namespace: "capsid", path: "doc.md", title: "New", body: "new body", confirm: true },
@@ -368,7 +368,7 @@ test("PREDICATE: a body that changes after the pre-read is refused at commit, no
   // refusal therefore comes from the in-batch guard. That is the distinction:
   // this is the window the old pre-read left open.
   const sha = await shaOf("prior body");
-  const { client, recorded, close } = await connect(true, {
+  const { client, recorded, close } = await connect("write", {
     body: "prior body",
     raceAfterPreRead: (live) => {
       live.body = "body written by someone else";
@@ -393,7 +393,7 @@ test("PREDICATE: an overwrite with no confirm is refused before any commit", asy
   // capability, so the handler refuses rather than waiting. The post-elicitation
   // arm is the guard itself, which the test above proves, and both arm the same
   // statement.
-  const { client, recorded, close } = await connect(true, { body: "prior body" });
+  const { client, recorded, close } = await connect("write", { body: "prior body" });
   const result = await call(client, "write", {
     namespace: "capsid", path: "doc.md", title: "New", body: "new body",
   });
@@ -406,7 +406,7 @@ test("PREDICATE: an overwrite with no confirm is refused before any commit", asy
 test("PREDICATE: an unguarded update still lands, so the guard is not a blanket refusal", async () => {
   // The other side. Without this, a predicate that refused everything would pass
   // every test above and break every legitimate write.
-  const { client, recorded, close } = await connect(true, { body: "prior body" });
+  const { client, recorded, close } = await connect("write", { body: "prior body" });
   const result = await call(client, "write", {
     namespace: "capsid", path: "doc.md", title: "New", body: "new body", confirm: true,
   });
@@ -420,7 +420,7 @@ test("CREATE COLLISION: exactly one of two racing creates wins, and the loser is
   // commits. The second must NOT fall into ON CONFLICT DO UPDATE, because its
   // statement list carries no snapshot (there was nothing to snapshot when it
   // looked), so the winner's body would be gone with no version row anywhere.
-  const { client, recorded, close } = await connect(true, {
+  const { client, recorded, close } = await connect("write", {
     exists: false,
     raceAfterPreRead: (live) => {
       live.exists = true;
@@ -470,13 +470,13 @@ for (const { name, opts, withIfMatch, expected } of ARMING_CASES) {
   test(`ARMING PARITY: write and restore both arm the ${expected} guard, first, on a ${name}`, async () => {
     const if_match = withIfMatch ? await shaOf("prior body") : undefined;
 
-    const w = await connect(true, opts);
+    const w = await connect("write", opts);
     const wRes = await call(w.client, "write", {
       namespace: "capsid", path: "doc.md", title: "T", body: "b", confirm: true, ...(if_match ? { if_match } : {}),
     });
     await w.close();
 
-    const r = await connect(true, opts);
+    const r = await connect("write", opts);
     const rRes = await call(r.client, "restore", {
       namespace: "capsid", path: "doc.md", version_id: VERSION_ID, confirm: true, ...(if_match ? { if_match } : {}),
     });
@@ -522,7 +522,7 @@ test("ARMING PARITY: both call sites pass the SAME consent signal", async () => 
 });
 
 test("CREATE COLLISION: an uncontested create still succeeds", async () => {
-  const { client, recorded, close } = await connect(true, { exists: false });
+  const { client, recorded, close } = await connect("write", { exists: false });
   const result = await call(client, "write", {
     namespace: "capsid", path: "new-doc.md", title: "T", body: "b",
   });
@@ -547,7 +547,7 @@ test("CREATE COLLISION: an uncontested create still succeeds", async () => {
 // "old body" and the live document carries "prior body". A restore must read the
 // first and write it, while snapshotting the second.
 test("restore writes the VERSION body, and snapshots the LIVE one", async () => {
-  const { client, recorded, close } = await connect(true);
+  const { client, recorded, close } = await connect("write");
   const result = (await client.callTool({
     name: "restore",
     arguments: { namespace: "capsid", path: "doc.md", version_id: 42, confirm: true },
@@ -590,7 +590,7 @@ test("restore writes the VERSION body, and snapshots the LIVE one", async () => 
 // returned the same version row for every id, namespace and path.
 
 test("history lists the versions of the document asked for", async () => {
-  const { client, close } = await connect(true);
+  const { client, close } = await connect("write");
   const result = await call(client, "history", { namespace: "capsid", path: "doc.md" });
   await close();
   assert.ok(!result.isError, `history failed: ${result.content?.[0]?.text}`);
@@ -600,7 +600,7 @@ test("history lists the versions of the document asked for", async () => {
 });
 
 test("history returns nothing for a path with no snapshots", async () => {
-  const { client, close } = await connect(true);
+  const { client, close } = await connect("write");
   const result = await call(client, "history", { namespace: "capsid", path: "ep.md" });
   await close();
   const out = JSON.parse(result.content[0].text) as { versions: unknown[] };
@@ -611,7 +611,7 @@ test("fetching a version by id is scoped to its own document", async () => {
   // The same id, asked for under a path it does not belong to. Under the old fake
   // this returned the body anyway, which is the walk-the-store shape the scoping
   // exists to prevent.
-  const { client, close } = await connect(true);
+  const { client, close } = await connect("write");
   const wrongPath = await call(client, "history", { namespace: "capsid", path: "ep.md", version_id: 42 });
   await close();
   assert.equal(wrongPath.isError, true, "a snapshot was readable through a document it does not belong to");
@@ -619,7 +619,7 @@ test("fetching a version by id is scoped to its own document", async () => {
 });
 
 test("fetching a version by id returns that version's body", async () => {
-  const { client, close } = await connect(true);
+  const { client, close } = await connect("write");
   const result = await call(client, "history", { namespace: "capsid", path: "doc.md", version_id: 42 });
   await close();
   assert.ok(!result.isError, `history by id failed: ${result.content?.[0]?.text}`);
@@ -640,7 +640,7 @@ test("fetching a version by id returns that version's body", async () => {
 // agreeing with whatever it was asked.
 
 test("a version id that does not exist is refused, not silently substituted", async () => {
-  const { client, recorded, close } = await connect(true);
+  const { client, recorded, close } = await connect("write");
   const result = await call(client, "restore", {
     namespace: "capsid", path: "doc.md", version_id: 99, confirm: true,
   });
@@ -655,7 +655,7 @@ test("a version belonging to another document is not reachable by id", async () 
   // would let a caller walk every snapshot in the store by incrementing a number.
   // Under the old fake this passed for any id, path or namespace, so the property
   // was asserted by the tool's description and by nothing else.
-  const { client, close } = await connect(true);
+  const { client, close } = await connect("write");
   const result = await call(client, "restore", {
     namespace: "capsid", path: "some-other-doc.md", version_id: 42, confirm: true,
   });
@@ -668,7 +668,7 @@ test("a document that does not exist is not found at a path that does", async ()
   // delete reads the row before it does anything. The old fake returned the one
   // document for every path, so a delete of a path that has never existed reported
   // success and issued a snapshot of a body it invented.
-  const { client, recorded, close } = await connect(true);
+  const { client, recorded, close } = await connect("write");
   const result = await call(client, "delete", {
     namespace: "capsid", path: "never-existed.md", confirm: true,
   });
@@ -679,7 +679,7 @@ test("a document that does not exist is not found at a path that does", async ()
 });
 
 test("restore accepts if_match and refuses a stale one", async () => {
-  const stale = await connect(true, { body: "prior body" });
+  const stale = await connect("write", { body: "prior body" });
   const staleRes = await call(stale.client, "restore", {
     namespace: "capsid", path: "doc.md", version_id: 42, confirm: true, if_match: "0".repeat(64),
   });
@@ -689,7 +689,7 @@ test("restore accepts if_match and refuses a stale one", async () => {
   assert.match(staleRes.content[0].text, /Current sha256 is [0-9a-f]{64}/);
   assert.deepEqual(stale.recorded, [], "a refused restore still wrote statements");
 
-  const good = await connect(true, { body: "prior body" });
+  const good = await connect("write", { body: "prior body" });
   const okRes = await call(good.client, "restore", {
     namespace: "capsid", path: "doc.md", version_id: 42, confirm: true, if_match: await shaOf("prior body"),
   });
@@ -699,7 +699,7 @@ test("restore accepts if_match and refuses a stale one", async () => {
 });
 
 test("restore refuses at the PREDICATE when the live body changes after its pre-read", async () => {
-  const { client, recorded, close } = await connect(true, {
+  const { client, recorded, close } = await connect("write", {
     body: "prior body",
     raceAfterPreRead: (live) => {
       live.body = "changed under the restore";
@@ -715,7 +715,7 @@ test("restore refuses at the PREDICATE when the live body changes after its pre-
 });
 
 test("restore recreating a deleted document refuses a racing create", async () => {
-  const { client, recorded, close } = await connect(true, {
+  const { client, recorded, close } = await connect("write", {
     exists: false,
     raceAfterPreRead: (live) => {
       live.exists = true;
@@ -738,7 +738,7 @@ test("the concurrency warning is read at COMMIT time, not from the pre-read", as
   // it. This test fails against the pre-change code, which is what makes it
   // evidence rather than decoration.
   const fresh = new Date(Date.now() - 5 * 60_000).toISOString().slice(0, 19).replace("T", " ");
-  const { client, close } = await connect(true, {
+  const { client, close } = await connect("write", {
     updatedAt: "2020-01-01 00:00:00",
     raceAfterPreRead: (live) => {
       live.updatedAt = fresh;
@@ -764,7 +764,7 @@ async function connectExploding(sql: RegExp) {
   // Failure injection is a capability of the shared fake now, rather than a
   // monkey-patch over a local one.
   const { db, recorded } = fakeD1(connectOptions({ failBatchMatching: sql }));
-  const server = buildServer(fakeEnv({ DB: db }), true, "test:guard");
+  const server = buildServer(fakeEnv({ DB: db }), "write", "test:guard");
   const client = new Client({ name: "f30-test", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -815,7 +815,7 @@ test("write_repo_file reports success with a warning when the audit insert fails
     return base;
   }) as never;
 
-  const server = buildServer({ DB: db, APP_KV: { get: async (k: string) => (k.startsWith("gh:token:") ? "t" : null), put: async () => {}, delete: async () => {}, list: async () => ({ keys: [], list_complete: true }) } } as never, true, "test:guard");
+  const server = buildServer({ DB: db, APP_KV: { get: async (k: string) => (k.startsWith("gh:token:") ? "t" : null), put: async () => {}, delete: async () => {}, list: async () => ({ keys: [], list_complete: true }) } } as never, "write", "test:guard");
   const client = new Client({ name: "f17-test", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);

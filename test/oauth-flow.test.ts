@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { APPROVAL_MAX_AGE_SECONDS, approvalTag } from "../src/approval.ts";
-import { callerIp, checkRegistrationRate, MAX_PER_DAY, MAX_PER_HOUR } from "../src/dcr-rate-limit.ts";
+import { callerIp, checkRegistrationRate, MAX_PER_DAY, MAX_PER_HOUR, type RateVerdict } from "../src/dcr-rate-limit.ts";
 import { fakeKv } from "./fakes.ts";
 
 const src = (name: string) => readFileSync(join(import.meta.dirname, "..", "src", name), "utf8");
@@ -38,6 +38,19 @@ test("the hourly limit refuses at the threshold, named", async () => {
   // A refused call must not advance the counter, or a blocked caller stays blocked
   // for longer every time they retry.
   assert.deepEqual(kv.puts, []);
+});
+
+test("a refusal cannot be constructed without its reason", () => {
+  // COMPILE-TIME, and it is the whole point of the union (quality audit 3.3).
+  // RateVerdict was one interface with allowed:boolean and three OPTIONAL fields,
+  // so `{ allowed: false }` typechecked, and index.ts interpolates all three into
+  // the 429 body: that value renders as "undefined in the last undefined, limit
+  // undefined". @ts-expect-error inverts the assertion, failing `npm run
+  // check:test` if the line below ever stops being an error, which is what
+  // collapsing the union back into optional fields would do.
+  // @ts-expect-error a refused verdict must name its window, count and limit
+  const broken: RateVerdict = { allowed: false };
+  assert.equal(broken.allowed, false);
 });
 
 test("the daily limit refuses even when the hour is quiet", async () => {

@@ -299,8 +299,8 @@ async function handleCallback(request: Request, env: Env): Promise<Response> {
 }
 
 async function handleOperatorMcp(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-  // "write" keys get the full tool set; "ro:" keys get operator=false, so the
-  // per-tool write gate is a live boundary for them.
+  // The grant is handed to buildServer as-is: "write" keys get the full tool set,
+  // "ro:" keys get "read" and the per-tool write gate is a live boundary for them.
   const { grant, fingerprint } = await operatorIdentity(request, env);
   if (!grant) {
     return new Response("unauthorized: valid operator key required", {
@@ -312,7 +312,7 @@ async function handleOperatorMcp(request: Request, env: Env, ctx: ExecutionConte
   // key, the cron key, a laptop key) and the audit log could not previously tell
   // them apart. The fingerprint is a 12-char prefix of the key's sha256; the
   // full digest is the stored verifier and deliberately stays out of the log.
-  return createMcpHandler(buildServer(env, grant === "write", `opkey:${fingerprint}`), { route: "/ops/mcp" })(
+  return createMcpHandler(buildServer(env, grant, `opkey:${fingerprint}`), { route: "/ops/mcp" })(
     request,
     env,
     ctx

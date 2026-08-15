@@ -19,7 +19,7 @@ const apiHandler = {
     // The admitted GitHub login is the principal for everything this session
     // writes. isAdminUser above has already checked it against
     // ADMIN_GITHUB_LOGIN, so this cannot be an arbitrary caller's claim.
-    return createMcpHandler(buildServer(env, true, `github:${props.login}`), { route: "/mcp" })(request, env, ctx);
+    return createMcpHandler(buildServer(env, "write", `github:${props.login}`), { route: "/mcp" })(request, env, ctx);
   },
 };
 
