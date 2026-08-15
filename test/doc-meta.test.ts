@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { DOC_STATUSES, DOC_TYPES, validateDocStatus, validateDocType } from "../src/doc-meta.ts";
 
 // Pinned so adding or removing a status is a deliberate edit here, not a silent
@@ -21,7 +22,7 @@ test("'closed' is a valid status", () => {
 // because the archive/ prefix is the ONLY thing that takes a document out of
 // memory. A closed task is finished, not forgotten.
 test("closure does not remove a document from the lint loop", () => {
-  const src = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
+  const src = readFileSync(join(import.meta.dirname, "..", "src", "server.ts"), "utf8");
   const closedFilters = src.match(/status\s*!=\s*'closed'/g) ?? [];
   assert.equal(
     closedFilters.length,

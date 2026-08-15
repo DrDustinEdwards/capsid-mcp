@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { join } from "node:path";
 import { AUTHORITATIVE, scanCountClaims } from "../src/counts.ts";
 
 const CAPSID = AUTHORITATIVE.capsid;
@@ -11,7 +12,7 @@ import { securityHeadersFor } from "../src/headers.ts";
 // A constant nobody checks is exactly the stale prose this feature exists to
 // catch, one level down.
 
-const read = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
+const read = (p: string) => readFileSync(join(import.meta.dirname, p), "utf8");
 
 test("tools count matches the registrations in server.ts", () => {
   const src = read("../src/server.ts");
@@ -35,17 +36,58 @@ test("live gate count matches the distinct gates in verify-live.mjs", () => {
   );
 });
 
-test("header counts match what the header layer actually emits", () => {
+// The HTML surface's enforced headers come from TWO places, and the count has to
+// be derived from both (quality audit 5.2).
+//
+// src/headers.ts emits five of them. The sixth, the enforced CSP, is set by the
+// consent dialog itself in src/github-handler.ts, because that policy was ruled on
+// separately and withSecurityHeaders deliberately preserves a header that is
+// already present.
+//
+// This used to read `enforced.length + 1`, and the "+ 1" was the bug in miniature:
+// it hardcoded the very number the test exists to derive. A seventh enforced header
+// added to the consent dialog would have left 5 + 1 = 6 and passed, with
+// counts.ts's authoritative 6 now wrong and nothing saying so. Deriving the union
+// means an enforced header added to EITHER file moves the number.
+const NOT_SECURITY_HEADERS = new Set(["Content-Type", "Set-Cookie", "Location", "Reporting-Endpoints"]);
+const isEnforcedSecurityHeader = (name: string) =>
+  !NOT_SECURITY_HEADERS.has(name) && !/-Report-Only$/i.test(name);
+
+// The header names the consent dialog sets on its own Response, read from source.
+// Scoped to renderApprovalDialog so no other Response in the file can leak in.
+function consentDialogHeaders(): string[] {
+  const src = read("../src/github-handler.ts");
+  const start = src.indexOf("function renderApprovalDialog");
+  assert.ok(start !== -1, "renderApprovalDialog is gone; this derivation needs rewriting");
+  const end = src.indexOf("async function startGithubFlow", start);
+  assert.ok(end > start, "could not bound renderApprovalDialog");
+  const block = src.slice(start, end);
+  const headers = [...block.matchAll(/^\s{6}"([A-Za-z-]+)":/gm)].map((m) => m[1]);
+  // Vacuity guard: an extraction that matched nothing would make every assertion
+  // below pass over an empty list.
+  assert.ok(headers.length >= 4, `parsed only ${headers.length} consent dialog headers: ${headers.join(", ")}`);
+  return headers;
+}
+
+test("header counts match what the header layer and the consent dialog actually emit", () => {
   const html = securityHeadersFor("html");
-  const enforced = Object.keys(html).filter((k) => !/-Report-Only$/i.test(k) && k !== "Reporting-Endpoints");
-  const reportOnly = Object.keys(html).filter((k) => /-Report-Only$/i.test(k));
-  // The consent dialog sets its own enforced CSP in github-handler.ts, so the
-  // header layer emits five of the six and the CSP is the sixth.
+  const fromLayer = Object.keys(html).filter(isEnforcedSecurityHeader);
+  const fromConsent = consentDialogHeaders().filter(isEnforcedSecurityHeader);
+  const enforced = new Set([...fromLayer, ...fromConsent]);
   assert.equal(
-    enforced.length + 1,
+    enforced.size,
     CAPSID.htmlEnforcedHeaders,
-    `header layer emits ${enforced.length} enforced (${enforced.join(", ")}) plus the consent CSP, but counts.ts says ${CAPSID.htmlEnforcedHeaders}`
+    `the HTML surface enforces ${enforced.size} headers (${[...enforced].sort().join(", ")}): ` +
+      `${fromLayer.length} from src/headers.ts and ${fromConsent.length} from the consent dialog, ` +
+      `but counts.ts says ${CAPSID.htmlEnforcedHeaders}`
   );
+  // The consent CSP is the specific one the layer does not emit, and it is why
+  // this count needs two sources at all. Named so a future reader does not
+  // rediscover it.
+  assert.ok(fromConsent.includes("Content-Security-Policy"), "the consent dialog no longer sets its own enforced CSP");
+  assert.equal(fromLayer.includes("Content-Security-Policy"), false, "the header layer now enforces a CSP on HTML too; this derivation still holds but the ruling that kept them separate does not");
+
+  const reportOnly = Object.keys(html).filter((k) => /-Report-Only$/i.test(k));
   assert.equal(reportOnly.length, CAPSID.htmlReportOnlyHeaders);
 });
 

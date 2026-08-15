@@ -1,0 +1,32 @@
+{
+  // The test suite, type-checked (quality audit 10.2).
+  //
+  // tsconfig.json includes only ["src"], so until now nothing type-checked the
+  // files that guard everything else: test/backup.test.ts keeps the backup table
+  // list honest, test/invariants.test.ts keeps the operator gate on, and neither
+  // was ever seen by tsc. A guard that does not compile still "passes" under
+  // Node's type stripping, because stripping erases types without checking them.
+  //
+  // Separate from tsconfig.json rather than widening its include, because the two
+  // have different jobs: that one describes what ships to the Worker, this one
+  // describes what runs in node. Widening the shipping config to cover test files
+  // would put test-only types in the deployed program's type graph.
+  //
+  // src is included as well as test, not instead of it: the tests import src
+  // directly, and checking them against a stale or absent view of src would check
+  // nothing worth checking.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // The test files import "../src/foo.ts" with the extension, which the Worker
+    // bundler does not use and node requires. allowImportingTsExtensions permits
+    // the spelling; noEmit is already inherited.
+    "allowImportingTsExtensions": true,
+    // Node types are added HERE and deliberately not in tsconfig.json. The tests
+    // run under node and use import.meta.dirname, Buffer and node: builtins; the
+    // Worker must never use any of them. Keeping the shipping config free of node
+    // types is what makes `npm run check` still able to reject a node API that
+    // creeps into src/, which a single widened config would have silently allowed.
+    "types": ["@cloudflare/workers-types", "node"]
+  },
+  "include": ["src", "test"]
+}

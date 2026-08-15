@@ -81,11 +81,20 @@ jobs:
       # with an explicit include of ["src"]. See capsid/conventions.md on why
       # `tsc -b` is required elsewhere in the portfolio.
       #
-      # Known coverage gap, recorded not fixed: test/ is not type-checked, so
-      # test/backup.test.ts (the guard that keeps the backup table list honest)
-      # is itself unguarded. Batched into the 2026-07-28 migration item.
+      # This step covers src only. The test suite has its own step below; the gap
+      # this comment used to record as unfixed was closed on 2026-08-17.
       - name: Typecheck
         run: npm run check
+
+      # The test suite is type-checked too, under its own config (quality audit
+      # 10.2). tsconfig.json includes only src, so until 2026-08-17 the files that
+      # guard every other invariant were never seen by tsc: node's type stripping
+      # erases types without checking them, so a test could stop compiling and
+      # still report green. Two configs rather than one widened include, because
+      # only this one carries node types and the shipping config must keep
+      # rejecting a node API in src/.
+      - name: Typecheck tests
+        run: npm run check:test
 
       - name: Tests
         run: npm test

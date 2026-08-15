@@ -41,12 +41,17 @@
 // talks to the KV REST API with global fetch and nothing else.
 
 import { readFileSync } from "node:fs";
+import { OAUTH_KV } from "./bindings.mjs";
 
 const ACCOUNT = process.env.CLOUDFLARE_ACCOUNT_ID;
 const TOKEN = process.env.CLOUDFLARE_API_TOKEN;
-// Pinned, same value and same reasoning as scripts/ci-config.mjs: published in
-// capsid/core.md and inert without a token.
-const NAMESPACE_ID = "5fac20b95ad541a39f24eb8c5a753b6c";
+// The probe client lives in the OAuth provider's keyspace, so this deletes from
+// OAUTH_KV and nothing else. The id comes from scripts/bindings.mjs, which is the
+// single place any binding id is written: this script and the deploy-time
+// assertion in ci-config.mjs used to hold their own copies, and a rotation that
+// updated one would have left this cleanup deleting from a keyspace nothing
+// writes to, reporting success forever because KV DELETE is idempotent.
+const NAMESPACE_ID = OAUTH_KV.id;
 
 // The id comes from the run that created it: --client <id>, or the file
 // verify-live.mjs writes when PROBE_CLIENT_FILE is set. No discovery.

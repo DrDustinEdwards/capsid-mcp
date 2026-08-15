@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { join } from "node:path";
 
 // The two write-path invariants, guarded.
 //
@@ -21,7 +22,7 @@ import { test } from "node:test";
 // test/write-invariants.test.ts, which drives the real handlers against a fake D1
 // and asserts the statements are actually issued.
 
-const SOURCE = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
+const SOURCE = readFileSync(join(import.meta.dirname, "..", "src", "server.ts"), "utf8");
 
 const MUTATING_SQL = /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\b/i;
 const OPERATOR_GATE = "if (!operator)";

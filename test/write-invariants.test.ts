@@ -455,6 +455,53 @@ test("CREATE COLLISION: an uncontested create still succeeds", async () => {
   assert.match(sqlFor(recorded), /INSERT INTO documents/);
 });
 
+// WHAT RESTORE BINDS, not just which statements it issues (quality audit 6.5).
+//
+// The MUTATORS loop above asserts that restore issues an INSERT INTO
+// document_versions and an INSERT INTO audit_log. Both would still be issued by a
+// restore that wrote the LIVE body back over itself: same statements, same order,
+// same count, and the tool would answer "restored" having restored nothing. The
+// only thing that distinguishes a working restore from that one is the value bound
+// to the upsert.
+//
+// The fake makes the two bodies distinguishable on purpose: the version row carries
+// "old body" and the live document carries "prior body". A restore must read the
+// first and write it, while snapshotting the second.
+test("restore writes the VERSION body, and snapshots the LIVE one", async () => {
+  const { client, recorded, close } = await connect(true);
+  const result = (await client.callTool({
+    name: "restore",
+    arguments: { namespace: "capsid", path: "doc.md", version_id: 42, confirm: true },
+  })) as { isError?: boolean; content: Array<{ text: string }> };
+  await close();
+  assert.ok(!result.isError, `restore failed: ${result.content?.[0]?.text}`);
+
+  const upsert = recorded.find((r) => /INSERT INTO documents [(]/i.test(r.sql));
+  assert.ok(upsert, "restore issued no upsert into documents");
+  assert.ok(
+    upsert.params.includes("old body"),
+    `restore did not write the version body. It bound: ${JSON.stringify(upsert.params)}`
+  );
+  assert.equal(
+    upsert.params.includes("prior body"),
+    false,
+    `restore wrote the LIVE body back instead of the version body. It bound: ${JSON.stringify(upsert.params)}`
+  );
+  // The title travels with the body: a restore that put back old bytes under the
+  // current title is half a restore.
+  assert.ok(upsert.params.includes("Old title"), `restore did not write the version title: ${JSON.stringify(upsert.params)}`);
+
+  // And the snapshot is the mirror image: it must capture what is being replaced,
+  // or the restore is not itself undoable, which is the property its description
+  // promises.
+  const snapshot = recorded.find((r) => /INSERT INTO document_versions [(]/i.test(r.sql) && !/SELECT NULL/i.test(r.sql));
+  assert.ok(snapshot, "restore issued no snapshot of the live body");
+  assert.ok(
+    snapshot.params.includes("prior body"),
+    `restore snapshotted the wrong body: ${JSON.stringify(snapshot.params)}`
+  );
+});
+
 test("restore accepts if_match and refuses a stale one", async () => {
   const stale = await connect(true, { body: "prior body" });
   const staleRes = await call(stale.client, "restore", {

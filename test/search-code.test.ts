@@ -50,9 +50,14 @@ function blob(text: string) {
 // Routes by pathname; blobStatus lets a test fail specific blob fetches.
 async function withFetch(
   opts: { paths: string[]; contents: Record<string, string>; blobStatus?: Record<string, number> },
-  fn: () => Promise<void>
+  // `fetchedBlobs` is the list of file paths whose blob was actually requested, in
+  // order. A cap is only proven by the request that was NOT made: files_scanned is
+  // the tool's own account of itself, and a cap that reported 1 while fetching 3
+  // would still burn three requests of the quota the cap exists to protect.
+  fn: (fetchedBlobs: string[]) => Promise<void>
 ) {
   const original = globalThis.fetch;
+  const fetchedBlobs: string[] = [];
   globalThis.fetch = (async (url: string) => {
     const { pathname } = new URL(url);
     if (pathname === REPO_PATH) return new Response(JSON.stringify({ default_branch: "main" }), { status: 200 });
@@ -60,6 +65,7 @@ async function withFetch(
     const m = pathname.match(/\/git\/blobs\/sha(\d+)$/);
     if (m) {
       const path = opts.paths[Number(m[1])];
+      fetchedBlobs.push(path);
       const status = opts.blobStatus?.[path];
       if (status) return new Response(JSON.stringify({ message: "boom" }), { status });
       return new Response(JSON.stringify(blob(opts.contents[path] ?? "")), { status: 200 });
@@ -67,7 +73,7 @@ async function withFetch(
     return new Response("unrouted", { status: 500 });
   }) as typeof fetch;
   try {
-    await fn();
+    await fn(fetchedBlobs);
   } finally {
     globalThis.fetch = original;
   }
@@ -158,5 +164,78 @@ test("a clean zero-result scan reports no unreadable files at all", async () => 
     };
     assert.equal(r.total_results, 0);
     assert.equal(r.unreadable_files, undefined, "a genuinely empty result stays clean");
+  });
+});
+
+// ---- the quota cap (quality audit 6.4) --------------------------------------
+//
+// max_files is the only thing standing between one search_code call and the App
+// installation's hourly quota, because the cost is one HTTP request per candidate
+// file FETCHED. The 5,000-entry tree refusal does not cover it: a tree of 4,000
+// files is accepted and would be 4,000 blob GETs. Until now nothing tested the cap
+// at all, so an off-by-one in `filesScanned >= maxFiles` would have shipped, and
+// its symptom is quota exhaustion for every later call by any tool, not a wrong
+// answer here.
+
+const THREE = ["a.ts", "b.ts", "c.ts"];
+const CONTENTS = { "a.ts": "needle here", "b.ts": "needle again", "c.ts": "needle third" };
+
+test("max_files 1 stops after ONE blob and reports where to resume", async () => {
+  await withFetch({ paths: THREE, contents: CONTENTS }, async (fetchedBlobs) => {
+    const result = await searchCode(makeEnv(), "ns", "needle", { maxFiles: 1 });
+    // The cap is proven by the request that was not made.
+    assert.deepEqual(fetchedBlobs, ["a.ts"], "the cap did not stop the scan: it fetched more than one blob");
+    assert.equal(result.candidates, 3);
+    assert.equal(result.files_scanned, 1);
+    assert.equal(result.truncated, true);
+    assert.equal(result.next_start, 1, "next_start must name the first UNSEARCHED file");
+    assert.match(result.note ?? "", /max_files cap \(1\)/);
+    assert.match(result.note ?? "", /2 of 3 candidate files were not searched/);
+  });
+});
+
+test("resuming at next_start scans the next file and nothing before it", async () => {
+  await withFetch({ paths: THREE, contents: CONTENTS }, async (fetchedBlobs) => {
+    const result = await searchCode(makeEnv(), "ns", "needle", { maxFiles: 1, start: 1 });
+    assert.deepEqual(fetchedBlobs, ["b.ts"], "a resumed scan re-read a file it had already searched");
+    assert.equal(result.start, 1);
+    assert.equal(result.files_scanned, 1);
+    assert.equal(result.next_start, 2);
+    assert.equal(result.items[0]?.path, "b.ts");
+  });
+});
+
+test("the last page is not reported as truncated", async () => {
+  // The boundary the off-by-one lives at: after the third file there is nothing
+  // left, so truncated must be false and next_start must be absent. A cap that
+  // reports more work when there is none sends a caller into an endless resume.
+  await withFetch({ paths: THREE, contents: CONTENTS }, async (fetchedBlobs) => {
+    const result = await searchCode(makeEnv(), "ns", "needle", { maxFiles: 1, start: 2 });
+    assert.deepEqual(fetchedBlobs, ["c.ts"]);
+    assert.equal(result.truncated, false);
+    assert.equal(result.next_start, undefined);
+    assert.equal(result.note, undefined);
+  });
+});
+
+test("max_results stops the scan too, and says more may exist", async () => {
+  await withFetch({ paths: THREE, contents: CONTENTS }, async (fetchedBlobs) => {
+    const result = await searchCode(makeEnv(), "ns", "needle", { maxResults: 1 });
+    assert.equal(result.total_results, 1);
+    assert.deepEqual(fetchedBlobs, ["a.ts"], "the result cap did not stop the scan fetching further blobs");
+    assert.equal(result.truncated, true);
+    assert.match(result.note ?? "", /max_results cap/);
+  });
+});
+
+test("an uncapped scan of the same tree reads everything, so the caps are what stopped it", async () => {
+  // The negative control. Without it, every assertion above could be passing
+  // because the fixture only ever had one readable file.
+  await withFetch({ paths: THREE, contents: CONTENTS }, async (fetchedBlobs) => {
+    const result = await searchCode(makeEnv(), "ns", "needle", {});
+    assert.deepEqual(fetchedBlobs, THREE);
+    assert.equal(result.files_scanned, 3);
+    assert.equal(result.total_results, 3);
+    assert.equal(result.truncated, false);
   });
 });

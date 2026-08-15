@@ -395,7 +395,7 @@ function testPem(): Promise<string> {
       true,
       ["sign", "verify"]
     )) as CryptoKeyPair;
-    const der = new Uint8Array(await crypto.subtle.exportKey("pkcs8", pair.privateKey));
+    const der = new Uint8Array((await crypto.subtle.exportKey("pkcs8", pair.privateKey)) as ArrayBuffer);
     let binary = "";
     for (const byte of der) binary += String.fromCharCode(byte);
     return `-----BEGIN PRIVATE KEY-----\n${btoa(binary)}\n-----END PRIVATE KEY-----`;

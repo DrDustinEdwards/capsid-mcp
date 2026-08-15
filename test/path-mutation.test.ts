@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
+import { join } from "node:path";
 
 // document_links stores (namespace, path) strings, not documents.id, and the
 // table carries no foreign key, so the database will not keep edges in step with
@@ -22,13 +23,13 @@ import { test } from "node:test";
 // defect arrived three times in places nobody predicted. A path mutation in
 // backup.ts, or in a new module, was invisible to it. Nothing stops a helper in
 // links.ts from renaming a document.
-const SRC_DIR = new URL("../src/", import.meta.url);
+const SRC_DIR = join(import.meta.dirname, "..", "src");
 
 function sourceFiles(): Array<{ name: string; text: string }> {
   return readdirSync(SRC_DIR)
     .filter((f) => f.endsWith(".ts"))
     .sort()
-    .map((name) => ({ name, text: readFileSync(new URL(name, SRC_DIR), "utf8") }));
+    .map((name) => ({ name, text: readFileSync(join(SRC_DIR, name), "utf8") }));
 }
 
 const SOURCES = sourceFiles();
@@ -153,7 +154,7 @@ test("all three known callers route through the helper", () => {
 });
 
 test("document_links still has no foreign key, which is why the helper exists", () => {
-  const migration = readFileSync(new URL("../migrations/0002_document_links.sql", import.meta.url), "utf8");
+  const migration = readFileSync(join(import.meta.dirname, "..", "migrations", "0002_document_links.sql"), "utf8");
   assert.ok(/CREATE TABLE IF NOT EXISTS document_links/i.test(migration));
   assert.ok(
     !/REFERENCES\s+documents/i.test(migration),

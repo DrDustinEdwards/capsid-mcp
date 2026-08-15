@@ -23,34 +23,19 @@
 
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
+import { APP_KV, D1, GITHUB_APP_CLIENT_ID, OAUTH_KV, R2 } from "./bindings.mjs";
 
-// Pinned from capsid/core.md. If a binding legitimately moves, this file is the
-// one place to change, and the change is reviewable in the diff.
+// Pinned in scripts/bindings.mjs, which is the ONE place a binding id is written
+// (quality audit 5.1). It is imported rather than repeated here because
+// scripts/reap-probe-clients.mjs needs the same OAuth KV id, and two copies meant
+// a rotation could update the deploy assertion and leave the live job's cleanup
+// deleting from the old keyspace.
 const EXPECTED = {
-  d1: { name: "capsid", id: "f24921c8-5e6f-499e-96a1-f124f52f12f7" },
-  // TWO KV NAMESPACES, asserted INDEPENDENTLY as of 2026-08-15. They were one id
-  // behind two binding names until the split, and this script pinned it once. That
-  // was not merely redundant: with a single pin and a single placeholder, CI could
-  // not have produced two different ids, so the split would have failed on its own
-  // deploy. Each binding now resolves by its own title and is checked against its
-  // own pinned id.
-  //
-  // appKv holds ONLY the Worker's own caches (gh:install, gh:token, gh:get).
-  // oauthKv holds the provider's client/grant/token keys and this Worker's
-  // capsid:oauth-state, which uses the OAUTH_KV binding and therefore stays.
-  //
-  // Resolution is by EXACT TITLE and refuses ambiguity, which matters here: the
-  // account also contains a namespace literally titled "OAUTH_KV" belonging to
-  // dustinedwards-mcp. Neither title below can match it.
-  appKv: { name: "capsid-app-kv-v2", id: "21465e558b464cbf893753d2b2cb7829" },
-  oauthKv: { name: "capsid-app-kv", id: "5fac20b95ad541a39f24eb8c5a753b6c" },
-  r2: { name: "capsid-media" },
-  // Public identifier. It appears in every OAuth URL the App generates and in
-  // wrangler's own deploy output. It is pinned here because wrangler would
-  // otherwise write the example's placeholder over the live value: keep_vars
-  // preserves vars that are ABSENT from config, not ones present with a wrong
-  // value, and a placeholder client id would break every repo tool.
-  githubAppClientId: "Iv23lik2O8SPPksxbc6O",
+  d1: D1,
+  appKv: APP_KV,
+  oauthKv: OAUTH_KV,
+  r2: R2,
+  githubAppClientId: GITHUB_APP_CLIENT_ID,
 };
 
 // Refuse to run outside CI. This script WRITES wrangler.jsonc, and on a
