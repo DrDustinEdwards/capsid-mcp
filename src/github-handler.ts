@@ -1,8 +1,9 @@
 import type { AuthRequest } from "@cloudflare/workers-oauth-provider";
 import { createMcpHandler } from "agents/mcp";
-import { isAdminUser, operatorGrant, operatorIdentity, sha256Hex } from "./auth";
+import { isAdminUser, operatorGrant, operatorIdentity, sha256Hex, timingSafeEqual } from "./auth";
 import { runBackup } from "./backup";
-import { REPORT_PATH } from "./headers";
+import { b64urlDecode, b64urlEncode, bytesToHex } from "./encoding";
+import { REPORT_PATH, REPORT_PREFIX } from "./headers";
 import { buildServer, type Env } from "./server";
 import { probeFts } from "./store-probe";
 
@@ -31,20 +32,6 @@ function getCookie(request: Request, name: string): string | null {
   return null;
 }
 
-function b64urlEncode(text: string): string {
-  const bytes = new TextEncoder().encode(text);
-  let binary = "";
-  for (const b of bytes) binary += String.fromCharCode(b);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-function b64urlDecode(encoded: string): string {
-  const b64 = encoded.replace(/-/g, "+").replace(/_/g, "/");
-  const binary = atob(b64);
-  const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
-  return new TextDecoder().decode(bytes);
-}
-
 async function hmacHex(secret: string, payload: string): Promise<string> {
   const key = await crypto.subtle.importKey(
     "raw",
@@ -54,7 +41,7 @@ async function hmacHex(secret: string, payload: string): Promise<string> {
     ["sign"]
   );
   const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload));
-  return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return bytesToHex(sig);
 }
 
 async function approvedClients(request: Request, secret: string): Promise<string[]> {
@@ -64,7 +51,7 @@ async function approvedClients(request: Request, secret: string): Promise<string
   if (dot === -1) return [];
   const sig = raw.slice(0, dot);
   const payload = raw.slice(dot + 1);
-  if (sig !== (await hmacHex(secret, payload))) return [];
+  if (!timingSafeEqual(sig, await hmacHex(secret, payload))) return [];
   try {
     const parsed = JSON.parse(b64urlDecode(payload));
     return Array.isArray(parsed) ? parsed.filter((v) => typeof v === "string") : [];
@@ -201,7 +188,7 @@ async function handleAuthorizePost(request: Request, env: Env): Promise<Response
   const req = form.get("req");
   if (typeof csrf !== "string" || typeof req !== "string") return textResponse("bad request", 400);
   const csrfCookie = getCookie(request, CSRF_COOKIE);
-  if (!csrfCookie || csrfCookie !== csrf) return textResponse("csrf validation failed: restart the flow", 403);
+  if (!csrfCookie || !timingSafeEqual(csrfCookie, csrf)) return textResponse("csrf validation failed: restart the flow", 403);
   let oauthReq: AuthRequest;
   try {
     oauthReq = JSON.parse(b64urlDecode(req)) as AuthRequest;
@@ -227,7 +214,7 @@ async function handleCallback(request: Request, env: Env): Promise<Response> {
   if (!code || !stateToken) return textResponse("missing code or state", 400);
 
   const stateCookie = getCookie(request, STATE_COOKIE);
-  if (!stateCookie || stateCookie !== (await sha256Hex(stateToken))) {
+  if (!stateCookie || !timingSafeEqual(stateCookie, await sha256Hex(stateToken))) {
     return textResponse("state validation failed: this browser did not start the flow. Restart from your MCP client.", 403);
   }
   const stateKey = `${STATE_KV_PREFIX}${stateToken}`;
@@ -350,7 +337,6 @@ async function handleBackup(request: Request, env: Env): Promise<Response> {
 // rate-limiting rule on this path. Everything above bounds what one request can
 // store; none of it bounds how many requests arrive. That belongs at the edge.
 const CSP_REPORT_MAX_BYTES = 16384;
-const CSP_REPORT_PREFIX = "reports/csp/";
 // application/csp-report is the legacy report-uri type; application/reports+json is
 // the Reporting API type, which is what the COOP trial sends.
 const CSP_REPORT_TYPES = ["application/csp-report", "application/reports+json"];
@@ -424,7 +410,7 @@ async function handleCspReport(request: Request, env: Env): Promise<Response> {
   // "The specified key does not exist" against an object that is present, which
   // is exactly what happened while verifying this endpoint on 2026-08-12.
   const ray = request.headers.get("cf-ray") ?? crypto.randomUUID();
-  const key = `${CSP_REPORT_PREFIX}${now.toISOString().slice(0, 10)}/${ray}.json`;
+  const key = `${REPORT_PREFIX}${now.toISOString().slice(0, 10)}/${ray}.json`;
   const summary = summarizeReport(parsed);
 
   console.log(

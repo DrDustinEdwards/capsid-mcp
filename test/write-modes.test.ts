@@ -158,3 +158,64 @@ test("patch treats find as a literal, not a regex", () => {
   });
   assert.deepEqual(r, { body: "cost is $6.00 (exact)" });
 });
+
+// ---- F19: the replacement is literal, not a substitution pattern ------------
+//
+// String.replace reads $ sequences in the REPLACEMENT even when the pattern is a
+// plain string, so the old implementation silently rewrote the caller's text and
+// still reported success. These are the four sequences, plus the prose case that
+// makes this a live risk rather than a curiosity: canon carries dollar amounts.
+
+test("patch treats every $ substitution sequence in replace_with literally", () => {
+  const cases: Array<[string, string]> = [
+    ["$&", "$&"],
+    ["$`", "$`"],
+    ["$'", "$'"],
+    ["$$", "$$"],
+    ["a $& b $` c $' d $$ e", "a $& b $` c $' d $$ e"],
+    ["$1 $2 $<name>", "$1 $2 $<name>"],
+  ];
+  for (const [replacement, expected] of cases) {
+    const result = assembleBody({
+      mode: "patch",
+      exists: true,
+      priorBody: "before ANCHOR after",
+      find: "ANCHOR",
+      replace_with: replacement,
+    });
+    assert.deepEqual(result, { body: `before ${expected} after` }, `replace_with ${JSON.stringify(replacement)} was rewritten`);
+  }
+});
+
+test("patch keeps a realistic canon fragment byte-exact", () => {
+  // NOTE, and it is the point of this test: an ordinary dollar amount does NOT
+  // trigger the bug. $5 and $0 are left alone by String.replace, because only
+  // $&, $`, $', $$ and $1..$99 mean anything. A "realistic fragment with a
+  // dollar amount" therefore passes against the BROKEN code, which is how a test
+  // like this ends up asserting nothing. The realistic triggers are the ones
+  // below: $'000 is the accounting convention for thousands, $$ is a shell PID,
+  // and $& turns up the moment canon documents this very defect.
+  const NL = String.fromCharCode(10);
+  const before = "# Costs" + NL + NL;
+  const after = NL + NL + "Ruled 2026-08-13.";
+  const replacement =
+    "Storage runs to $'000s a year at $5/month per seat. The prune logs $$ and the " +
+    "old patch path rewrote $& into the matched text, which is why this line exists.";
+  const result = assembleBody({
+    mode: "patch",
+    exists: true,
+    priorBody: before + "PLACEHOLDER" + after,
+    find: "PLACEHOLDER",
+    replace_with: replacement,
+  });
+  // Expected is CONCATENATED, not produced by any replace(), so the assertion
+  // cannot inherit the behaviour it is checking.
+  assert.deepEqual(result, { body: before + replacement + after });
+  assert.ok("body" in result);
+  assert.ok(result.body.includes("$'000s"));
+  assert.ok(result.body.includes("$$ and the"));
+  assert.ok(result.body.includes("rewrote $& into"));
+  // Nothing from elsewhere in the document was pulled into the replacement.
+  assert.equal(result.body.split("Ruled 2026-08-13.").length - 1, 1);
+  assert.equal(result.body.split("# Costs").length - 1, 1);
+});

@@ -578,3 +578,31 @@ test("manage_pr close patches the PR state to closed", async () => {
     }
   );
 });
+
+// ---- F25: a corrupt repos row fails closed ----------------------------------
+
+test("resolveRepo names a corrupt repos mapping instead of reporting none", async () => {
+  const env = {
+    DB: { prepare: () => ({ bind: () => ({ first: async () => ({ repos: "{not json" }) }) }) },
+    APP_KV: fakeKv().kv,
+  } as never;
+  await assert.rejects(() => resolveRepo(env, "ns"), /CORRUPT repos mapping/);
+});
+
+test("resolveRepo refuses a repos value that parses but is not an array", async () => {
+  const env = {
+    DB: { prepare: () => ({ bind: () => ({ first: async () => ({ repos: '{"repo":"o/r"}' }) }) }) },
+    APP_KV: fakeKv().kv,
+  } as never;
+  await assert.rejects(() => resolveRepo(env, "ns"), /CORRUPT repos mapping/);
+});
+
+test("an empty mapping still reports as unconfigured, not as corrupt", async () => {
+  // The two states must stay distinguishable in both directions, or the fix has
+  // just moved the confusion.
+  const env = {
+    DB: { prepare: () => ({ bind: () => ({ first: async () => ({ repos: "[]" }) }) }) },
+    APP_KV: fakeKv().kv,
+  } as never;
+  await assert.rejects(() => resolveRepo(env, "ns"), /has no repo mapping/);
+});

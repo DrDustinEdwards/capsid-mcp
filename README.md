@@ -1,8 +1,8 @@
 # Capsid
 
-Capsid is a single-user, Cloudflare-native MCP server that serves a consolidated knowledge base from D1 and R2, and reaches your GitHub repositories directly. It speaks MCP over Streamable HTTP and exposes a small, purposeful tool set (22 tools):
+Capsid is a single-user, Cloudflare-native MCP server that serves a consolidated knowledge base from D1 and R2, and reaches your GitHub repositories directly. It speaks MCP over Streamable HTTP and exposes a small, purposeful tool set (24 tools):
 
-- **Documents:** list, read, write, delete, move, find, search (FTS5, with a plain-text fallback when a query is not valid FTS5 syntax), namespaces, backlinks (typed edges), brief (one-call session start)
+- **Documents:** list, read, write, delete, move, find, search (FTS5, with a plain-text fallback when a query is not valid FTS5 syntax), namespaces, backlinks (typed edges), brief (one-call session start), history and restore (read a retained version back, and write one back through a guarded path)
 - **Repo access:** list_repo_tree, read_repo_file, search_code, write_repo_file, create_branch, open_pr, delete_repo_file, manage_pr, ci_status (CI runs via the GitHub App)
 - **Maintenance:** lint (the consolidation loop), register_namespace (create), update_namespace (remap)
 
@@ -20,7 +20,7 @@ All access is gated. Human clients (claude.ai, MCP Inspector) authenticate via G
 - A separate GitHub App for repo access, minting short-lived installation tokens
 - D1 for documents, versions, namespaces, and audit log, with FTS5 full text search
 - R2 (`MEDIA` binding) for media
-- KV (`APP_KV` binding) for app state, plus an `OAUTH_KV` binding for OAuth tokens
+- KV, TWO SEPARATE namespaces: `APP_KV` for the Worker's own caches, and `OAUTH_KV` for the OAuth provider's clients, grants and tokens. They must not be the same namespace (see Clone setup)
 
 ## Knowledge model
 
@@ -63,7 +63,7 @@ The `lint` tool runs the wiki maintenance loop. The Worker never calls an LLM; t
 - `GET /authorize`, `POST /authorize`, `GET /callback` GitHub OAuth flow
 - `POST /token`, `POST /register` OAuth token exchange and dynamic client registration (served by the library)
 - `GET /.well-known/oauth-authorization-server` and `GET /.well-known/oauth-protected-resource` OAuth discovery metadata (served by the library)
-- `GET /health` returns `ok`, no auth
+- `GET /health` no auth. Reports deploy provenance (the git sha, whether the tree was dirty, the build time) and PROBES THE STORE: a `SELECT 1` against D1 plus an FTS5 MATCH pinned to one known document. Either probe failing returns 503 with `status: "degraded"` and a `store` object naming which one, because a Worker whose bindings resolved to nothing starts perfectly and would otherwise answer a cheerful `ok` while every read tool errors
 
 ## Auth model
 
@@ -76,7 +76,9 @@ Login and repo access use two different GitHub credentials: a GitHub **OAuth App
 
 ## Destructive writes need confirmation
 
-`delete`, and any `write` that would overwrite an existing document, ask for confirmation first. When the connected client supports [MCP elicitation](https://modelcontextprotocol.io/specification/draft/client/elicitation), the server sends an elicitation request and proceeds only on an explicit accept. Most Streamable HTTP clients run stateless and cannot answer server-initiated requests, so the fallback applies: the tool rejects with a clear message and you re-run it with `confirm: true`. Creating a brand new document never needs confirmation.
+`delete`, `move`, `restore`, `lint` finalize, and any `write` that would overwrite an existing document, all ask for confirmation first. When the connected client supports [MCP elicitation](https://modelcontextprotocol.io/specification/draft/client/elicitation), the server sends an elicitation request and proceeds only on an explicit accept. Most Streamable HTTP clients run stateless and cannot answer server-initiated requests, so the fallback applies: the tool rejects with a clear message and you re-run it with `confirm: true`. Creating a brand new document never needs confirmation.
+
+`move` and `lint` finalize joined this list on 2026-08-17. Both rename documents (finalize renames many at once) and neither leaves a snapshot of the old path to recover from, only an audit row, so they are the destructive-class operations with the least undo, not the most.
 
 Deletes are never unrecoverable at the data layer: every delete (and every overwrite) snapshots the prior row into `document_versions` first, so recovery exists regardless of how the confirmation went.
 
@@ -130,10 +132,11 @@ Single-document recovery rarely needs any of this. Every overwrite and delete sn
    ```
    npx wrangler d1 create capsid
    npx wrangler kv namespace create APP_KV
+   npx wrangler kv namespace create OAUTH_KV
    npx wrangler r2 bucket create capsid-media
    ```
 
-3. Copy the config template and fill in your IDs from step 2. The `OAUTH_KV` binding can reuse the same KV namespace id as `APP_KV` (the OAuth library prefixes all of its keys), or point at a dedicated namespace if you prefer:
+3. Copy the config template and fill in your IDs from step 2. **`APP_KV` and `OAUTH_KV` must be two different KV namespaces.** They were one for a while here, on the reasoning that the OAuth library prefixes its keys, and that is exactly why it is worth stating: sharing one namespace puts the Worker's own cache entries and every OAuth client, grant and token in a single blast radius, so any sweep, reaper or bulk delete written against one set can reach the other. Nothing in the code enforces the split, so the config is the only place it exists:
 
    ```
    cp wrangler.jsonc.example wrangler.jsonc

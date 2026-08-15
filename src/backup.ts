@@ -1,4 +1,5 @@
 import type { Env } from "./server";
+import { REPORT_PREFIX } from "./headers";
 import { probeFts } from "./store-probe";
 
 const JSON_PREFIX = "backups/json/";
@@ -61,7 +62,6 @@ const AUDIT_RETENTION_DAYS = 180;
 // The trials are read for a promotion decision, and a decision reads recent
 // evidence: an unbounded prefix on a public unauthenticated write path is a growth
 // surface, not an archive. Nothing else prunes it, which is why the cron does.
-const REPORT_PREFIX = "reports/csp/";
 const REPORT_RETENTION_DAYS = 30;
 
 // Both prefixes carry an ISO date at a fixed offset (backups/json/YYYY-MM-DD..., and

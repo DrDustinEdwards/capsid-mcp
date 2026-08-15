@@ -26,6 +26,7 @@ import { normalizeDashes } from "./normalize";
 import { parseLinks } from "./links";
 import { validateDocStatus, validateDocType } from "./doc-meta";
 import { authoritativeFor, scanCountClaims } from "./counts";
+import { bounded, docPath, MAX_BODY, MAX_COMMIT_MESSAGE, MAX_DOC_TYPE, MAX_GLOB, MAX_LINKS_JSON, MAX_PATH, MAX_PR_BODY, MAX_PR_TITLE, MAX_QUERY, MAX_REF, MAX_REPO_SELECTOR, MAX_REPOS_JSON, MAX_SHA, MAX_TAGS, MAX_TITLE, nsName } from "./limits";
 import { assembleBody } from "./write-modes";
 
 export interface Env {
@@ -321,6 +322,26 @@ async function confirmDestructive(server: McpServer, message: string): Promise<C
   }
 }
 
+// THE CONFIRMATION BLOCK, ONCE (audit 2, F25). Four call sites wrote the same
+// three-branch dance (accepted, declined, unsupported) around confirmDestructive,
+// and each carried its own wording for the two refusals, so "is this tool
+// confirmed?" could only be answered by reading four places. Returns a caller
+// facing error string, or null to proceed.
+//
+// The messages stay per tool because they are the instruction the caller acts on:
+// a generic "confirmation required" does not say which argument to add or what
+// will happen when they do.
+async function requireConfirmation(
+  server: McpServer,
+  confirm: boolean | undefined,
+  messages: { prompt: string; declined: string; unsupported: string }
+): Promise<string | null> {
+  if (confirm === true) return null;
+  const verdict = await confirmDestructive(server, messages.prompt);
+  if (verdict === "accepted") return null;
+  return verdict === "declined" ? messages.declined : messages.unsupported;
+}
+
 // `actor` is the principal that will be recorded on every audit_log row this
 // server writes. It replaces a hardcoded 'operator' string that every one of the
 // eight audit write sites used, which meant the column answered "what happened"
@@ -342,9 +363,9 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
     {
       description: "List documents with optional namespace, type, and status filters. Returns metadata rows without bodies: id, namespace, path, title, type, status, tags and timestamps.",
       inputSchema: {
-        namespace: z.string().optional(),
-        type: z.string().optional(),
-        status: z.string().optional(),
+        namespace: nsName.optional(),
+        type: bounded(MAX_DOC_TYPE).optional(),
+        status: bounded(MAX_DOC_TYPE).optional(),
       },
     },
     async ({ namespace, type, status }) => {
@@ -373,7 +394,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
     "read",
     {
       description: "Read a full document by namespace and path.",
-      inputSchema: { namespace: z.string(), path: z.string() },
+      inputSchema: { namespace: nsName, path: docPath },
     },
     async ({ namespace, path }) => {
       const row = await db
@@ -392,7 +413,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
     {
       description:
         "One-call session start for a namespace. Returns capsid/conventions.md, capsid/repo-structure.md, the namespace core.md, its open task docs (non-archived and not status closed), the 3 most recent episodics, and the typed edges on core.md, each with updated_at so staleness shows. Read-only assembly, no reasoning. Size-bounded near 40KB; if trimmed, the `trimmed` field lists what was dropped to metadata. Doing the start-ritual reads by hand stays a valid fallback.",
-      inputSchema: { namespace: z.string() },
+      inputSchema: { namespace: nsName },
     },
     async ({ namespace }) => {
       const BUDGET = 40_000;
@@ -499,24 +520,24 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       description:
         "Create or update a document. Snapshots the prior version and writes an audit log entry. mode selects how body is applied: 'replace' (default, full body, needs title and body), 'append' (body is added to the end of the existing document, no title needed, no confirmation needed because nothing is overwritten), 'patch' (replace an anchored region: needs find and replace_with, and find must occur EXACTLY ONCE or the write is refused), or 'meta' (change type, tags, status or title and leave the body byte-identical, normalization included; use this to close a task or correct a document's type). append, patch and meta exist so amending a large document does not mean retranscribing it. Every response carries sha256 and bytes of the resulting body, so a write can be verified without reading the document back. Optional if_match: the sha256 of the body you believe is stored (the value a previous read-back or write returned). When it does not match the stored body the write is REFUSED and the error carries the current sha256, so a concurrent edit cannot be silently overwritten. Overwriting with replace or patch needs confirmation: the server elicits it when the client supports elicitation, otherwise pass confirm: true. Optional links: a JSON array of typed outgoing edges [{\"type\":\"references\",\"to_path\":\"decisions.md\",\"to_ns\":\"capsid\"}] (types: governs, references, supersedes, replaces, depends-on; to_ns defaults to this namespace). When provided it replaces this document's outgoing edges; omit it to leave edges untouched; pass [] to clear them. Read edges with backlinks.",
       inputSchema: {
-        namespace: z.string(),
-        path: z.string(),
+        namespace: nsName,
+        path: docPath,
         // title and body are required for mode 'replace' and validated as such
         // below. They are optional in the schema because append needs no title
         // and patch needs neither: making them required here would force a
         // caller to resupply a title it is not changing, which is the
         // retranscription this mode exists to remove.
-        title: z.string().optional(),
-        body: z.string().optional(),
+        title: bounded(MAX_TITLE).optional(),
+        body: bounded(MAX_BODY).optional(),
         mode: z.enum(["replace", "append", "patch", "meta"]).optional(),
-        find: z.string().optional(),
-        replace_with: z.string().optional(),
-        type: z.string().optional(),
-        tags: z.string().optional(),
-        status: z.string().optional(),
+        find: bounded(MAX_BODY).optional(),
+        replace_with: bounded(MAX_BODY).optional(),
+        type: bounded(MAX_DOC_TYPE).optional(),
+        tags: bounded(MAX_TAGS).optional(),
+        status: bounded(MAX_DOC_TYPE).optional(),
         confirm: z.boolean().optional(),
-        links: z.string().optional(),
-        if_match: z.string().optional(),
+        links: bounded(MAX_LINKS_JSON).optional(),
+        if_match: bounded(MAX_SHA).optional(),
       },
     },
     async ({ namespace, path, title, body, mode, find, replace_with, type, tags, status, confirm, links, if_match }) => {
@@ -619,16 +640,12 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       // about a specific body and goes stale exactly like an if_match does.
       let elicited = false;
       if (prior && confirm !== true && writeMode !== "append" && writeMode !== "meta") {
-        const verdict = await confirmDestructive(
-          server,
-          `Overwrite ${namespace}/${path}? The current version will be snapshotted to document_versions first.`
-        );
-        if (verdict === "declined") return fail(`overwrite of ${namespace}/${path} declined`);
-        if (verdict === "unsupported") {
-          return fail(
-            `confirmation required: ${namespace}/${path} already exists. Re-run write with confirm: true to overwrite it. The current version will be snapshotted to document_versions first.`
-          );
-        }
+        const refusal = await requireConfirmation(server, confirm, {
+          prompt: `Overwrite ${namespace}/${path}? The current version will be snapshotted to document_versions first.`,
+          declined: `overwrite of ${namespace}/${path} declined`,
+          unsupported: `confirmation required: ${namespace}/${path} already exists. Re-run write with confirm: true to overwrite it. The current version will be snapshotted to document_versions first.`,
+        });
+        if (refusal) return fail(refusal);
         elicited = true;
       }
       const statements: D1PreparedStatement[] = [];
@@ -739,7 +756,14 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       try {
         await db.batch(statements);
       } catch (err) {
-        if (!isMissingRowAbort(err)) throw err;
+        // Every batch failure returns a clean refusal (audit 2, F30). This used to
+        // rethrow anything that was not a guard abort, so a D1 error escaped the
+        // handler as an exception while delete, move and finalize all answered
+        // with fail(). Same class of failure, two different shapes, and the
+        // caller had to know which tool it called to know what to expect.
+        if (!isMissingRowAbort(err)) {
+          return fail(`write failed, nothing was written: ${err instanceof Error ? err.message : String(err)}`);
+        }
         if (guard === "missing") {
           return fail(
             `create collision on ${namespace}/${path}: the document did not exist when this write started and it does now, so another writer created it first. ` +
@@ -773,17 +797,25 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       // The lint loop reports these per namespace; this is the same check at
       // the moment the edge is created.
       let danglingTargets: string[] = [];
+      let danglingCheckFailed: string | null = null;
       if (parsedLinks && "edges" in parsedLinks && parsedLinks.edges.length > 0) {
-        const checks = await db.batch(
-          parsedLinks.edges.map((edge) =>
-            db
-              .prepare("SELECT 1 AS ok FROM documents WHERE namespace = ?1 AND path = ?2")
-              .bind(edge.to_ns, edge.to_path)
-          )
-        );
-        danglingTargets = parsedLinks.edges
-          .filter((_, i) => (checks[i].results?.length ?? 0) === 0)
-          .map((edge) => `${edge.to_ns}/${edge.to_path}`);
+        // This read runs AFTER the commit, so a failure here must not be reported
+        // as a failed write: the document is stored. Same shape as the audit
+        // warning in guardedWrite (F17).
+        try {
+          const checks = await db.batch(
+            parsedLinks.edges.map((edge) =>
+              db
+                .prepare("SELECT 1 AS ok FROM documents WHERE namespace = ?1 AND path = ?2")
+                .bind(edge.to_ns, edge.to_path)
+            )
+          );
+          danglingTargets = parsedLinks.edges
+            .filter((_, i) => (checks[i].results?.length ?? 0) === 0)
+            .map((edge) => `${edge.to_ns}/${edge.to_path}`);
+        } catch (err) {
+          danglingCheckFailed = err instanceof Error ? err.message : String(err);
+        }
       }
       // The read-back. sha256 and byte length of the body that is now stored, so
       // a caller can verify the write landed exactly as intended WITHOUT
@@ -839,7 +871,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
     {
       description:
         "List the retained versions of a document (newest first) from document_versions, or fetch one body by passing version_id. Snapshots are written by every overwrite and delete, so the history of a deleted document is still readable. Retention is 90 days; older snapshots live only in the R2 dumps. Read-only. Note the scope: a version records title and body, so a change to type, status or tags is not here, it is in the audit log.",
-      inputSchema: { namespace: z.string(), path: z.string(), version_id: z.number().int().positive().optional() },
+      inputSchema: { namespace: nsName, path: docPath, version_id: z.number().int().positive().optional() },
     },
     async ({ namespace, path, version_id }) => {
       if (version_id !== undefined) {
@@ -883,11 +915,11 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       description:
         "Restore a document's title and body from one of its retained versions (see history). It carries the same two write-path invariants as write: the CURRENT body is snapshotted to document_versions first and the restore is appended to audit_log, so a restore is itself undoable. It is NOT the write tool's code path and differs from it deliberately: the snapshotted bytes go back exactly as they were stored, with no dash normalization, and type, status, tags and links are neither validated nor restored, because a version row does not carry them. Restoring a deleted document recreates it. Optional if_match: the sha256 of the body you believe is live now, enforced as a commit-time predicate, so a restore cannot land on a body that changed after you read it. Requires operator key and confirm: true.",
       inputSchema: {
-        namespace: z.string(),
-        path: z.string(),
+        namespace: nsName,
+        path: docPath,
         version_id: z.number().int().positive(),
         confirm: z.boolean().optional(),
-        if_match: z.string().optional(),
+        if_match: bounded(MAX_SHA).optional(),
       },
     },
     async ({ namespace, path, version_id, confirm, if_match }) => {
@@ -920,18 +952,12 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
           );
         }
       }
-      if (confirm !== true) {
-        const verdict = await confirmDestructive(
-          server,
-          `Restore ${namespace}/${path} to the version snapshotted at ${version.snapshot_at}? The current body will be snapshotted first.`
-        );
-        if (verdict === "declined") return fail(`restore of ${namespace}/${path} declined`);
-        if (verdict === "unsupported") {
-          return fail(
-            `confirmation required: re-run restore with confirm: true to overwrite ${namespace}/${path} with version ${version_id} (snapshotted ${version.snapshot_at}). The current body will be snapshotted first.`
-          );
-        }
-      }
+      const restoreRefusal = await requireConfirmation(server, confirm, {
+        prompt: `Restore ${namespace}/${path} to the version snapshotted at ${version.snapshot_at}? The current body will be snapshotted first.`,
+        declined: `restore of ${namespace}/${path} declined`,
+        unsupported: `confirmation required: re-run restore with confirm: true to overwrite ${namespace}/${path} with version ${version_id} (snapshotted ${version.snapshot_at}). The current body will be snapshotted first.`,
+      });
+      if (restoreRefusal) return fail(restoreRefusal);
       // The stored body goes back EXACTLY as it was snapshotted, with no dash
       // normalization. A snapshot is a record of what the document said, and a
       // restore that quietly rewrote it would not be a restore.
@@ -983,7 +1009,14 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       try {
         await db.batch(statements);
       } catch (err) {
-        if (!isMissingRowAbort(err)) throw err;
+        // Every batch failure returns a clean refusal (audit 2, F30). This used to
+        // rethrow anything that was not a guard abort, so a D1 error escaped the
+        // handler as an exception while delete, move and finalize all answered
+        // with fail(). Same class of failure, two different shapes, and the
+        // caller had to know which tool it called to know what to expect.
+        if (!isMissingRowAbort(err)) {
+          return fail(`restore failed, nothing was written: ${err instanceof Error ? err.message : String(err)}`);
+        }
         if (guard === "missing") {
           return fail(
             `create collision on ${namespace}/${path}: it did not exist when this restore started and it does now, so another writer created it first. Nothing was written and that body is intact.`
@@ -1022,7 +1055,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
     {
       description:
         "Return the typed edges touching a document: outgoing (declared on this doc) and incoming (other docs pointing here). Edges are asserted via the write tool's links param. Read-only. Endpoints may be Capsid documents or repo files addressed as namespace/path.",
-      inputSchema: { namespace: z.string(), path: z.string() },
+      inputSchema: { namespace: nsName, path: docPath },
     },
     async ({ namespace, path }) => {
       const outgoing = await db
@@ -1045,7 +1078,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
     "delete",
     {
       description: "Delete a document. Snapshots it first and writes an audit log entry. Needs confirmation: the server elicits it when the client supports elicitation, otherwise pass confirm: true.",
-      inputSchema: { namespace: z.string(), path: z.string(), confirm: z.boolean().optional() },
+      inputSchema: { namespace: nsName, path: docPath, confirm: z.boolean().optional() },
     },
     async ({ namespace, path, confirm }) => {
       if (!operator) return fail(DENIED);
@@ -1056,18 +1089,12 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
         .bind(namespace, path)
         .first<{ id: number; title: string | null; body: string | null }>();
       if (!prior) return fail(`not found: ${namespace}/${path}`);
-      if (confirm !== true) {
-        const verdict = await confirmDestructive(
-          server,
-          `Delete ${namespace}/${path}? It will be snapshotted to document_versions first, so it can be recovered.`
-        );
-        if (verdict === "declined") return fail(`delete of ${namespace}/${path} declined`);
-        if (verdict === "unsupported") {
-          return fail(
-            `confirmation required: re-run delete with confirm: true to remove ${namespace}/${path}. It will be snapshotted to document_versions first.`
-          );
-        }
-      }
+      const deleteRefusal = await requireConfirmation(server, confirm, {
+        prompt: `Delete ${namespace}/${path}? It will be snapshotted to document_versions first, so it can be recovered.`,
+        declined: `delete of ${namespace}/${path} declined`,
+        unsupported: `confirmation required: re-run delete with confirm: true to remove ${namespace}/${path}. It will be snapshotted to document_versions first.`,
+      });
+      if (deleteRefusal) return fail(deleteRefusal);
       // Read the edges before pathMutation removes them: the audit row is the
       // only place they survive, since document_versions holds title and body
       // only.
@@ -1108,10 +1135,10 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
   server.registerTool(
     "move",
     {
-      description: "Rename a document path within its namespace. Audit logged. Requires operator key.",
-      inputSchema: { namespace: z.string(), path: z.string(), new_path: z.string() },
+      description: "Rename a document path within its namespace, repointing every typed edge that touches it. Audit logged. Needs confirmation: the server elicits it when the client supports elicitation, otherwise pass confirm: true. Requires operator key.",
+      inputSchema: { namespace: nsName, path: docPath, new_path: docPath, confirm: z.boolean().optional() },
     },
-    async ({ namespace, path, new_path }) => {
+    async ({ namespace, path, new_path, confirm }) => {
       if (!operator) return fail(DENIED);
       const nsError = await requireRegisteredNamespace(db, namespace);
       if (nsError) return fail(nsError);
@@ -1126,6 +1153,16 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
         .bind(namespace, path)
         .first<{ ok: number }>();
       if (!exists) return fail(`not found: ${namespace}/${path}`);
+      // move JOINS the confirmation as of 2026-08-17 (audit 2, F25 ruling). It is
+      // destructive-class and had none at all: it renames a document and repoints
+      // every edge that touches it, and unlike delete it leaves no snapshot of the
+      // old path to recover from, only an audit row.
+      const moveRefusal = await requireConfirmation(server, confirm, {
+        prompt: `Rename ${namespace}/${path} to ${namespace}/${new_path}? Edges pointing at the old path are repointed.`,
+        declined: `move of ${namespace}/${path} declined`,
+        unsupported: `confirmation required: re-run move with confirm: true to rename ${namespace}/${path} to ${new_path}.`,
+      });
+      if (moveRefusal) return fail(moveRefusal);
       const { results: movingEdges } = await edgesTouching(db, namespace, path).all();
       const repointed = movingEdges.length;
       // ONE batch: the guard, the rename, the edge repointing AND the audit row.
@@ -1159,7 +1196,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
     "find",
     {
       description: "Find documents whose path matches a glob pattern (SQLite GLOB, e.g. 'notes/*.md'). Optional namespace filter.",
-      inputSchema: { namespace: z.string().optional(), glob: z.string() },
+      inputSchema: { namespace: nsName.optional(), glob: bounded(MAX_GLOB) },
     },
     async ({ namespace, glob }) => {
       const { results } = await db
@@ -1180,9 +1217,9 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
     {
       description: "Full text search across all documents (FTS5, ranked by bm25). Optional namespace and type filters. This is the cross-project search.",
       inputSchema: {
-        query: z.string(),
-        namespace: z.string().optional(),
-        type: z.string().optional(),
+        query: bounded(MAX_QUERY),
+        namespace: nsName.optional(),
+        type: bounded(MAX_DOC_TYPE).optional(),
       },
     },
     async ({ query, namespace, type }) => {
@@ -1251,10 +1288,10 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       description:
         "Register a namespace by inserting its row in the namespaces table, so repo tools and the namespaces list can see it. Give repo as 'owner/name' (label defaults to 'primary'), or pass a repos JSON array like [{\"repo\":\"owner/name\",\"label\":\"primary\"}] for a multi-repo namespace. Create-only: it will not overwrite an existing namespace. Requires operator key.",
       inputSchema: {
-        namespace: z.string(),
-        repo: z.string().optional(),
-        label: z.string().optional(),
-        repos: z.string().optional(),
+        namespace: nsName,
+        repo: bounded(MAX_REPO_SELECTOR).optional(),
+        label: bounded(MAX_REPO_SELECTOR).optional(),
+        repos: bounded(MAX_REPOS_JSON).optional(),
       },
     },
     async ({ namespace, repo, label, repos }) => {
@@ -1305,7 +1342,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
     {
       description:
         "Remap an existing namespace's repos. Pass repos as a JSON array like [{\"repo\":\"owner/name\",\"label\":\"primary\"},{\"repo\":\"owner/legacy\",\"label\":\"legacy\"}], with exactly one entry labeled \"primary\". The namespace must already exist (use register_namespace to create). Snapshots the prior mapping to the audit log. Does NOT rename the namespace or move its documents. Requires operator key.",
-      inputSchema: { namespace: z.string(), repos: z.string() },
+      inputSchema: { namespace: nsName, repos: bounded(MAX_REPOS_JSON) },
     },
     async ({ namespace, repos }) => {
       if (!operator) return fail(DENIED);
@@ -1339,14 +1376,15 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
     "lint",
     {
       description:
-        "Consolidation loop for a namespace. mode 'gather' (default, read-only) returns the packet a driving LLM needs to compile the wiki: current core.md, the concept and decision docs, every unconsolidated episodic and source doc, and the capsid schema and conventions rules. After writing the updated core.md and concept docs via write, call mode 'finalize' with consumed: the episodic/source paths that were compiled. Finalize moves them under archive/ (never deletes, never touches core or concept docs) and writes one audit row. Finalize requires operator key.",
+        "Consolidation loop for a namespace. mode 'gather' (default, read-only) returns the packet a driving LLM needs to compile the wiki: current core.md, the concept and decision docs, every unconsolidated episodic and source doc, and the capsid schema and conventions rules. After writing the updated core.md and concept docs via write, call mode 'finalize' with consumed: the episodic/source paths that were compiled. Finalize moves them under archive/ (never deletes, never touches core or concept docs) and writes one audit row. Finalize requires operator key and confirmation: the server elicits it when the client supports elicitation, otherwise pass confirm: true.",
       inputSchema: {
-        namespace: z.string(),
+        namespace: nsName,
         mode: z.enum(["gather", "finalize"]).optional(),
-        consumed: z.array(z.string()).optional(),
+        consumed: z.array(docPath).optional(),
+        confirm: z.boolean().optional(),
       },
     },
-    async ({ namespace, mode, consumed }) => {
+    async ({ namespace, mode, consumed, confirm }) => {
       if ((mode ?? "gather") === "gather") {
         const core = await db
           .prepare("SELECT namespace, path, title, type, status, body, updated_at FROM documents WHERE namespace = ?1 AND path = 'core.md'")
@@ -1454,6 +1492,14 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
         }
       }
       if (problems.length > 0) return fail(`finalize aborted, nothing archived:\n${problems.join("\n")}`);
+      // finalize JOINS the confirmation too (audit 2, F25 ruling), and it is the
+      // widest mutation in this file: one call renames every consumed document.
+      const finalizeRefusal = await requireConfirmation(server, confirm, {
+        prompt: `Archive ${paths.length} document(s) in ${namespace} by moving them under archive/?`,
+        declined: `finalize of ${namespace} declined`,
+        unsupported: `confirmation required: re-run lint finalize with confirm: true to archive ${paths.length} document(s) in ${namespace}.`,
+      });
+      if (finalizeRefusal) return fail(finalizeRefusal);
       // Archiving is a rename to archive/<path>, so it goes through the same
       // helper as move and drags its edges along for the same reason.
       // Each path carries its own in-batch existence guard. The loop above
@@ -1516,10 +1562,30 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
     } catch (err) {
       return fail(err instanceof Error ? err.message : String(err));
     }
-    await db
-      .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES (?1, ?2, ?3, ?4, ?5)")
-      .bind(actor, action, namespace, path, JSON.stringify(result))
-      .run();
+    // THE MUTATION ALREADY LANDED (audit 2, F17). fn() has committed to GitHub by
+    // the time this row is written, and the audit INSERT is a separate statement
+    // that cannot be rolled into it. When it failed, the caller was told the tool
+    // failed, so the honest report of "the branch exists, the PR is open, and the
+    // log does not know" came out as "nothing happened". A caller acting on that
+    // retries, and the retry is a second commit.
+    //
+    // The D1-only tools do not need this: delete, move and finalize put the audit
+    // INSERT inside the same batch as the mutation, so there both land or neither
+    // does. GitHub cannot join that transaction.
+    try {
+      await db
+        .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES (?1, ?2, ?3, ?4, ?5)")
+        .bind(actor, action, namespace, path, JSON.stringify(result))
+        .run();
+    } catch (err) {
+      console.error(`AUDIT_INSERT_FAILED ${action} ${namespace}/${path ?? ""}: ${err instanceof Error ? err.message : String(err)}`);
+      return ok({
+        ...result,
+        audit_warning:
+          `THE ${action} SUCCEEDED and is described by this result, but the audit_log row could not be written: ` +
+          `${err instanceof Error ? err.message : String(err)}. Do not retry this call; the change is already made.`,
+      });
+    }
     return ok(result);
   };
 
@@ -1534,7 +1600,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
     "list_repo_tree",
     {
       description: "List a directory in a namespace's GitHub repo. Omit path for the repo root. Live GitHub, briefly cached.",
-      inputSchema: { namespace: z.string(), path: z.string().optional(), ref: z.string().optional(), repo: z.string().optional().describe(REPO_ARG) },
+      inputSchema: { namespace: nsName, path: bounded(MAX_PATH).optional(), ref: bounded(MAX_REF).optional(), repo: bounded(MAX_REPO_SELECTOR).optional().describe(REPO_ARG) },
     },
     ({ namespace, path, ref, repo }) => guarded(() => listRepoTree(env, namespace, path ?? "", ref, repo))
   );
@@ -1543,7 +1609,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
     "read_repo_file",
     {
       description: "Read a file from a namespace's GitHub repo, decoded to text. Optional ref (branch, tag, or sha). Live GitHub, briefly cached.",
-      inputSchema: { namespace: z.string(), path: z.string(), ref: z.string().optional(), repo: z.string().optional().describe(REPO_ARG) },
+      inputSchema: { namespace: nsName, path: bounded(MAX_PATH), ref: bounded(MAX_REF).optional(), repo: bounded(MAX_REPO_SELECTOR).optional().describe(REPO_ARG) },
     },
     ({ namespace, path, ref, repo }) => guarded(() => readRepoFile(env, namespace, path, ref, repo))
   );
@@ -1554,14 +1620,14 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       description:
         "Case-insensitive substring search across a namespace repo's files. Walks the repo tree and greps blobs server-side (GitHub's code-search index does not serve these private repos over an App token), so scope with path_prefix on large repos. Returns path, line number, and the matching line. When it stops early it sets truncated:true with a note explaining why and a next_start to resume from (or raise max_files); a truncated result is a partial scan, not an empty repo. namespace is required.",
       inputSchema: {
-        query: z.string(),
-        namespace: z.string(),
-        path_prefix: z.string().optional().describe("Only scan files whose path starts with this prefix, e.g. 'app/lib/billing'."),
-        ref: z.string().optional().describe("Branch, tag, or sha to search. Defaults to the default branch."),
+        query: bounded(MAX_QUERY),
+        namespace: nsName,
+        path_prefix: bounded(MAX_PATH).optional().describe("Only scan files whose path starts with this prefix, e.g. 'app/lib/billing'."),
+        ref: bounded(MAX_REF).optional().describe("Branch, tag, or sha to search. Defaults to the default branch."),
         max_results: z.number().int().positive().optional().describe("Cap on returned matches (default 20, max 200)."),
         max_files: z.number().int().positive().optional().describe("Cap on files fetched and scanned (default 200, max 200). A wider sweep resumes with start, because each file costs one GitHub request against the App installation's quota; narrowing path_prefix is cheaper."),
         start: z.number().int().nonnegative().optional().describe("Candidate-file offset to resume a truncated scan; pass the previous result's next_start."),
-        repo: z.string().optional().describe(REPO_ARG),
+        repo: bounded(MAX_REPO_SELECTOR).optional().describe(REPO_ARG),
       },
     },
     ({ query, namespace, path_prefix, ref, max_results, max_files, start, repo }) =>
@@ -1583,13 +1649,13 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       description:
         "Write a file to a namespace's GitHub repo. mode 'pr' (default) commits to a new branch and opens a PR; mode 'direct' commits straight to the default branch. Requires operator key.",
       inputSchema: {
-        namespace: z.string(),
-        path: z.string(),
-        content: z.string(),
-        message: z.string(),
+        namespace: nsName,
+        path: bounded(MAX_PATH),
+        content: bounded(MAX_BODY),
+        message: bounded(MAX_COMMIT_MESSAGE),
         mode: z.enum(["pr", "direct"]).optional(),
-        branch: z.string().optional(),
-        repo: z.string().optional().describe(REPO_ARG),
+        branch: bounded(MAX_REF).optional(),
+        repo: bounded(MAX_REPO_SELECTOR).optional().describe(REPO_ARG),
       },
     },
     ({ namespace, path, content, message, mode, branch, repo }) =>
@@ -1602,7 +1668,7 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
     "create_branch",
     {
       description: "Create a branch in a namespace's GitHub repo. Branches off the default branch unless 'from' is given. Requires operator key.",
-      inputSchema: { namespace: z.string(), branch: z.string(), from: z.string().optional(), repo: z.string().optional().describe(REPO_ARG) },
+      inputSchema: { namespace: nsName, branch: bounded(MAX_REF), from: bounded(MAX_REF).optional(), repo: bounded(MAX_REPO_SELECTOR).optional().describe(REPO_ARG) },
     },
     ({ namespace, branch, from, repo }) =>
       guardedWrite("create_branch", namespace, null, () => createBranch(env, namespace, branch, from, repo))
@@ -1613,12 +1679,12 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
     {
       description: "Open a pull request in a namespace's GitHub repo. Base defaults to the repo's default branch. Requires operator key.",
       inputSchema: {
-        namespace: z.string(),
-        title: z.string(),
-        head: z.string(),
-        base: z.string().optional(),
-        body: z.string().optional(),
-        repo: z.string().optional().describe(REPO_ARG),
+        namespace: nsName,
+        title: bounded(MAX_PR_TITLE),
+        head: bounded(MAX_REF),
+        base: bounded(MAX_REF).optional(),
+        body: bounded(MAX_PR_BODY).optional(),
+        repo: bounded(MAX_REPO_SELECTOR).optional().describe(REPO_ARG),
       },
     },
     ({ namespace, title, head, base, body, repo }) =>
@@ -1631,12 +1697,12 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       description:
         "Delete a file from a namespace's GitHub repo. mode 'pr' (default) commits the deletion to a new branch and opens a PR; mode 'direct' deletes on the default branch. The file must exist. Requires operator key.",
       inputSchema: {
-        namespace: z.string(),
-        path: z.string(),
-        message: z.string(),
+        namespace: nsName,
+        path: bounded(MAX_PATH),
+        message: bounded(MAX_COMMIT_MESSAGE),
         mode: z.enum(["pr", "direct"]).optional(),
-        branch: z.string().optional(),
-        repo: z.string().optional().describe(REPO_ARG),
+        branch: bounded(MAX_REF).optional(),
+        repo: bounded(MAX_REPO_SELECTOR).optional().describe(REPO_ARG),
       },
     },
     ({ namespace, path, message, mode, branch, repo }) =>
@@ -1649,11 +1715,11 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       description:
         "Merge or close an open pull request in a namespace's repo. action 'merge' uses merge_method (default 'squash'); action 'close' just closes it. Merging can trigger CI deploys in repos with deploy workflows (foxhound): prefer PR mode plus manage_pr for anything touching live behavior, per conventions. Requires operator key.",
       inputSchema: {
-        namespace: z.string(),
+        namespace: nsName,
         number: z.number().int().positive(),
         action: z.enum(["merge", "close"]),
         merge_method: z.enum(["merge", "squash", "rebase"]).optional(),
-        repo: z.string().optional().describe(REPO_ARG),
+        repo: bounded(MAX_REPO_SELECTOR).optional().describe(REPO_ARG),
       },
     },
     ({ namespace, number, action, merge_method, repo }) =>
@@ -1666,8 +1732,8 @@ export function buildServer(env: Env, operator: boolean, actor: string): McpServ
       description:
         "Recent CI workflow runs for a namespace's repo (name, head sha, status, conclusion, timestamps). For the most recent failed run it also returns the failing jobs and steps, plus a bounded log tail for write-grant keys only (a read-only key gets the metadata and a note saying the tail was withheld, because job logs can echo ids and variables). Read-only; use it to verify a deploy is green after a merge instead of guessing. Needs the GitHub App's Actions: Read permission.",
       inputSchema: {
-        namespace: z.string(),
-        repo: z.string().optional().describe(REPO_ARG),
+        namespace: nsName,
+        repo: bounded(MAX_REPO_SELECTOR).optional().describe(REPO_ARG),
         limit: z.number().int().positive().optional().describe("How many recent runs to return (default 10, max 20)."),
       },
     },

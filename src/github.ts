@@ -5,6 +5,7 @@
 // repo per namespace from the D1 namespaces table, then reads and writes files
 // over the live GitHub REST API. No PAT, no clone.
 
+import { b64urlFromBytes, b64urlEncode, base64Decode, base64Encode } from "./encoding";
 import type { Env } from "./server";
 
 const GH = "https://api.github.com";
@@ -42,28 +43,6 @@ export interface RepoRef {
 
 // ---- base64url + key handling ------------------------------------------------
 
-function b64urlFromBytes(bytes: Uint8Array): string {
-  let binary = "";
-  for (const b of bytes) binary += String.fromCharCode(b);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-function b64urlFromString(text: string): string {
-  return b64urlFromBytes(new TextEncoder().encode(text));
-}
-
-function decodeBase64Utf8(b64: string): string {
-  const bytes = Uint8Array.from(atob(b64.replace(/\s+/g, "")), (c) => c.charCodeAt(0));
-  return new TextDecoder().decode(bytes);
-}
-
-function encodeBase64Utf8(text: string): string {
-  const bytes = new TextEncoder().encode(text);
-  let binary = "";
-  for (const b of bytes) binary += String.fromCharCode(b);
-  return btoa(binary);
-}
-
 let cachedKey: { pem: string; key: CryptoKey } | null = null;
 
 async function importPrivateKey(pem: string): Promise<CryptoKey> {
@@ -89,8 +68,8 @@ async function createAppJwt(env: Env): Promise<string> {
     throw new Error("GitHub App not configured: set GITHUB_APP_CLIENT_ID and GITHUB_APP_PRIVATE_KEY");
   }
   const now = Math.floor(Date.now() / 1000);
-  const header = b64urlFromString(JSON.stringify({ alg: "RS256", typ: "JWT" }));
-  const payload = b64urlFromString(JSON.stringify({ iss: env.GITHUB_APP_CLIENT_ID, iat: now - 60, exp: now + 540 }));
+  const header = b64urlEncode(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+  const payload = b64urlEncode(JSON.stringify({ iss: env.GITHUB_APP_CLIENT_ID, iat: now - 60, exp: now + 540 }));
   const signingInput = `${header}.${payload}`;
   const key = await importPrivateKey(env.GITHUB_APP_PRIVATE_KEY);
   const signature = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, new TextEncoder().encode(signingInput));
@@ -276,11 +255,22 @@ export async function resolveRepo(env: Env, namespace: string, selector?: string
     .bind(namespace)
     .first<{ repos: string }>();
   if (!row) throw new Error(`unknown namespace: ${namespace}`);
-  let list: Array<{ repo: string; label?: string }> = [];
+  // FAILS CLOSED (audit 2, F25). A corrupt repos column used to be swallowed into
+  // an empty array and then reported as "has no repo mapping", which is a
+  // different fact with a different fix: one says register a repo, the other says
+  // a stored row is damaged. Worse, the two are indistinguishable to the caller,
+  // so the damage reads as an unconfigured namespace and gets "fixed" by
+  // overwriting the mapping.
+  let list: Array<{ repo: string; label?: string }>;
   try {
     list = JSON.parse(row.repos || "[]");
-  } catch {
-    list = [];
+  } catch (err) {
+    throw new Error(
+      `namespace ${namespace} has a CORRUPT repos mapping: the stored value is not valid JSON (${err instanceof Error ? err.message : String(err)}). Nothing was resolved. Repair it with update_namespace.`
+    );
+  }
+  if (!Array.isArray(list)) {
+    throw new Error(`namespace ${namespace} has a CORRUPT repos mapping: expected a JSON array, got ${typeof list}.`);
   }
   if (list.length === 0) throw new Error(`namespace ${namespace} has no repo mapping`);
   let chosen: { repo: string; label?: string } | undefined;
@@ -342,13 +332,13 @@ export async function readRepoFile(env: Env, namespace: string, path: string, re
   if (data.type !== "file") throw new Error(`${path} is not a file (type: ${data.type})`);
   let content: string;
   if (data.encoding === "base64" && data.content) {
-    content = decodeBase64Utf8(data.content);
+    content = base64Decode(data.content);
   } else {
     // Files over 1 MB come back without inline content; fetch the blob by sha.
     const blob = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/git/blobs/${data.sha}`);
     if (!blob.ok) throw new Error(`read_repo_file blob fetch failed (${blob.status})`);
     const blobData = (await blob.json()) as { content: string; encoding: string };
-    content = decodeBase64Utf8(blobData.content);
+    content = base64Decode(blobData.content);
   }
   return { repo: `${owner}/${repo}`, path, size: data.size, sha: data.sha, content };
 }
@@ -482,7 +472,7 @@ export async function searchCode(
     if (blobData.encoding !== "base64" || !blobData.content) continue;
     let text: string;
     try {
-      text = decodeBase64Utf8(blobData.content);
+      text = base64Decode(blobData.content);
     } catch {
       continue; // binary that slipped past the extension filter
     }
@@ -589,7 +579,7 @@ async function putFile(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       message,
-      content: encodeBase64Utf8(content),
+      content: base64Encode(content),
       branch,
       ...(sha ? { sha } : {}),
     }),

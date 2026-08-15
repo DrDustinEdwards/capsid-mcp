@@ -1,9 +1,27 @@
 // Auth helpers shared by the OAuth and operator-key surfaces. Kept free of MCP
 // and Worker imports so the grant logic is unit-testable under node.
 
+import { bytesToHex } from "./encoding";
+
 export async function sha256Hex(input: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return bytesToHex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input)));
+}
+
+// Compare two secrets without leaking where they diverge (audit 2, F1).
+//
+// Kept small on purpose. Every caller compares a fixed-length hex digest or an
+// opaque token over TLS to a Cloudflare edge, so the practical risk of the
+// short-circuiting === it replaces was low; the reason to fix it anyway is that
+// "low risk" is an argument that has to be re-made every time someone reads the
+// line, and a constant-time compare is four lines and needs no argument.
+//
+// The length check leaks length only, which for a digest is a constant, and for a
+// token is not the secret.
+export function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
 }
 
 // OPERATOR_KEY_HASH holds one or more comma-separated sha256 hex hashes.
@@ -37,7 +55,7 @@ export async function operatorIdentity(
     const entry = raw.trim().toLowerCase();
     if (!entry) continue;
     const readonly = entry.startsWith("ro:");
-    if ((readonly ? entry.slice(3) : entry) === hash) {
+    if (timingSafeEqual(readonly ? entry.slice(3) : entry, hash)) {
       return { grant: readonly ? "read" : "write", fingerprint: hash.slice(0, 12) };
     }
   }

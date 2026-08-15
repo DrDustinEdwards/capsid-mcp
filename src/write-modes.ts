@@ -107,5 +107,14 @@ export function assembleBody(input: AssembleInput): AssembleResult {
     };
   }
 
-  return { body: current.replace(find, replace_with) };
+  // Spliced by index, NOT by String.replace (audit 2, F19). replace() with a
+  // string pattern still reads the REPLACEMENT for $ substitution syntax, so a
+  // replace_with carrying $&, $`, $' or $$ silently rewrote itself into the
+  // matched text, the text before it, the text after it, or a bare $, and the
+  // write reported success on the corrupted body. Prose hits this: any canon
+  // fragment with a dollar amount followed by an apostrophe or an ampersand is a
+  // live trigger. The anchor is already known to occur exactly once, so a slice
+  // around indexOf is both simpler and incapable of interpreting anything.
+  const at = current.indexOf(find);
+  return { body: current.slice(0, at) + replace_with + current.slice(at + find.length) };
 }

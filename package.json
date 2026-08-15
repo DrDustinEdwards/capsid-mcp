@@ -9,7 +9,7 @@
     "dev": "wrangler dev",
     "deploy": "node scripts/deploy.mjs",
     "check": "tsc --noEmit",
-    "test": "node --import ./test/resolve-ts.mjs --test test/normalize.test.ts test/auth.test.ts test/repo-tools.test.ts test/links.test.ts test/backup.test.ts test/doc-meta.test.ts test/path-mutation.test.ts test/search-code.test.ts test/headers.test.ts test/write-modes.test.ts test/counts.test.ts test/invariants.test.ts test/write-invariants.test.ts",
+    "test": "node --import ./test/resolve-ts.mjs --test test/normalize.test.ts test/auth.test.ts test/repo-tools.test.ts test/links.test.ts test/backup.test.ts test/doc-meta.test.ts test/path-mutation.test.ts test/search-code.test.ts test/headers.test.ts test/write-modes.test.ts test/counts.test.ts test/limits.test.ts test/invariants.test.ts test/write-invariants.test.ts",
     "verify:live": "node scripts/verify-live.mjs"
   },
   "devDependencies": {

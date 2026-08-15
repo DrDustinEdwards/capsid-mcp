@@ -167,7 +167,9 @@ const MUTATORS = [
   },
   {
     tool: "move",
-    args: { namespace: "capsid", path: "doc.md", new_path: "moved.md" },
+    // move gained a confirmation on 2026-08-17 (audit 2, F25): it is
+    // destructive-class and had none.
+    args: { namespace: "capsid", path: "doc.md", new_path: "moved.md", confirm: true },
     // A rename has no body to snapshot; the audit row is the record.
     requires: [/INSERT INTO audit_log/],
   },
@@ -527,4 +529,102 @@ test("the concurrency warning is read at COMMIT time, not from the pre-read", as
   assert.ok(out.concurrency_warning, "the warning was computed from the stale pre-read, not from a fresh read at commit");
   assert.match(out.concurrency_warning, /possible concurrent edit/);
   assert.match(out.concurrency_warning, new RegExp(fresh));
+});
+
+// ---- F30: a batch failure is a clean refusal, not an exception ---------------
+
+// The fake's batch throws whatever this holds, so a test can produce a D1 failure
+// that is NOT one of the commit-time guards. Before the fix, write and restore
+// rethrew that, so the tool call rejected while delete, move and finalize all
+// answered with a normal error result. Same failure, two shapes.
+async function connectExploding(sql: RegExp) {
+  const { db, recorded } = fakeDb();
+  const inner = db.batch;
+  db.batch = async (statements: Array<{ sql: string; params: unknown[] }>) => {
+    if (statements.some((st) => sql.test(st.sql))) throw new Error("D1_ERROR: database is locked");
+    return inner(statements);
+  };
+  const server = buildServer({ DB: db } as never, true, "test:guard");
+  const client = new Client({ name: "f30-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  return { client, recorded, close: () => client.close() };
+}
+
+const F30_CASES = [
+  { tool: "write", args: { namespace: "capsid", path: "doc.md", title: "T", body: "b", confirm: true } },
+  { tool: "restore", args: { namespace: "capsid", path: "doc.md", version_id: 42, confirm: true } },
+  { tool: "delete", args: { namespace: "capsid", path: "doc.md", confirm: true } },
+  { tool: "move", args: { namespace: "capsid", path: "doc.md", new_path: "moved.md", confirm: true } },
+];
+
+for (const { tool, args } of F30_CASES) {
+  test(`${tool} returns a clean failure when the batch throws`, async () => {
+    const { client, close } = await connectExploding(/INSERT INTO document_versions|UPDATE documents|INSERT INTO documents|DELETE FROM documents/);
+    let result: { isError?: boolean; content: Array<{ text: string }> };
+    try {
+      result = (await client.callTool({ name: tool, arguments: args })) as typeof result;
+    } catch (err) {
+      await close();
+      assert.fail(`${tool} threw out of the handler instead of returning a failure: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    await close();
+    assert.equal(result.isError, true, `${tool} reported success on a failed batch`);
+    const text = result.content?.[0]?.text ?? "";
+    assert.match(text, /database is locked/, `${tool} lost the reason: ${text}`);
+    assert.match(text, /nothing (was written|changed|archived)/i, `${tool} did not say the store is unchanged: ${text}`);
+  });
+}
+
+// ---- F17: a landed GitHub write is not reported as a failure ----------------
+
+test("write_repo_file reports success with a warning when the audit insert fails", async () => {
+  // guardedWrite commits to GitHub and THEN writes its audit row, and the two
+  // cannot share a transaction. When the row failed, the caller was told the tool
+  // failed, and the natural response to that is a retry, which is a second commit.
+  const { db } = fakeDb();
+  db.prepare = ((sql: string) => {
+    const base = { bind: () => base, first: async () => null, all: async () => ({ results: [], meta: { changes: 0 } }), run: async () => ({ meta: { changes: 1 } }) } as Record<string, unknown>;
+    if (/INSERT INTO audit_log/i.test(sql)) {
+      base.run = async () => {
+        throw new Error("D1_ERROR: no such table: audit_log");
+      };
+    }
+    if (/FROM namespaces/i.test(sql)) base.first = async () => ({ repos: JSON.stringify([{ repo: "o/r", label: "primary" }]) });
+    return base;
+  }) as never;
+
+  const server = buildServer({ DB: db, APP_KV: { get: async (k: string) => (k.startsWith("gh:token:") ? "t" : null), put: async () => {}, delete: async () => {}, list: async () => ({ keys: [], list_complete: true }) } } as never, true, "test:guard");
+  const client = new Client({ name: "f17-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const method = (init?.method ?? "GET").toUpperCase();
+    const path = new URL(url).pathname;
+    if (path === "/repos/o/r" && method === "GET") return new Response(JSON.stringify({ default_branch: "main" }), { status: 200 });
+    if (path === "/repos/o/r/contents/doc.md" && method === "GET") return new Response("{}", { status: 404 });
+    if (path === "/repos/o/r/contents/doc.md" && method === "PUT") {
+      return new Response(JSON.stringify({ commit: { sha: "landed-sha" }, content: { sha: "file-sha" } }), { status: 201 });
+    }
+    return new Response("unexpected", { status: 500 });
+  }) as typeof fetch;
+
+  try {
+    const result = (await client.callTool({
+      name: "write_repo_file",
+      arguments: { namespace: "capsid", path: "doc.md", content: "hi", message: "m", mode: "direct" },
+    })) as { isError?: boolean; content: Array<{ text: string }> };
+    assert.ok(!result.isError, `the landed write was reported as a failure: ${result.content?.[0]?.text}`);
+    const payload = JSON.parse(result.content[0].text) as { commitSha?: string; audit_warning?: string };
+    // The result still describes what landed, and says the log does not know.
+    assert.equal(payload.commitSha, "landed-sha");
+    assert.match(payload.audit_warning ?? "", /SUCCEEDED/);
+    assert.match(payload.audit_warning ?? "", /no such table: audit_log/);
+    assert.match(payload.audit_warning ?? "", /Do not retry/);
+  } finally {
+    globalThis.fetch = original;
+    await client.close();
+  }
 });
