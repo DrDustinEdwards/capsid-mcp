@@ -6,7 +6,7 @@ Capsid is a single-user, Cloudflare-native MCP server that serves a consolidated
 - **Repo access:** list_repo_tree, read_repo_file, search_code, write_repo_file, create_branch, open_pr, delete_repo_file, manage_pr, ci_status (CI runs via the GitHub App)
 - **Maintenance:** lint (the consolidation loop), register_namespace (create), update_namespace (remap)
 
-Writes normalize wide dashes (em and en) to plain ASCII punctuation server-side, so no client can store an em dash. The `namespaces` tool reports each namespace's count of unconsolidated episodic/source docs, so any session can see where a lint run is due.
+The `namespaces` tool reports each namespace's count of unconsolidated episodic/source docs, so any session can see where a lint run is due.
 
 It also exposes the rest of the MCP surface: **Resources** (every document addressable at `capsid://<namespace>/<path>`) and **Prompts** (reusable templates stored as documents).
 
