@@ -140,8 +140,46 @@ if (appKv.id === oauthKv.id) {
 // A bucket that is missing from the account is caught by `wrangler deploy`
 // itself, loudly, in the very next step.
 //
-// To restore the account-side check, add R2 read to CLOUDFLARE_API_TOKEN and put
-// the `wrangler r2 bucket list` probe back.
+// MEASURED 2026-09-05, and it corrects the sentence above. The token now carries
+// Workers R2 Storage **EDIT**, added that day because `wrangler deploy` FAILED
+// three times with this same Authentication error 10000 the moment a SECOND R2
+// binding (HOLDOUT) was declared. Two findings worth keeping:
+//
+//   1. READ IS NOT ENOUGH. R2 Read was added first, on the reasoning that the
+//      failing call (`GET /accounts/<id>/r2/buckets/<name>`) is a lookup. The
+//      deploy failed again, byte-identical. Cloudflare's own Workers-builds token
+//      spec lists `Workers R2 Storage (edit)`, and the "Edit Cloudflare Workers"
+//      template ships Edit for exactly this reason. Inferring the verb from the
+//      URL path was diagnosing from first principles, which capsid/conventions.md
+//      warns produces confident wrong instructions for the owner to follow.
+//   2. WRANGLER ONLY CHECKS BINDINGS THAT ARE NEW relative to the deployed
+//      version. MEDIA had been bound for months and no deploy had ever needed R2
+//      permission; adding HOLDOUT is what surfaced the gap. So this failure mode
+//      waits for the next new R2 binding rather than for the next deploy.
+//
+// HOLDOUT READ ACCESS IS BY ONE SHARED TOKEN, ruled 2026-09-05. `capsid-holdout-read`
+// is read-only and set in all five roster repos as IMPROVE_HOLDOUT_R2_ACCESS_KEY_ID
+// and IMPROVE_HOLDOUT_R2_SECRET_ACCESS_KEY. It is NOT scoped per namespace prefix, so
+// the credential does not decide which suite a job can read. What does:
+//
+//   - the manifest total, checked by src/improve-scorer.ts against the namespace the
+//     report is SIGNED as, so a mistyped IMPROVE_NAMESPACE fails closed at the Worker
+//     instead of scoring against another namespace's tests;
+//   - step scoping in improve-score.yml, where the three R2 secrets are `env:` on the
+//     pull step alone and no attempt code runs in that step.
+//
+// State it precisely: these guard different things and the manifest never provided
+// what prefix scoping did. The accepted risk is BLAST RADIUS. One leaked token exposes
+// all five suites where a scoped one exposed one. Unchanged, and load-bearing: the
+// separate bucket, AttemptEnv = Omit<Env, "HOLDOUT">, and the source scan in
+// test/improve-holdout.test.ts that lets only src/improve-scorer.ts name the binding.
+// This token is a REPO secret and must never become a Worker binding or a var here.
+//
+// The bucket must also EXIST first: creating it was necessary and not sufficient.
+// With Edit in place the account-side `wrangler r2 bucket list` probe could now be
+// restored here, which would have caught this at the config step with a named
+// reason instead of inside wrangler. Not done: it is a separate change and this
+// script's job is to fail closed on a binding pin, which it did.
 for (const [label, pin] of [
   ["MEDIA", EXPECTED.r2],
   ["HOLDOUT", EXPECTED.holdoutR2],

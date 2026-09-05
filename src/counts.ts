@@ -66,8 +66,14 @@ export const AUTHORITATIVE: Record<string, AuthoritativeCounts> = {
   },
 };
 
+// Object.hasOwn, not `?? null`, because AUTHORITATIVE is an object literal and so
+// carries Object.prototype. A bare lookup of "constructor" returned the Object
+// FUNCTION, which is not nullish, so `?? null` never fired and the caller got a
+// value whose .tools is undefined: garbage claims instead of "this namespace has
+// no authoritative counts". Found 2026-09-05 by the capsid holdout suite before
+// the improve loop had run once.
 export function authoritativeFor(namespace: string): AuthoritativeCounts | null {
-  return AUTHORITATIVE[namespace] ?? null;
+  return Object.hasOwn(AUTHORITATIVE, namespace) ? AUTHORITATIVE[namespace] : null;
 }
 
 // A four-digit year is never a count. `tool surface[^.\n]*?\b(\d+)\b` matched the 2026

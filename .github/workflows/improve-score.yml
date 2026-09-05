@@ -85,14 +85,27 @@ jobs:
         continue-on-error: true
         run: npm run check:test
 
-      # THE HOLDOUT SET, pulled from R2 with THIS REPO'S OWN read-only token.
+      # THE HOLDOUT SET, pulled from R2 with a read-only token held as a repo secret.
       #
-      # The token is a repo secret and is never in the Worker's environment, so the
-      # attempt-generating path could not leak it even if it wanted to; the Worker
-      # reads only the manifest, to check a report has not shrunk the suite it
-      # claims to have passed. test/improve-holdout.test.ts asserts both halves.
+      # The token is never in the Worker's environment, so the attempt-generating
+      # path could not leak it even if it wanted to; the Worker reads only the
+      # manifest, to check a report has not shrunk the suite it claims to have
+      # passed. test/improve-holdout.test.ts asserts both halves.
       #
-      # The prefix is namespaced, so this token is scoped to one namespace's suite.
+      # ONE SHARED TOKEN across all five repos, `capsid-holdout-read` (ruled
+      # 2026-09-05). It is NOT scoped per namespace, so the credential does not
+      # constrain which namespace's prefix this job could read. Two things do:
+      #
+      #   1. The manifest total. A mistyped IMPROVE_NAMESPACE pulls the wrong suite
+      #      and then fails closed at the Worker on the size mismatch, rather than
+      #      scoring against tests that were never this namespace's.
+      #   2. Step scoping, below. The R2 secrets are `env:` on THIS STEP ONLY, never
+      #      job-wide, and no attempt code runs here. Attempt code executing later
+      #      against the downloaded suite has no credential to reuse. Do not hoist
+      #      these three secrets to the job level; that is the whole protection.
+      #
+      # Accepted risk: if that one token leaks, all five suites are readable, where a
+      # prefix-scoped token would have exposed one.
       - name: Pull the holdout suite
         id: holdout
         continue-on-error: true
@@ -104,8 +117,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p .improve-holdout
-          # aws-cli speaks the R2 S3 API. Scoped by the credential to this
-          # namespace's prefix; the endpoint is account-specific.
+          # aws-cli speaks the R2 S3 API. The prefix comes from the repo variable,
+          # NOT from the credential, which is shared across the five repos; the
+          # endpoint is account-specific.
           aws s3 sync \
             "s3://capsid-improve-holdout/improve/holdout/${IMPROVE_NAMESPACE}/" \
             .improve-holdout/ \
@@ -121,10 +135,21 @@ jobs:
           # report whose total disagrees with it, so this count is read from the
           # manifest rather than from whatever happened to be downloaded.
           TOTAL=$(node -e 'const m=require("./.improve-holdout/manifest.json");process.stdout.write(String(m.total))')
+          # PER-REPO, and load-bearing. A holdout case that imports this repo's source
+          # needs whatever loader the repo's own tests use, or it fails to LOAD and is
+          # counted as a failing case. capsid-mcp's src has extensionless internal
+          # imports, so bare `node --test` cannot resolve them; measured 2026-09-05.
+          # An unfixed loader means holdout_pass_rate 0 against an anchor of min 1.0,
+          # which reverts every attempt forever and reads as a broken loop rather than
+          # a misconfigured one. Conditional, so the same file works in a repo with no
+          # such hook.
+          LOADER=""
+          [ -f ./test/resolve-ts.mjs ] && LOADER="--import ./test/resolve-ts.mjs"
           PASSED=0
           for f in .improve-holdout/*.test.*; do
             [ -e "$f" ] || continue
-            if node --test "$f" > /dev/null 2>&1; then PASSED=$((PASSED+1)); fi
+            # shellcheck disable=SC2086
+            if node --test $LOADER "$f" > /dev/null 2>&1; then PASSED=$((PASSED+1)); fi
           done
           echo "total=${TOTAL}" >> "$GITHUB_OUTPUT"
           echo "passed=${PASSED}" >> "$GITHUB_OUTPUT"

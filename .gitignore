@@ -4,3 +4,9 @@ node_modules/
 .wrangler/
 wrangler.jsonc
 .tmp-*
+
+# The holdout suite is pulled into here by improve-score.yml and must NEVER be
+# committed: a hidden test set in the repo is a hidden test set the attempt path
+# can read, which defeats the entire measurement. Ignored so an accident is not
+# one `git add -A` away.
+.improve-holdout/
