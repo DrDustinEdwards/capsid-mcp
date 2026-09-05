@@ -7,7 +7,14 @@
 
 import { b64urlFromBytes, b64urlEncode, base64Decode, base64Encode } from "./encoding";
 import { DEFAULT_SCAN_FILES, DEFAULT_SCAN_RESULTS, MAX_SCAN_CAP } from "./limits";
-import type { Env } from "./env";
+// AttemptEnv, not Env, and the narrowing is deliberate rather than cosmetic.
+//
+// Nothing in this module needs the holdout bucket, and saying so in the type is
+// what lets src/improve-attempt.ts push a branch while remaining structurally
+// unable to read the hidden suite. Env is assignable to AttemptEnv, so every
+// pre-existing caller is unaffected; what changes is that a future edit here
+// cannot quietly reach for env.HOLDOUT, because on this type it does not exist.
+import type { AttemptEnv as Env } from "./env";
 
 const GH = "https://api.github.com";
 const GH_HEADERS: Record<string, string> = {
@@ -622,6 +629,26 @@ export async function createBranch(env: Env, namespace: string, branch: string, 
   return { repo: `${owner}/${repo}`, branch, from: base, sha };
 }
 
+// Branch from an exact COMMIT, which createBranch cannot do: it takes a branch
+// name and resolves it to whatever that branch points at now. The improve loop
+// needs the other thing, because its whole model is "branch from the commit the
+// lineage picked", and that commit is frequently not the tip of anything.
+//
+// ensureBranch is used rather than a raw ref POST so an existing branch of the
+// same name is not an error. An attempt id is unique, so a collision means a
+// retry of the same attempt, and a retry should land on the branch it made.
+export async function createBranchAt(
+  env: Env,
+  namespace: string,
+  branch: string,
+  sha: string,
+  repoSelector?: string
+): Promise<{ repo: string; branch: string; sha: string }> {
+  const { owner, repo, full } = await resolveRepo(env, namespace, repoSelector);
+  await ensureBranch(env, owner, repo, branch, sha);
+  return { repo: full, branch, sha };
+}
+
 export async function openPr(
   env: Env,
   namespace: string,
@@ -904,4 +931,83 @@ export async function ciStatus(
     result.failed_run = failedRun;
   }
   return result;
+}
+
+// ---- the improve loop's two GitHub needs -------------------------------------
+//
+// Both live here rather than in src/improve-scorer.ts, and the reason is the one
+// already written above commitOnBranch: the App token dance, the 401 retry and
+// the per-owner installation lookup exist ONCE in this module. A second module
+// calling api.github.com would be a second copy of that dance, and the copy that
+// drifts is always the one nobody is looking at.
+
+// Fire a workflow_dispatch. The REF IS DELIBERATELY NOT THE ATTEMPT BRANCH.
+//
+// workflow_dispatch runs the workflow file as it exists AT `ref`, so dispatching
+// against the attempt branch would let an attempt rewrite its own scorer: change
+// improve-score.yml on the branch, and the thing measuring the change is the
+// change. Dispatching against the default branch and passing the branch as an
+// INPUT means the scorer is always the reviewed copy on main, and the attempt is
+// data to it rather than code.
+//
+// The deterministic monitor also refuses any diff touching .github/, so this is
+// belt and braces. Both are kept: the monitor is a policy that could be relaxed,
+// this is a mechanism that cannot be argued with.
+export async function dispatchWorkflow(
+  env: Env,
+  namespace: string,
+  workflowFile: string,
+  inputs: Record<string, string>,
+  repoSelector?: string
+): Promise<{ repo: string; workflow: string; ref: string; inputs: Record<string, string> }> {
+  const { owner, repo, full } = await resolveRepo(env, namespace, repoSelector);
+  const ref = await getDefaultBranch(env, owner, repo);
+  const resp = await ghFetch(
+    env,
+    owner,
+    repo,
+    `/repos/${owner}/${repo}/actions/workflows/${encodeURIComponent(workflowFile)}/dispatches`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ref, inputs }),
+    }
+  );
+  // 204 is the success code here, and there is no body to read on either path.
+  if (!resp.ok) {
+    throw new Error(
+      `workflow dispatch failed for ${full} ${workflowFile} (${resp.status}): ${(await resp.text()).slice(0, 300) || "no response body"}`
+    );
+  }
+  return { repo: full, workflow: workflowFile, ref, inputs };
+}
+
+// What CI is doing on one branch. Read by the tick so a timeout can say WHICH
+// failure it was: the workflow never started, the workflow is still running, or
+// the workflow finished and the report never arrived. Those three have different
+// fixes and a bare "timed out" distinguishes none of them.
+export async function workflowRunsForBranch(
+  env: Env,
+  namespace: string,
+  branch: string,
+  repoSelector?: string
+): Promise<Array<{ status: string; conclusion: string | null; created_at: string; updated_at: string; url: string }>> {
+  const { owner, repo } = await resolveRepo(env, namespace, repoSelector);
+  const resp = await ghFetch(
+    env,
+    owner,
+    repo,
+    `/repos/${owner}/${repo}/actions/runs?branch=${encodeURIComponent(branch)}&per_page=5`
+  );
+  if (!resp.ok) throw new Error(`workflow run lookup failed (${resp.status}): ${(await resp.text()).slice(0, 200)}`);
+  const data = (await resp.json()) as {
+    workflow_runs: Array<{ status: string; conclusion: string | null; created_at: string; updated_at: string; html_url: string }>;
+  };
+  return data.workflow_runs.map((r) => ({
+    status: r.status,
+    conclusion: r.conclusion,
+    created_at: r.created_at,
+    updated_at: r.updated_at,
+    url: r.html_url,
+  }));
 }

@@ -7,6 +7,19 @@ import { defaultHandler } from "./routes";
 import { withSecurityHeaders } from "./headers";
 import type { Env, Props } from "./env";
 import { buildServer } from "./server";
+import { chicagoHour } from "./improve-schema";
+import { openRuns, tickRuns } from "./improve-run";
+
+// THE CRON EXPRESSIONS, SPELLED ONCE. wrangler.jsonc declares them and this file
+// dispatches on them, so a mismatch between the two is a subsystem that never
+// runs and says nothing. test/improve-cron.test.ts derives one list from the
+// other and fails in both directions.
+export const BACKUP_CRON = "0 9 * * *";
+export const IMPROVE_OPEN_CRON = "0 8,9 * * *";
+export const IMPROVE_TICK_CRON = "*/5 * * * *";
+
+// 03:00 America/Chicago, per the arc.
+export const IMPROVE_OPEN_HOUR_CT = 3;
 
 const apiHandler = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -121,25 +134,89 @@ export default {
     // rebuilt response rather than to one that is about to be replaced.
     return withSecurityHeaders(withCacheDefault(response, new URL(request.url).pathname));
   },
+  // THREE CRON EXPRESSIONS, DISPATCHED BY WHICH ONE FIRED.
+  //
+  //   "0 9 * * *"     the daily backup. Unchanged.
+  //   "0 8,9 * * *"   the improve opener. TWO hours because Cloudflare cron
+  //                   expressions are UTC only and "03:00 America/Chicago" is
+  //                   08:00 UTC for part of the year and 09:00 for the rest. Both
+  //                   fire; chicagoHour() decides which one is really 03:00, so
+  //                   the run opens once a night year round rather than twice in
+  //                   summer and at 02:00 in winter.
+  //   "*/5 * * * *"   the improve tick. Advances any run not done or paused, one
+  //                   step per run. All day rather than only during the expected
+  //                   window, so a hand-started run advances too; a tick with
+  //                   nothing to do is two D1 reads.
+  //
+  // EVERY BRANCH IS INDIVIDUALLY GUARDED. A throwing improve tick must not stop
+  // the backup, and vice versa, so nothing here shares a try. The 09:00 UTC
+  // invocation matches all three expressions and Cloudflare delivers it once per
+  // expression, which is why the dispatch is on controller.cron rather than on
+  // the clock.
   scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
-    // A thrown runBackup used to reach nothing but the platform, which records the
-    // invocation as failed and keeps the reason to itself. The reason is the only
-    // useful part: "the cron failed" is not something anyone can act on, and nobody
-    // is watching the cron dashboard daily. Logged here, then rethrown so the
-    // invocation still counts as failed.
-    ctx.waitUntil(
-      runBackup(env)
-        .then((result) => {
-          if (result.ran && result.prune_refused !== null) {
-            console.error(`BACKUP_CRON_REFUSED_PRUNE ${result.prune_refused}`);
-          } else if (!result.ran) {
-            console.error(`BACKUP_CRON_SKIPPED ${result.skipped}`);
-          }
-        })
-        .catch((err) => {
-          console.error(`BACKUP_CRON_THREW ${err instanceof Error ? `${err.message}\n${err.stack}` : String(err)}`);
-          throw err;
-        })
-    );
+    const cron = controller.cron;
+
+    if (cron === BACKUP_CRON) {
+      // A thrown runBackup used to reach nothing but the platform, which records the
+      // invocation as failed and keeps the reason to itself. The reason is the only
+      // useful part: "the cron failed" is not something anyone can act on, and nobody
+      // is watching the cron dashboard daily. Logged here, then rethrown so the
+      // invocation still counts as failed.
+      ctx.waitUntil(
+        runBackup(env)
+          .then((result) => {
+            if (result.ran && result.prune_refused !== null) {
+              console.error(`BACKUP_CRON_REFUSED_PRUNE ${result.prune_refused}`);
+            } else if (!result.ran) {
+              console.error(`BACKUP_CRON_SKIPPED ${result.skipped}`);
+            }
+          })
+          .catch((err) => {
+            console.error(`BACKUP_CRON_THREW ${err instanceof Error ? `${err.message}
+${err.stack}` : String(err)}`);
+            throw err;
+          })
+      );
+    }
+
+    if (cron === IMPROVE_OPEN_CRON) {
+      const now = new Date();
+      const hour = chicagoHour(now);
+      if (hour !== IMPROVE_OPEN_HOUR_CT) {
+        // The other of the two UTC hours. Not an error and not silent: a log line
+        // here is what proves the DST gate is working on the day it matters.
+        console.log(`IMPROVE_OPEN_SKIPPED local hour is ${hour}, not ${IMPROVE_OPEN_HOUR_CT}`);
+      } else {
+        ctx.waitUntil(
+          openRuns(env, now)
+            .then((summary) => {
+              console.log(
+                `IMPROVE_OPENED mode=${summary.mode} ${summary.outcomes
+                  .map((o) => `${o.namespace}:${o.opened ? "opened" : "skipped"}`)
+                  .join(" ")}`
+              );
+            })
+            .catch((err) => {
+              console.error(`IMPROVE_OPEN_THREW ${err instanceof Error ? `${err.message}
+${err.stack}` : String(err)}`);
+            })
+        );
+      }
+    }
+
+    if (cron === IMPROVE_TICK_CRON) {
+      ctx.waitUntil(
+        tickRuns(env, new Date())
+          .then((outcomes) => {
+            for (const o of outcomes) {
+              console.log(`IMPROVE_TICK ${o.runId} ${o.from} -> ${o.to}: ${o.note}`);
+            }
+          })
+          .catch((err) => {
+            console.error(`IMPROVE_TICK_THREW ${err instanceof Error ? `${err.message}
+${err.stack}` : String(err)}`);
+          })
+      );
+    }
   },
 } satisfies ExportedHandler<Env>;

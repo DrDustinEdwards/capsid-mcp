@@ -7,6 +7,16 @@ import { sourceFiles } from "./source-files.ts";
 
 const CAPSID = AUTHORITATIVE.capsid;
 import { securityHeadersFor } from "../src/headers.ts";
+// FIXTURES DERIVE THE TOOL COUNT, they do not spell it. Six of these tests
+// hardcoded 24 and all six broke when the surface moved to 26, for a reason that
+// had nothing to do with what any of them checks. That is the same drift the
+// module under test exists to catch, one level down, and the gates fixtures had
+// already been fixed this way on 2026-08-17 for the same reason.
+const TOOLS = String(CAPSID.tools);
+// A number that is deliberately NOT the current count, for the stale-claim
+// fixtures. Derived, so it can never accidentally become correct.
+const STALE_TOOLS = String(CAPSID.tools - 5);
+
 
 // Batch-two item 10. src/counts.ts caches numbers that live elsewhere, so these
 // tests derive each one from the artifact itself and fail when the two drift.
@@ -104,16 +114,19 @@ test("header counts match what the header layer and the consent dialog actually 
 
 test("scan flags a stale tool count in a standing doc", () => {
   const claims = scanCountClaims([
-    { path: "core.md", type: "core", body: "The server exposes 19 tools today." },
+    { path: "core.md", type: "core", body: `The server exposes ${STALE_TOOLS} tools today.` },
   ], "capsid");
   assert.equal(claims.length, 1);
   assert.equal(claims[0].noun, "tools");
-  assert.equal(claims[0].states, "19");
-  assert.equal(claims[0].authoritative, "24");
+  assert.equal(claims[0].states, STALE_TOOLS);
+  assert.equal(claims[0].authoritative, TOOLS);
 });
 
 test("scan does NOT flag a correct count", () => {
-  assert.deepEqual(scanCountClaims([{ path: "core.md", type: "core", body: "24 tools, split 13 read and 11 write." }], "capsid"), []);
+  assert.deepEqual(
+    scanCountClaims([{ path: "core.md", type: "core", body: `${TOOLS} tools, split 13 read and 11 write.` }], "capsid"),
+    []
+  );
 });
 
 test("episodics are exempt because their numbers are history, not claims", () => {
@@ -244,7 +257,7 @@ test("the one genuine hit still fires after all three fixes", () => {
   const claims = scanCountClaims([doc], "capsid");
   assert.equal(claims.length, 1);
   assert.equal(claims[0].states, "11");
-  assert.equal(claims[0].authoritative, "24");
+  assert.equal(claims[0].authoritative, TOOLS);
 });
 
 // Defects 4 and 5, the two false positives that survived the 2026-08-14 scoping fixes.
@@ -257,7 +270,7 @@ test("a transition states the RESULTING count, not the pre-state", () => {
   assert.equal(claims[0].states, "22", "the pre-state was reported instead of the resulting state");
 
   // And when the resulting state is current, nothing fires.
-  assert.deepEqual(scanCountClaims([{ ...doc, body: "the surface went 22 to 24 tools" }], "capsid"), []);
+  assert.deepEqual(scanCountClaims([{ ...doc, body: `the surface went 22 to ${TOOLS} tools` }], "capsid"), []);
 });
 
 test("a transition in a LIVE-STATE doc reports the resulting count", () => {
@@ -282,7 +295,10 @@ test("a subset count is not a total", () => {
 
 test("N of M: M is checked as the total, N is exempt", () => {
   // Correct pair: M matches the authoritative total, so nothing fires.
-  assert.deepEqual(scanCountClaims([{ path: "x.md", type: "concept", body: "Gated tools (12 of 24), all failing with DENIED." }], "capsid"), []);
+  assert.deepEqual(
+    scanCountClaims([{ path: "x.md", type: "concept", body: `Gated tools (12 of ${TOOLS}), all failing with DENIED.` }], "capsid"),
+    []
+  );
   // Stale M fires, and reports M rather than N.
   const claims = scanCountClaims([{ path: "x.md", type: "concept", body: "Gated tools (11 of 22)." }], "capsid");
   assert.equal(claims.length, 1);
@@ -291,7 +307,14 @@ test("N of M: M is checked as the total, N is exempt", () => {
 
 test("N of M is checked for internal consistency even when M is right", () => {
   // A subset larger than its total is wrong without reference to any artifact.
-  const claims = scanCountClaims([{ path: "x.md", type: "concept", body: "Gated tools (30 of 24)." }], "capsid");
+  // The subset EXCEEDS the total AND the total is the authoritative one, so the
+  // only finding is the contradiction. Deriving the total is what keeps that true:
+  // spelled as a literal it also became a stale-total claim the day the surface
+  // moved, and this test then failed on a second finding it was never about.
+  const claims = scanCountClaims(
+    [{ path: "x.md", type: "concept", body: `Gated tools (${CAPSID.tools + 6} of ${TOOLS}).` }],
+    "capsid"
+  );
   assert.equal(claims.length, 1);
   assert.match(claims[0].authoritative, /cannot exceed/);
   assert.match(claims[0].note ?? "", /internal contradiction/);

@@ -106,6 +106,16 @@ export const TABLES = [
   "document_versions",
   "audit_log",
   "document_links",
+  // The improve loop's four tables, added by migrations/0003_improve.sql. They are
+  // backed up for the same reason as document_links was: test/backup.test.ts
+  // derives this list from migrations/ and fails in both directions, so a table
+  // that exists and is not dumped is a build failure rather than a discovery made
+  // during a restore. Nothing prunes them, so a dump is the only copy of the
+  // lineage and the attempt record outside D1.
+  "improve_scores",
+  "improve_attempts",
+  "improve_runs",
+  "improve_skills",
 ] as const;
 
 export interface BackupSummary {

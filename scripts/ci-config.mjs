@@ -23,7 +23,7 @@
 
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
-import { APP_KV, D1, GITHUB_APP_CLIENT_ID, OAUTH_KV, R2 } from "./bindings.mjs";
+import { APP_KV, D1, GITHUB_APP_CLIENT_ID, HOLDOUT_R2, OAUTH_KV, R2 } from "./bindings.mjs";
 
 // Pinned in scripts/bindings.mjs, which is the ONE place a binding id is written
 // (quality audit 5.1). It is imported rather than repeated here because
@@ -35,6 +35,7 @@ const EXPECTED = {
   appKv: APP_KV,
   oauthKv: OAUTH_KV,
   r2: R2,
+  holdoutR2: HOLDOUT_R2,
   githubAppClientId: GITHUB_APP_CLIENT_ID,
 };
 
@@ -141,10 +142,27 @@ if (appKv.id === oauthKv.id) {
 //
 // To restore the account-side check, add R2 read to CLOUDFLARE_API_TOKEN and put
 // the `wrangler r2 bucket list` probe back.
-if (!EXPECTED.r2.name || EXPECTED.r2.name.startsWith("YOUR_")) {
-  die("the R2 bucket pin is unset or still a placeholder. Nothing was deployed.");
+for (const [label, pin] of [
+  ["MEDIA", EXPECTED.r2],
+  ["HOLDOUT", EXPECTED.holdoutR2],
+]) {
+  if (!pin.name || pin.name.startsWith("YOUR_")) {
+    die(`the R2 ${label} bucket pin is unset or still a placeholder. Nothing was deployed.`);
+  }
+  console.log(`ci-config: R2 ${label} ${pin.name} pinned by name, existence is enforced by the deploy step`);
 }
-console.log(`ci-config: R2 ${EXPECTED.r2.name} pinned by name, existence is enforced by the deploy step`);
+
+// THE TWO BUCKETS MUST BE DIFFERENT BUCKETS. Pointing HOLDOUT at capsid-media
+// would satisfy every other check here and silently undo the isolation: attempt
+// code holds MEDIA, so a shared bucket means attempt code can reach the hidden
+// suite. Same shape as the APP_KV/OAUTH_KV assertion above, and there for the same
+// reason: the split is the property, so the split is what gets asserted.
+if (EXPECTED.r2.name === EXPECTED.holdoutR2.name) {
+  die(
+    `MEDIA and HOLDOUT are pinned to the SAME bucket (${EXPECTED.r2.name}). ` +
+      `Attempt code holds MEDIA, so this would give it read access to the hidden holdout suite. Nothing was deployed.`
+  );
+}
 
 // Render the example into a real config.
 let config = readFileSync("wrangler.jsonc.example", "utf8");
@@ -152,6 +170,7 @@ const substitutions = [
   ["YOUR_D1_ID", EXPECTED.d1.id],
   ["YOUR_APP_KV_ID", EXPECTED.appKv.id],
   ["YOUR_OAUTH_KV_ID", EXPECTED.oauthKv.id],
+  ["YOUR_HOLDOUT_R2_BUCKET", EXPECTED.holdoutR2.name],
   ["YOUR_R2_BUCKET", EXPECTED.r2.name],
   ["YOUR_GITHUB_APP_CLIENT_ID", EXPECTED.githubAppClientId],
 ];

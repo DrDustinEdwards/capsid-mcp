@@ -12,13 +12,15 @@
 import type { AuthRequest } from "@cloudflare/workers-oauth-provider";
 import { createMcpHandler } from "agents/mcp";
 import { APPROVAL_MAX_AGE_SECONDS, approvalTag } from "./approval";
-import { isAdminUser, operatorGrant, operatorIdentity, sha256Hex, timingSafeEqual } from "./auth";
+import { hmacHex, isAdminUser, operatorGrant, operatorIdentity, sha256Hex, timingSafeEqual } from "./auth";
 import { runBackup } from "./backup";
-import { b64urlDecode, b64urlEncode, bytesToHex } from "./encoding";
+import { b64urlDecode, b64urlEncode } from "./encoding";
 import { REPORT_PATH, REPORT_PREFIX } from "./headers";
 import { callerIp, checkCspReportRate, rateLimitedResponse } from "./rate-limit";
 import type { Env } from "./env";
 import { buildServer } from "./server";
+import { ingestScore } from "./improve-run";
+import { MAX_REPORT_BYTES, parseScoreReport, SCORE_PATH, verifySignedReport } from "./improve-scorer";
 import { probeFts } from "./store-probe";
 
 const GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize";
@@ -44,18 +46,6 @@ function getCookie(request: Request, name: string): string | null {
     if (part.slice(0, eq).trim() === name) return part.slice(eq + 1).trim();
   }
   return null;
-}
-
-async function hmacHex(secret: string, payload: string): Promise<string> {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload));
-  return bytesToHex(sig);
 }
 
 // The approval cookie carries entries from src/approval.ts: a client id bound to a
@@ -529,6 +519,58 @@ async function handleCspReport(request: Request, env: Env): Promise<Response> {
 //
 // The fts probe itself moved to src/store-probe.ts on 2026-08-17, because the backup
 // preflight refuses to prune on the same signal and the two must be the same probe.
+// THE SCORE REPORT SINK. CI posts here when it has finished scoring a branch.
+//
+// NOT UNDER /ops/. An /ops/ path means "an operator key opens this", and an
+// operator key can write every document in the store. Five repos need to reach
+// this endpoint, and handing five repos that key to report a build result would
+// be the largest privilege escalation in this Worker. It is opened by a
+// per-namespace HMAC instead, derived from one Worker secret, so a key leaking
+// from one repo's Actions log authorises reports for that namespace and nothing
+// else.
+//
+// NO RATE LIMITER, and the reason is the difference from /csp-report. That path
+// takes an unauthenticated write into R2 from anyone; this one writes nothing at
+// all until a signature over the body verifies against a secret only the target
+// repo holds. An unsigned flood costs two HMAC computations per request and
+// reaches no storage.
+async function handleImproveScore(request: Request, env: Env): Promise<Response> {
+  const namespace = request.headers.get("X-Improve-Namespace") ?? "";
+  const timestamp = request.headers.get("X-Improve-Timestamp") ?? "";
+  const signature = request.headers.get("X-Improve-Signature") ?? "";
+
+  // Bounded BEFORE the body is read into memory, using the declared length where
+  // there is one. A score report is a few hundred bytes of numbers.
+  const declared = Number(request.headers.get("Content-Length") ?? "0");
+  if (Number.isFinite(declared) && declared > MAX_REPORT_BYTES) {
+    return textResponse(`report too large: ${declared} bytes exceeds ${MAX_REPORT_BYTES}`, 413);
+  }
+  const body = await request.text();
+
+  const verdict = await verifySignedReport(env, { namespace, timestamp, signature, body }, new Date());
+  if (!verdict.ok) {
+    console.error(`IMPROVE_SCORE_REJECTED ${namespace || "(no namespace)"}: ${verdict.refusal}`);
+    return textResponse(verdict.refusal, verdict.status);
+  }
+
+  const parsed = parseScoreReport(body);
+  if (!parsed.ok) return textResponse(parsed.refusal, 400);
+
+  // THE SIGNED NAMESPACE IS THE AUTHORITY, not the one in the body. The signature
+  // was verified with the key derived for the header's namespace, so a body
+  // claiming a different namespace is a repo trying to report for a project it
+  // does not hold the key to. Refused rather than reconciled.
+  if (parsed.report.namespace !== verdict.namespace) {
+    return textResponse(
+      `the report body names namespace '${parsed.report.namespace}' but it was signed with the key for '${verdict.namespace}'`,
+      403
+    );
+  }
+
+  const result = await ingestScore(env, parsed.report, new Date());
+  return Response.json(result, { status: result.ok ? 200 : 409 });
+}
+
 async function handleHealth(env: Env): Promise<Response> {
   const provenance = {
     sha: env.BUILD_SHA ?? "unknown",
@@ -560,6 +602,7 @@ export const defaultHandler = {
     if (url.pathname === REPORT_PATH && request.method === "POST") return handleCspReport(request, env);
     if (url.pathname === "/ops/mcp") return handleOperatorMcp(request, env, ctx);
     if (url.pathname === "/ops/backup" && request.method === "POST") return handleBackup(request, env);
+    if (url.pathname === SCORE_PATH && request.method === "POST") return handleImproveScore(request, env);
     if (url.pathname === "/authorize" && request.method === "GET") return handleAuthorizeGet(request, env);
     if (url.pathname === "/authorize" && request.method === "POST") return handleAuthorizePost(request, env);
     if (url.pathname === "/callback") return handleCallback(request, env);

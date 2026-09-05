@@ -7,6 +7,26 @@ export async function sha256Hex(input: string): Promise<string> {
   return bytesToHex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input)));
 }
 
+// HMAC-SHA256, hex. Lived privately in src/routes.ts until the improve arc needed
+// the same primitive for the CI score report signature.
+//
+// MOVED RATHER THAN COPIED, per the duplication rule in
+// capsid/repo-structure.md: two implementations of a signature helper is exactly
+// the shape that drifts, and the copy that drifts is the one nobody is looking
+// at. routes.ts imports it now and its call sites are unchanged, which is what
+// keeps the timingSafeEqual guards in test/source-conventions.test.ts matching.
+export async function hmacHex(secret: string, payload: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload));
+  return bytesToHex(sig);
+}
+
 // Compare two secrets without leaking where they diverge (audit 2, F1).
 //
 // Kept small on purpose. Every caller compares a fixed-length hex digest or an

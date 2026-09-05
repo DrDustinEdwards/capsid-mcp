@@ -6,11 +6,23 @@
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "keep_vars": true,
   "observability": { "enabled": true },
-  "triggers": { "crons": ["0 9 * * *"] },
+  // THREE CRONS. src/index.ts dispatches on which one fired and exports the same
+  // three strings; test/improve-cron.test.ts derives one list from the other and
+  // fails in both directions, so this config and the handler cannot drift.
+  //   "0 9 * * *"    the daily backup.
+  //   "0 8,9 * * *"  the improve opener. Two UTC hours because cron expressions
+  //                  are UTC only and 03:00 America/Chicago is 08:00 UTC in CDT
+  //                  and 09:00 in CST. chicagoHour() picks the real one, so the
+  //                  run opens once a night year round.
+  //   "*/5 * * * *"  the improve tick, advancing any run that is not finished.
+  "triggers": { "crons": ["0 9 * * *", "0 8,9 * * *", "*/5 * * * *"] },
   // Non-secret vars. The GitHub App client id is public; the App private key is set
   // with `wrangler secret put` and never committed. The installation id is not
   // configured at all: it is resolved per owner and repo at run time.
   //   wrangler secret put GITHUB_APP_PRIVATE_KEY       (paste the .pem contents)
+  //   wrangler secret put ANTHROPIC_API_KEY            (improve_mode "api" only)
+  //   wrangler secret put IMPROVE_SCORE_SECRET         (root of the per-namespace
+  //                                                     score-report HMAC keys)
   "vars": {
     "GITHUB_APP_CLIENT_ID": "YOUR_GITHUB_APP_CLIENT_ID"
   },
@@ -37,10 +49,19 @@
       "id": "YOUR_OAUTH_KV_ID"
     }
   ],
+  // TWO BUCKETS. MEDIA holds backups, the markdown mirror and the CSP report
+  // sink. HOLDOUT holds the improve loop's hidden test suites and is bound
+  // separately so that attempt-generating code can be handed an environment that
+  // structurally lacks it (src/env.ts, AttemptEnv). Only src/improve-scorer.ts may
+  // name it; test/improve-holdout.test.ts enforces that.
   "r2_buckets": [
     {
       "binding": "MEDIA",
       "bucket_name": "YOUR_R2_BUCKET"
+    },
+    {
+      "binding": "HOLDOUT",
+      "bucket_name": "YOUR_HOLDOUT_R2_BUCKET"
     }
   ]
 }

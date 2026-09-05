@@ -42,6 +42,21 @@ export const OAUTH_KV = { name: "capsid-app-kv", id: "5fac20b95ad541a39f24eb8c5a
 
 export const R2 = { name: "capsid-media" };
 
+// A SECOND R2 BUCKET, holding the improve loop's hidden holdout suites.
+//
+// Separate from capsid-media rather than a prefix inside it, and the separation is
+// the whole security property: attempt-generating code holds MEDIA and would be
+// physically able to read a prefix in it whatever a source scan said. A distinct
+// binding can be withheld structurally, which is what src/env.ts's AttemptEnv
+// does. src/improve-scorer.ts is the only module in src/ permitted to name it, and
+// test/improve-holdout.test.ts fails the build if a second one appears.
+//
+// CI reads the holdout tests directly from this bucket with its OWN read-only R2
+// token, held as a repo secret. That token is never in the Worker's environment,
+// so the Worker cannot hand the tests out even if asked; it reads only the
+// manifest, to check a report has not shrunk the suite it claims to have passed.
+export const HOLDOUT_R2 = { name: "capsid-improve-holdout" };
+
 // Public identifier. It appears in every OAuth URL the App generates and in
 // wrangler's own deploy output. Pinned because wrangler would otherwise write the
 // example's placeholder over the live value: keep_vars preserves vars that are

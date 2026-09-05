@@ -30,6 +30,8 @@ import { authoritativeFor, scanCountClaims } from "./counts";
 import { b64urlDecode, b64urlEncode } from "./encoding";
 import { bounded, BRIEF_BUDGET, DEFAULT_SCAN_FILES, DEFAULT_SCAN_RESULTS, docPath, GATHER_BUDGET, MAX_BODY, MAX_DOC_STATUS, MAX_COMMIT_MESSAGE, MAX_DOC_TYPE, MAX_GLOB, MAX_LINKS_JSON, MAX_PATH, MAX_PR_BODY, MAX_PR_TITLE, MAX_QUERY, MAX_REF, MAX_REPO_SELECTOR, MAX_REPOS_JSON, MAX_ROWS, MAX_SCAN_CAP, MAX_SHA, MAX_TAGS, MAX_TITLE, nsName, SEARCH_ROWS } from "./limits";
 import { assembleBody } from "./write-modes";
+import { ROSTER as IMPROVE_ROSTER, onRoster, RUN_CONDITIONS } from "./improve-schema";
+import { improveRunManual, improveStatus } from "./improve-run";
 
 const SERVER_INFO = { name: "capsid", version: "1.0.0" };
 
@@ -1716,8 +1718,8 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
     return ok(result);
   };
 
-  // A namespace can map to more than one repo (e.g. recova -> foxhound primary +
-  // recova legacy). The optional `repo` argument on every repo tool selects one:
+  // A namespace can map to more than one repo (e.g. foxhound -> foxhound primary
+  // + recova legacy). The optional `repo` argument on every repo tool selects one:
   // pass a label ("primary", "legacy") or a full "owner/name" that is mapped to
   // the namespace. Omit it to target the primary repo. Use `namespaces` to see
   // the mapping.
@@ -1865,6 +1867,58 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
       },
     },
     ({ namespace, repo, limit }) => guarded(() => ciStatus(env, namespace, repo, { limit, logTail: mayWrite }))
+  );
+
+  // THE IMPROVE LOOP'S TWO TOOLS, and they are a ruled exception to hard rule 1
+  // ("the surface is small and stays that way"), recorded in capsid/decisions.md
+  // alongside the history/restore exception of 2026-08-13. The subsystem is driven
+  // by cron; these exist because a cron-only subsystem is one nobody can inspect
+  // or start by hand, and the 2026-08-09 outage was 26 days undetected for exactly
+  // that shape of reason.
+  server.registerTool(
+    "improve_run",
+    {
+      description:
+        `Open improve runs for the roster namespaces, or one named namespace, and advance them one step. Respects APP_KV improve_mode ("api" | "subscription" | "off", default off) and skips any namespace with an improve:paused:<ns> key. Refuses a namespace whose improve/scores.md anchor block does not match its pinned sha256. dry_run reports exactly what a real run would do and writes NOTHING: no branch, no CI dispatch, no row, no document. Requires an operator key with the write grant. The nightly cron calls the same code path, so this is for starting one early or for reading the plan.`,
+      inputSchema: {
+        namespace: nsName.optional().describe("Limit to one namespace. Omit for the whole roster."),
+        dry_run: z.boolean().optional().describe("Report the plan and change nothing. Defaults to false."),
+        condition: bounded(MAX_DOC_STATUS)
+          .optional()
+          .describe(
+            `The experimental condition to run under: ${RUN_CONDITIONS.join(" | ")}. Defaults to full. "no-memory" withholds lineage history from base selection; "no-transfer" offers no cross-project skill. Recorded on the run row and in its audit rows, so an ablation is a query. An unrecognised value is refused rather than defaulted.`
+          ),
+      },
+    },
+    async ({ namespace, dry_run, condition }) => {
+      if (!mayWrite) return fail(DENIED);
+      if (namespace && !onRoster(namespace)) {
+        return fail(
+          `namespace '${namespace}' is not on the improve roster (${IMPROVE_ROSTER.join(", ")}). A namespace joins by being added to ROSTER in src/improve-schema.ts and by having its anchor block pinned.`
+        );
+      }
+      try {
+        return ok(await improveRunManual(env, new Date(), { namespace, dryRun: dry_run === true, condition }));
+      } catch (err) {
+        return fail(err instanceof Error ? err.message : String(err));
+      }
+    }
+  );
+
+  server.registerTool(
+    "improve_status",
+    {
+      description:
+        "The improve loop's current state: the mode, and per namespace the pause reason if any, whether its anchor block is pinned, the best known commit and score, the last run, and lifetime totals for attempts, keeps, reverts, estimated model cost and CI minutes. Read-only. cost_usd is an estimate computed from token counts and published rates, not a bill.",
+      inputSchema: { namespace: nsName.optional().describe("Limit to one namespace. Omit for the whole roster.") },
+    },
+    async ({ namespace }) => {
+      try {
+        return ok(await improveStatus(env, namespace));
+      } catch (err) {
+        return fail(err instanceof Error ? err.message : String(err));
+      }
+    }
   );
 
   // Template metadata spreads onto every listed resource, so it is stated ONCE and

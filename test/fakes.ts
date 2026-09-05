@@ -26,6 +26,16 @@
 // the WHERE clauses are resolved against the bound values, so asking for the wrong
 // path or the wrong version id gets nothing, exactly as D1 would answer.
 
+// THE IMPROVE TABLES live in their own dialect module, delegated to below. Still
+// ONE fakeD1: this is a second SQL dialect inside the one fake, not a second fake.
+import {
+  IMPROVE_ATTEMPT_DEFAULTS,
+  IMPROVE_RUN_DEFAULTS,
+  IMPROVE_SKILL_DEFAULTS,
+  improveExec,
+  isImproveStatement,
+} from "./improve-fakes.ts";
+
 // ---- KV ---------------------------------------------------------------------
 
 export interface FakeKvOptions {
@@ -117,6 +127,14 @@ export function fakeR2(seed: Record<string, string> = {}, opts: FakeR2Options = 
       objects.set(key, value);
       return {};
     },
+    // Added for the improve arc: the scorer reads the holdout MANIFEST (a count,
+    // never the tests). No previous caller read an object back, which is why this
+    // was missing rather than deliberately absent.
+    get: async (key: string) => {
+      const value = objects.get(key);
+      if (value === undefined) return null;
+      return { key, text: async () => value };
+    },
     list: async ({ prefix, cursor }: { prefix?: string; cursor?: string }) => {
       const all = [...objects.keys()].filter((k) => !prefix || k.startsWith(prefix)).sort();
       const from = cursor ? Number(cursor) : 0;
@@ -190,6 +208,12 @@ export interface FakeD1Options {
   // Throw from batch() for any statement matching this, to drive the "a batch
   // failure is a clean refusal" paths. The guards throw on their own.
   failBatchMatching?: RegExp;
+  // The improve loop's four tables. Absent by default, so every pre-existing test
+  // is unaffected; present when a test drives the loop.
+  improveRuns?: Array<Record<string, unknown>>;
+  improveAttempts?: Array<Record<string, unknown>>;
+  improveScores?: Array<Record<string, unknown>>;
+  improveSkills?: Array<Record<string, unknown>>;
 }
 
 export interface FakeD1Rows {
@@ -197,6 +221,10 @@ export interface FakeD1Rows {
   versions: VersionRow[];
   namespaces: Array<{ namespace: string; repos?: string }>;
   links: Array<Record<string, unknown>>;
+  improve_runs: Array<Record<string, unknown>>;
+  improve_attempts: Array<Record<string, unknown>>;
+  improve_scores: Array<Record<string, unknown>>;
+  improve_skills: Array<Record<string, unknown>>;
 }
 
 export interface FakeD1 {
@@ -280,6 +308,10 @@ export function fakeD1(opts: FakeD1Options = {}): FakeD1 {
     versions: opts.versions ?? [],
     namespaces: opts.namespaces ?? [{ namespace: "capsid", repos: JSON.stringify([{ repo: "owner/repo", label: "primary" }]) }],
     links: opts.links ?? [],
+    improve_runs: (opts.improveRuns ?? []).map((r) => ({ ...IMPROVE_RUN_DEFAULTS, ...r })),
+    improve_attempts: (opts.improveAttempts ?? []).map((a) => ({ ...IMPROVE_ATTEMPT_DEFAULTS, ...a })),
+    improve_scores: opts.improveScores ?? [],
+    improve_skills: (opts.improveSkills ?? []).map((k) => ({ ...IMPROVE_SKILL_DEFAULTS, ...k })),
   };
   const recorded: Recorded[] = [];
   // READS are logged SEPARATELY from writes, deliberately. `recorded` means "what
@@ -296,6 +328,10 @@ export function fakeD1(opts: FakeD1Options = {}): FakeD1 {
   // wrong version id must get nothing back, the way the database would answer.
   const answerFirst = (sql: string, params: unknown[]): unknown => {
     const flat = sql.replace(/\s+/g, " ");
+    if (isImproveStatement(flat)) {
+      const answered = improveExec(flat, params, rows);
+      return answered.handled ? (answered.results[0] ?? null) : null;
+    }
     if (/FROM namespaces WHERE namespace/i.test(flat)) {
       return rows.namespaces.find((n) => n.namespace === params[0]) ?? null;
     }
@@ -336,6 +372,10 @@ export function fakeD1(opts: FakeD1Options = {}): FakeD1 {
 
   const answerAll = (sql: string, params: unknown[]): unknown[] => {
     const flat = sql.replace(/\s+/g, " ");
+    if (isImproveStatement(flat)) {
+      const answered = improveExec(flat, params, rows);
+      return answered.handled ? answered.results : [];
+    }
     // The backup dump: SELECT * FROM <table>, no WHERE.
     const dump = flat.match(/^SELECT \* FROM (\w+)/i);
     if (dump) {
@@ -481,6 +521,10 @@ export function fakeD1(opts: FakeD1Options = {}): FakeD1 {
     },
     run: async () => {
       recorded.push({ sql, params, via: "direct" });
+      // An improve mutation issued outside a batch still has to LAND, or a test
+      // that writes then reads gets a stale answer and the failure looks like the
+      // handler's rather than the fake's.
+      if (isImproveStatement(sql)) improveExec(sql, params, rows);
       return { meta: { changes: 1 } };
     },
   });
@@ -497,7 +541,10 @@ export function fakeD1(opts: FakeD1Options = {}): FakeD1 {
       }
       // Only once every statement has passed does anything land, which is what a
       // transaction means.
-      for (const s of statements) recorded.push({ sql: s.sql, params: s.params, via: "batch" });
+      for (const s of statements) {
+        recorded.push({ sql: s.sql, params: s.params, via: "batch" });
+        if (isImproveStatement(s.sql)) improveExec(s.sql, s.params, rows);
+      }
       return statements.map((s) => ({
         // Inflated on purpose: FTS5 triggers inflate meta.changes on this schema,
         // which is why the code counts with a SELECT instead of reading it.
@@ -512,7 +559,11 @@ export function fakeD1(opts: FakeD1Options = {}): FakeD1 {
 
 // ---- HTTP -------------------------------------------------------------------
 
-export type RouteSpec = { status?: number; body?: unknown; text?: string };
+// contentType added for the improve arc: the Anthropic SDK's streaming helper
+// needs a text/event-stream response, and `text` alone gets no content type at
+// all, which surfaces as "request ended without sending any chunks" a long way
+// from the cause.
+export type RouteSpec = { status?: number; body?: unknown; text?: string; contentType?: string };
 export type Route = RouteSpec | ((requestBody: unknown) => RouteSpec);
 
 export interface FetchCall {
@@ -541,7 +592,16 @@ export async function withFetch(
     if (!route) return new Response(`no route for ${method} ${parsed.pathname}`, { status: 500 });
     const spec = typeof route === "function" ? route(body) : route;
     const payload = spec.text !== undefined ? spec.text : spec.body === undefined ? "" : JSON.stringify(spec.body);
-    return new Response(payload, { status: spec.status ?? 200 });
+    // A JSON route DECLARES ITS CONTENT TYPE. github.ts calls resp.json()
+    // unconditionally and never noticed, but the Anthropic SDK branches on the
+    // header and hands back an unparsed body without it, which surfaces as
+    // `response.content is undefined` a long way from the cause.
+    const headers = spec.contentType
+      ? { "Content-Type": spec.contentType }
+      : spec.text !== undefined || spec.body === undefined
+        ? undefined
+        : { "Content-Type": "application/json" };
+    return new Response(payload, { status: spec.status ?? 200, headers });
   }) as typeof fetch;
   try {
     await fn(calls);

@@ -18,6 +18,12 @@
 // That is the "derive the expected list from the source of truth" rule from
 // capsid/conventions.md, applied to numbers instead of table names.
 
+// tools moved 24 to 26 in the improve arc: improve_run and improve_status. A
+// second ruled exception to the lean-surface rule, on the same reasoning as the
+// first and recorded in capsid/decisions.md: the improve loop is driven by cron,
+// and a cron-only subsystem is one nobody can inspect or start by hand. The
+// 2026-08-09 consent outage ran 26 days undetected for that shape of reason.
+//
 // tools moved 22 to 24 on 2026-08-13: history and restore. That is a deliberate
 // exception to the repo's own "the tool surface is deliberately small and should
 // stay that way" rule, ruled by Dustin in the audit response, because every
@@ -53,7 +59,7 @@ export interface AuthoritativeCounts {
 
 export const AUTHORITATIVE: Record<string, AuthoritativeCounts> = {
   capsid: {
-    tools: 24,
+    tools: 26,
     liveGates: 10,
     htmlEnforcedHeaders: 6,
     htmlReportOnlyHeaders: 1,
