@@ -180,9 +180,20 @@ test("delete_repo_file pr mode opens a branch and a PR", async () => {
 
 // ---- manage_pr: action routing ----------------------------------------------
 
+// The routes manage_pr needs for its branch cleanup, factored out because every
+// case below wants them. PR_ROUTES(head) names the head branch of PR 5.
+const PR_ROUTES = (head: string, base = "main") => ({
+  "GET /repos/o/r/pulls/5": { body: { head: { ref: head, repo: { full_name: "o/r" } }, base: { ref: base } } },
+  "GET /repos/o/r": { body: { default_branch: base } },
+});
+
 test("manage_pr merge calls the merge endpoint and returns the merged sha", async () => {
   await withFetch(
-    { "PUT /repos/o/r/pulls/5/merge": { body: { sha: "merged-sha", merged: true, message: "merged" } } },
+    {
+      "PUT /repos/o/r/pulls/5/merge": { body: { sha: "merged-sha", merged: true, message: "merged" } },
+      ...PR_ROUTES("feature/x"),
+      "DELETE /repos/o/r/git/refs/heads/feature/x": { status: 204 },
+    },
     async (calls) => {
       const result = await managePr(makeEnv([{ repo: "o/r", label: "primary" }]), "ns", 5, "merge", "squash");
       assert.deepEqual(result, {
@@ -192,6 +203,8 @@ test("manage_pr merge calls the merge endpoint and returns the merged sha", asyn
         merged: true,
         sha: "merged-sha",
         message: "merged",
+        head_branch: "feature/x",
+        head_branch_deleted: true,
       });
       assert.equal((calls[0].body as { merge_method: string }).merge_method, "squash");
     }
@@ -572,13 +585,134 @@ test("ci_status names the case where a failed run has no failed job", async () =
   );
 });
 
-test("manage_pr close patches the PR state to closed", async () => {
+test("manage_pr close patches the PR state to closed, and deletes the head branch", async () => {
   await withFetch(
-    { "PATCH /repos/o/r/pulls/5": { body: { number: 5, state: "closed", html_url: "https://pr" } } },
+    {
+      "PATCH /repos/o/r/pulls/5": { body: { number: 5, state: "closed", html_url: "https://pr" } },
+      ...PR_ROUTES("capsid/content-projects-json-mtkyt0ds"),
+      "DELETE /repos/o/r/git/refs/heads/capsid/content-projects-json-mtkyt0ds": { status: 204 },
+    },
     async (calls) => {
       const result = await managePr(makeEnv([{ repo: "o/r", label: "primary" }]), "ns", 5, "close");
-      assert.deepEqual(result, { repo: "o/r", number: 5, action: "close", state: "closed", url: "https://pr" });
+      assert.deepEqual(result, {
+        repo: "o/r",
+        number: 5,
+        action: "close",
+        state: "closed",
+        url: "https://pr",
+        head_branch: "capsid/content-projects-json-mtkyt0ds",
+        head_branch_deleted: true,
+      });
       assert.equal((calls[0].body as { state: string }).state, "closed");
+      assert.ok(
+        calls.some((c) => c.method === "DELETE" && c.path.includes("capsid/content-projects-json")),
+        "the Capsid PR-mode branch was not cleaned up"
+      );
+    }
+  );
+});
+
+// ---- the branch cleanup's three refusals, and the property that it never fails ----
+
+test("manage_pr NEVER deletes the default branch, whatever the PR says", async () => {
+  await withFetch(
+    {
+      "PATCH /repos/o/r/pulls/5": { body: { number: 5, state: "closed", html_url: "https://pr" } },
+      ...PR_ROUTES("main"),
+    },
+    async (calls) => {
+      const result = (await managePr(makeEnv([{ repo: "o/r", label: "primary" }]), "ns", 5, "close")) as {
+        head_branch_deleted: boolean;
+        head_branch_note?: string;
+      };
+      assert.equal(result.head_branch_deleted, false);
+      // head === base is caught first, which is also correct; either note is a refusal.
+      assert.match(result.head_branch_note ?? "", /same branch|default branch/);
+      assert.equal(calls.some((c) => c.method === "DELETE"), false, "it issued a DELETE against the default branch");
+    }
+  );
+});
+
+test("manage_pr LEAVES an improve-loop branch alone, because the loop owns those refs", async () => {
+  await withFetch(
+    {
+      "PATCH /repos/o/r/pulls/5": { body: { number: 5, state: "closed", html_url: "https://pr" } },
+      ...PR_ROUTES("improve/capsid-2026-09-06-a01"),
+    },
+    async (calls) => {
+      const result = (await managePr(makeEnv([{ repo: "o/r", label: "primary" }]), "ns", 5, "close")) as {
+        head_branch_deleted: boolean;
+        head_branch_note?: string;
+      };
+      assert.equal(result.head_branch_deleted, false, "it deleted an attempt branch the loop may still need");
+      assert.match(result.head_branch_note ?? "", /improve/);
+      assert.equal(calls.some((c) => c.method === "DELETE"), false);
+    }
+  );
+});
+
+test("manage_pr leaves a FORK's head branch alone", async () => {
+  await withFetch(
+    {
+      "PATCH /repos/o/r/pulls/5": { body: { number: 5, state: "closed", html_url: "https://pr" } },
+      "GET /repos/o/r/pulls/5": { body: { head: { ref: "patch-1", repo: { full_name: "someone/fork" } }, base: { ref: "main" } } },
+      "GET /repos/o/r": { body: { default_branch: "main" } },
+    },
+    async (calls) => {
+      const result = (await managePr(makeEnv([{ repo: "o/r", label: "primary" }]), "ns", 5, "close")) as {
+        head_branch_deleted: boolean;
+        head_branch_note?: string;
+      };
+      assert.equal(result.head_branch_deleted, false);
+      assert.match(result.head_branch_note ?? "", /someone\/fork/);
+      assert.equal(calls.some((c) => c.method === "DELETE"), false);
+    }
+  );
+});
+
+test("A FAILED BRANCH DELETE DOES NOT FAIL THE MERGE, because the merge already landed", async () => {
+  // Reporting the whole call as failed because a cleanup step failed would be a lie
+  // about the merge. Same rule invalidateRepoReads follows.
+  await withFetch(
+    {
+      "PUT /repos/o/r/pulls/5/merge": { body: { sha: "merged-sha", merged: true, message: "merged" } },
+      ...PR_ROUTES("feature/x"),
+      "DELETE /repos/o/r/git/refs/heads/feature/x": { status: 403, text: "Resource not accessible by integration" },
+    },
+    async () => {
+      const result = (await managePr(makeEnv([{ repo: "o/r", label: "primary" }]), "ns", 5, "merge")) as {
+        merged: boolean;
+        sha: string;
+        head_branch_deleted: boolean;
+        head_branch_note?: string;
+      };
+      assert.equal(result.merged, true, "a cleanup failure was reported as a failed merge");
+      assert.equal(result.sha, "merged-sha");
+      assert.equal(result.head_branch_deleted, false);
+      assert.match(result.head_branch_note ?? "", /403/);
+      assert.match(result.head_branch_note ?? "", /PR action itself succeeded/);
+    }
+  );
+});
+
+test("an unreadable PR leaves the branch alone and says why, without failing the close", async () => {
+  await withFetch(
+    {
+      "PATCH /repos/o/r/pulls/5": { body: { number: 5, state: "closed", html_url: "https://pr" } },
+      "GET /repos/o/r/pulls/5": { status: 404, text: "Not Found" },
+    },
+    async (calls) => {
+      const result = (await managePr(makeEnv([{ repo: "o/r", label: "primary" }]), "ns", 5, "close")) as {
+        state: string;
+        head_branch: string | null;
+        head_branch_deleted: boolean;
+        head_branch_note?: string;
+      };
+      assert.equal(result.state, "closed", "the close was reported as failed");
+      assert.equal(result.head_branch, null);
+      assert.equal(result.head_branch_deleted, false);
+      assert.match(result.head_branch_note ?? "", /could not read the PR/);
+      assert.equal(calls.some((c) => c.method === "DELETE"), false);
     }
   );
 });

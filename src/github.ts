@@ -798,6 +798,73 @@ export async function deleteRepoFile(
 
 // Merge or close an open pull request. Merging can trigger CI deploys in repos
 // with deploy workflows, so callers gate by blast radius (see conventions).
+// THE HEAD BRANCH IS DELETED WHEN A PR CLOSES OR MERGES (capsid/conventions.md,
+// ruled 2026-09-06). write_repo_file's default PR mode creates a branch per write, and
+// nothing was cleaning them up: a sweep across five repos on that date found 18
+// deletable branches, one of them a Capsid PR-mode branch whose PR was never opened.
+//
+// THREE PROPERTIES, and each one is a refusal rather than a hope:
+//   1. Never the default branch. A PR whose head IS the default branch is a
+//      cross-fork PR or a misconfiguration, and deleting it would be catastrophic.
+//   2. Never an improve-loop branch. The loop may still need the attempt, and its
+//      own lifecycle owns those refs; delete_branch refuses them without force for
+//      the same reason.
+//   3. NEVER FAILS THE PR ACTION. The merge or close already succeeded by the time
+//      this runs. Reporting the whole call as failed because a branch delete failed
+//      would be a lie about the merge, which is the same rule invalidateRepoReads
+//      follows above. The outcome is reported in head_branch_deleted either way, so a
+//      caller reads what happened instead of assuming.
+async function deleteHeadBranchAfterPr(
+  env: Env,
+  owner: string,
+  repo: string,
+  number: number
+): Promise<{ head_branch: string | null; head_branch_deleted: boolean; head_branch_note?: string }> {
+  try {
+    const prResp = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/pulls/${number}`);
+    if (!prResp.ok) {
+      return { head_branch: null, head_branch_deleted: false, head_branch_note: `could not read the PR to find its head branch (${prResp.status})` };
+    }
+    const pr = (await prResp.json()) as {
+      head: { ref: string; repo?: { full_name?: string } | null };
+      base: { ref: string };
+    };
+    const branch = pr.head.ref;
+
+    // A head branch on a FORK is not ours to delete, and the App token could not
+    // anyway. Compared by full_name rather than assumed from the ref.
+    const headRepo = pr.head.repo?.full_name;
+    if (headRepo && headRepo !== `${owner}/${repo}`) {
+      return { head_branch: branch, head_branch_deleted: false, head_branch_note: `head is on ${headRepo}, not this repo, so it was left alone` };
+    }
+    if (branch === pr.base.ref) {
+      return { head_branch: branch, head_branch_deleted: false, head_branch_note: "head and base are the same branch, so nothing was deleted" };
+    }
+    const defaultBranch = await getDefaultBranch(env, owner, repo);
+    if (branch === defaultBranch) {
+      return { head_branch: branch, head_branch_deleted: false, head_branch_note: "head is the default branch, which is never deleted" };
+    }
+    if (isImproveBranch(branch)) {
+      return {
+        head_branch: branch,
+        head_branch_deleted: false,
+        head_branch_note: `head is under the improve loop's prefix (${IMPROVE_BRANCH_PREFIX}), which owns its own refs, so it was left alone`,
+      };
+    }
+    const del = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/git/refs/heads/${encodePath(branch)}`, { method: "DELETE" });
+    if (!del.ok) {
+      return { head_branch: branch, head_branch_deleted: false, head_branch_note: `delete failed (${del.status}); the PR action itself succeeded` };
+    }
+    return { head_branch: branch, head_branch_deleted: true };
+  } catch (err) {
+    return {
+      head_branch: null,
+      head_branch_deleted: false,
+      head_branch_note: `branch cleanup errored: ${err instanceof Error ? err.message : String(err)}; the PR action itself succeeded`,
+    };
+  }
+}
+
 export async function managePr(
   env: Env,
   namespace: string,
@@ -819,7 +886,16 @@ export async function managePr(
     // PR touched. Which paths those are is not known here, which is the other reason
     // invalidation sweeps the repo prefix instead of computing keys.
     await invalidateRepoReads(env, owner, repo);
-    return { repo: `${owner}/${repo}`, number, action: "merge", merged: data.merged, sha: data.sha, message: data.message };
+    const cleanup = await deleteHeadBranchAfterPr(env, owner, repo, number);
+    return {
+      repo: `${owner}/${repo}`,
+      number,
+      action: "merge",
+      merged: data.merged,
+      sha: data.sha,
+      message: data.message,
+      ...cleanup,
+    };
   }
   const resp = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/pulls/${number}`, {
     method: "PATCH",
@@ -828,7 +904,8 @@ export async function managePr(
   });
   if (!resp.ok) throw new Error(`close failed (${resp.status}): ${await resp.text()}`);
   const data = (await resp.json()) as { number: number; state: string; html_url: string };
-  return { repo: `${owner}/${repo}`, number: data.number, action: "close", state: data.state, url: data.html_url };
+  const cleanup = await deleteHeadBranchAfterPr(env, owner, repo, number);
+  return { repo: `${owner}/${repo}`, number: data.number, action: "close", state: data.state, url: data.html_url, ...cleanup };
 }
 
 // Recent CI workflow runs for a namespace's repo, via the GitHub App. Read-only.

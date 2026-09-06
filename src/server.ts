@@ -1872,7 +1872,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
     "manage_pr",
     {
       description:
-        "Merge or close an open pull request in a namespace's repo. action 'merge' uses merge_method (default 'squash'); action 'close' just closes it. Merging can trigger CI deploys in repos with deploy workflows (foxhound): prefer PR mode plus manage_pr for anything touching live behavior, per conventions. Requires operator key.",
+        "Merge or close an open pull request in a namespace's repo. action 'merge' uses merge_method (default 'squash'); action 'close' just closes it. EITHER WAY IT DELETES THE HEAD BRANCH, because write_repo_file's PR mode creates one per write and nothing else cleans them up (capsid/conventions.md, 2026-09-06); the result carries head_branch and head_branch_deleted, plus head_branch_note when it declined. It REFUSES to delete the default branch, a branch under the improve loop's prefix, or a head branch on a fork, and a cleanup failure never fails the merge or close itself since that already succeeded. Merging can trigger CI deploys in repos with deploy workflows (foxhound): prefer PR mode plus manage_pr for anything touching live behavior, per conventions. Requires operator key.",
       inputSchema: {
         namespace: nsName,
         number: z.number().int().positive(),
