@@ -29,7 +29,7 @@
 // counts, latency) rather than attributing that drift to the first attempt.
 
 import type { Env } from "./env";
-import { listRepoTree, openPr, resolveRepo } from "./github";
+import { defaultBranchSha, listRepoTree, openPr, resolveRepo } from "./github";
 import { proposeChange, pushAttempt, renderChange } from "./improve-attempt";
 import { anchorDriftVerdict, driftVerdict, monitorAttempt } from "./improve-gates";
 import { runMetaLoop } from "./improve-meta";
@@ -154,6 +154,9 @@ export interface OpenOutcome {
   namespace: string;
   opened: boolean;
   runId: string | null;
+  // The commit a run would branch from. Only the dry run sets it, because that is
+  // the question a dry run exists to answer; a real run records it on the row.
+  base?: string | null;
   note: string;
 }
 
@@ -213,13 +216,7 @@ async function openOne(
 
   const best = await readBest(env.APP_KV, namespace);
   const history = await recentAttempts(env.DB, namespace, 50);
-  let defaultSha: string | null = null;
-  try {
-    const tree = await listRepoTree(env, namespace);
-    defaultSha = (tree as { sha?: string }).sha ?? null;
-  } catch {
-    defaultSha = null;
-  }
+  const defaultSha = await resolveDefaultSha(env, namespace);
   const choice = selectBase(best, history, defaultSha);
 
   if (mode === "subscription") {
@@ -1177,6 +1174,20 @@ export async function improveRunManual(
 // the pause key, the best record, the attempt history and the repo tree. Nothing
 // is written, and test/improve-tools.test.ts asserts that by driving it against a
 // fake D1 and checking nothing was recorded.
+// ONE RESOLVER, USED BY BOTH THE REAL PATH AND THE DRY RUN, so a dry run cannot
+// report a base the real run would not pick. It fails SOFT to null: a repo lookup
+// that errors should leave selectBase to say "no base could be resolved" rather than
+// take the whole run down, because a namespace with a best record does not need the
+// default branch at all.
+async function resolveDefaultSha(env: Env, namespace: string): Promise<string | null> {
+  try {
+    return await defaultBranchSha(env, namespace);
+  } catch (err) {
+    console.log(`IMPROVE_DEFAULT_SHA_UNRESOLVED ns=${namespace} ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
+
 async function dryRun(env: Env, only?: string): Promise<OpenOutcome[]> {
   const namespaces = only ? [only] : [...ROSTER];
   const outcomes: OpenOutcome[] = [];
@@ -1197,11 +1208,18 @@ async function dryRun(env: Env, only?: string): Promise<OpenOutcome[]> {
       continue;
     }
     const best = await readBest(env.APP_KV, namespace);
-    const choice = selectBase(best, await recentAttempts(env.DB, namespace, 50), null);
+    // THE DRY RUN RESOLVES THE BASE FOR REAL, and that is the point of it. It used to
+    // pass null here, so it reported "no base could be resolved" on every namespace
+    // and proved nothing about the resolution: the one thing a first run most needs
+    // to know is where it would branch from. Resolving is a read, so it stays inside
+    // the dry run's contract of writing nothing.
+    const defaultSha = await resolveDefaultSha(env, namespace);
+    const choice = selectBase(best, await recentAttempts(env.DB, namespace, 50), defaultSha);
     outcomes.push({
       namespace,
       opened: false,
       runId: null,
+      base: choice.sha || null,
       note: `would open a run and baseline ${choice.sha || "(no base resolved)"}: ${choice.why}`,
     });
   }

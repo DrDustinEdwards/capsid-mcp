@@ -251,19 +251,36 @@ test("ONE ACTIVE RUN PER NAMESPACE: the opener will not open a second", async ()
 
 // ---- the dry run ------------------------------------------------------------
 
-test("A DRY RUN WRITES NOTHING AT ALL", async () => {
-  await withFetch({}, async (calls) => {
-    const { d1, kv, env } = await harness({ kv: { improve_mode: "api" } });
-    const result = await improveRunManual(env, NOW, { namespace: "capsid", dryRun: true });
-    assert.equal(result.dry_run, true);
-    assert.match(result.opened[0].note, /would open a run/);
-    // Nothing committed, nothing in KV, nothing dispatched.
-    assert.deepEqual(d1.recorded, [], `a dry run issued ${d1.recorded.length} statement(s)`);
-    assert.deepEqual(d1.rows.improve_runs, []);
-    assert.deepEqual(kv.puts, [], "a dry run wrote to KV");
-    assert.deepEqual(calls, [], "a dry run made a network call");
-    assert.deepEqual(result.advanced, []);
-  });
+test("A DRY RUN WRITES NOTHING, though it does READ to resolve the base", async () => {
+  // THE INVARIANT SHARPENED 2026-09-06, and it is stronger than what it replaced.
+  // It used to assert no network call AT ALL, which forced the dry run to pass null
+  // for the default branch sha; it then reported "no base could be resolved" on every
+  // namespace and proved nothing about the one question a first run needs answered.
+  // Resolving the base is two GETs. So the claim that matters is asserted directly:
+  // no MUTATING call of any kind, rather than no call.
+  await withFetch(
+    {
+      "GET /repos/owner/capsid-mcp": { body: { default_branch: "main" } },
+      "GET /repos/owner/capsid-mcp/git/ref/heads/main": { body: { object: { sha: "d1efa17defau1tbranchsha0000000000000000" } } },
+    },
+    async (calls) => {
+      const { d1, kv, env } = await harness({ kv: { improve_mode: "api" } });
+      const result = await improveRunManual(env, NOW, { namespace: "capsid", dryRun: true });
+      assert.equal(result.dry_run, true);
+      assert.match(result.opened[0].note, /would open a run/);
+      // Nothing committed, nothing in KV, nothing dispatched.
+      assert.deepEqual(d1.recorded, [], `a dry run issued ${d1.recorded.length} statement(s)`);
+      assert.deepEqual(d1.rows.improve_runs, []);
+      assert.deepEqual(kv.puts, [], "a dry run wrote to KV");
+      assert.deepEqual(result.advanced, []);
+      // Every call it did make was a read.
+      const mutating = calls.filter((c) => c.method !== "GET");
+      assert.deepEqual(mutating, [], `a dry run made ${mutating.length} mutating call(s): ${mutating.map((c) => c.method + " " + c.path).join(", ")}`);
+      // And it actually resolved something, so this is not vacuous.
+      assert.equal(result.opened[0].base, "d1efa17defau1tbranchsha0000000000000000", "the dry run did not resolve the default branch sha");
+      assert.match(result.opened[0].note, /d1efa17defau1tbranchsha/);
+    }
+  );
 });
 
 test("a dry run still reports the refusals a real run would hit", async () => {

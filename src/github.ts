@@ -1596,3 +1596,18 @@ export async function readRepoFiles(env: Env, namespace: string, paths: string[]
     files,
   };
 }
+
+// THE DEFAULT BRANCH'S HEAD COMMIT SHA, which the improve loop needs and could not
+// get. It read `(await listRepoTree(...)).sha`, and listRepoTree returns
+// { repo, path, entries } with no top-level sha at all: the shas it carries are the
+// per-entry BLOB shas. So the expression was always undefined, defaultSha was always
+// null, and selectBase always fell through to "no base could be resolved" whenever
+// there was no best record and no kept attempt, which is exactly the state of a
+// namespace's FIRST EVER run. Found 2026-09-06 by asking why a dry run said that.
+//
+// The two halves already existed here as private helpers and were never composed.
+export async function defaultBranchSha(env: Env, namespace: string, repoSelector?: string): Promise<string> {
+  const { owner, repo } = await resolveRepo(env, namespace, repoSelector);
+  const branch = await getDefaultBranch(env, owner, repo);
+  return getRefSha(env, owner, repo, branch);
+}
