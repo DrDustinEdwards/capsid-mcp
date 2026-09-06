@@ -1,43 +1,31 @@
 name: improve-score
 
-# THE SCORER, SPLIT INTO TWO JOBS (audit 2026-09-06). The improve loop dispatches
-# this; it does not run on push.
+# THE SCORER, SPLIT INTO TWO JOBS (audit 2026-09-06, option a).
 #
-# WHY TWO JOBS. The old single job checked out the attempt branch and ran its
-# npm ci, build, test and lint in the SAME job that later held the holdout R2
-# credentials and the HMAC signing key. Attempt-controlled code therefore executed
-# beside the secrets, could read the hidden suite off disk, and could force the
-# holdout pass count by exiting 0 before its assertions ran. The split fixes the
-# first two:
+#   build  (PER REPO, no secrets) checks out the ATTEMPT branch and runs this
+#          repo's own build / test / lint / measure commands, writes a normalized
+#          metrics.json { build_passes, test_pass_rate|null, lint_count|null,
+#          bundle_size_bytes|null }, and uploads it with the attempt source under
+#          code/. It never sees a credential and persist-credentials is false.
+#   score  (BYTE-IDENTICAL across all five roster repos) checks out the DEFAULT
+#          branch only, downloads build's artifact, overlays the attempt source,
+#          pulls the holdout, runs it counting passes from node --test's JSON
+#          reporter via scripts/improve-report.mjs (never an exit code), then reads
+#          metrics.json, signs and posts.
 #
-#   build  (no secrets of any kind) checks out the ATTEMPT branch and runs every
-#          attempt-controlled command: npm ci, build, the repo's own test suite,
-#          lint and the bundle measurement. It uploads an artifact: a JSON test
-#          report and the attempt's source. It never sees a credential.
-#   score  (holds the secrets) checks out the DEFAULT branch only, so the scoring
-#          glue and the test loader are trusted. It downloads build's artifact,
-#          pulls the holdout suite, runs it, and counts passes from node --test's
-#          JSON reporter via scripts/improve-report.mjs (a trusted default-branch
-#          file), never from an exit code. Then it signs and posts.
+# ONLY THE build JOB DIFFERS PER REPO. The score job and scripts/improve-report.mjs
+# are copied verbatim; change them here and re-copy, never edit one copy.
 #
-# THE WORKFLOW IS ALWAYS RESOLVED ON THE DEFAULT BRANCH. src/github.ts dispatches
-# with ref = default branch and passes the branch to score as an INPUT, so an
-# attempt cannot rewrite the thing that measures it. The Worker also refuses,
-# before it ever dispatches, any attempt that touches a protected path (tests,
-# .github, .nvmrc, .npmrc, scripts, package.json, and the rest of
-# PROTECTED_PATH_PATTERNS), so a change that could steer this file or the toolchain
-# never reaches a branch.
+# WHY THE SPLIT. The old single job ran attempt code beside the holdout suite and
+# the signing key. Now the largest attacker-controlled execution (npm ci, build,
+# the repo's own tests, lint) runs in build with no secrets, and score holds the
+# secrets but runs trusted default-branch glue. The Worker also refuses, before it
+# dispatches, any attempt touching a protected path, so nothing that could steer
+# this file or the toolchain reaches a branch.
 #
-# RESIDUAL, STATED HONESTLY: the holdout tests import the attempt's source, so
-# attempt code still runs in the score job while the holdout suite is on disk. The
-# credentials are step-scoped away from it (R2 on the pull step, the key on the
-# post step) and pass counting is by trusted JSON parsing, but fully isolating
-# attempt-imported holdout code would need a sandbox, not a workflow. Do not hoist
-# the step-scoped secrets to the job level.
-#
-# THIS FILE IS THE REFERENCE COPY. Every roster namespace needs one. The lines that
-# differ per repo are marked PER-REPO: the build, test, lint and bundle commands,
-# and which source tree the holdout imports.
+# RESIDUAL: the holdout tests import the attempt source, so attempt code still runs
+# in the score job. Credentials are step-scoped away from it and pass counting is
+# by trusted JSON parsing; full isolation would need a sandbox, not a workflow.
 
 on:
   workflow_dispatch:
@@ -57,21 +45,16 @@ permissions:
 
 jobs:
   build:
-    name: build (no secrets)
+    name: build (per-repo, no secrets)
     runs-on: ubuntu-latest
     timeout-minutes: 25
     outputs:
-      # The attempt branch head, captured right after checkout and before any
-      # attempt code runs. The Worker refuses a report whose head_sha does not match
-      # the attempt it recorded, so this is what binds the score to the commit.
       head_sha: ${{ steps.head.outputs.sha }}
     steps:
       - name: Stamp the start
         id: started
         run: echo "epoch=$(date -u +%s)" > started.txt
 
-      # persist-credentials: false so the checkout token is not left in .git/config
-      # for the attempt code this job runs.
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ inputs.branch }}
@@ -89,64 +72,65 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # EVERY MEASUREMENT STEP IS continue-on-error: here a failing build IS the
-      # measurement, and the report still has to be produced saying so.
+      # ---- PER-REPO measurement. capsid-mcp: node --test, tsc, wrangler. ----
       - name: Build
         id: build
         continue-on-error: true
-        run: npm run check # PER-REPO
+        run: npm run check
 
-      # The repo's own suite, emitted as node --test's JSON reporter rather than as
-      # TAP text, so the score job counts results from events instead of grepping a
-      # human string an attempt could print.
       - name: Test
         id: test
         continue-on-error: true
-        run: npm test -- --test-reporter=json --test-reporter-destination=test-report.json # PER-REPO
+        run: npm test -- --test-reporter=json --test-reporter-destination=test-report.json
 
-      - name: Lint
-        id: lint
-        continue-on-error: true
-        run: echo "count=$(npm run check:test 2>&1 | grep -c 'error TS' || true)" > lint-count.txt # PER-REPO
-
-      - name: Measure bundle
-        id: bundle
+      - name: Measure
+        id: measure
         continue-on-error: true
         run: |
           set -uo pipefail
-          BYTES=$(npx wrangler deploy --dry-run --outdir=.improve-build > /dev/null 2>&1 && du -sb .improve-build 2>/dev/null | cut -f1 || echo "") # PER-REPO
-          echo "bytes=${BYTES}" > bundle-bytes.txt
+          BUILD_PASSES=0; [ "${{ steps.build.outcome }}" = "success" ] && BUILD_PASSES=1
+          RATE=$(node scripts/improve-report.mjs --rate test-report.json || echo "")
+          LINT_COUNT=$(npm run check:test 2>&1 | grep -c "error TS" || true)
+          BUNDLE_BYTES=$(npx wrangler deploy --dry-run --outdir=.improve-build > /dev/null 2>&1 && du -sb .improve-build 2>/dev/null | cut -f1 || echo "")
+          BUILD_PASSES="${BUILD_PASSES}" RATE="${RATE}" LINT_COUNT="${LINT_COUNT}" BUNDLE_BYTES="${BUNDLE_BYTES}" node -e '
+            const n=(v)=>(v===undefined||v===""?null:Number(v));
+            process.stdout.write(JSON.stringify({
+              build_passes: Number(process.env.BUILD_PASSES||"0"),
+              test_pass_rate: n(process.env.RATE),
+              lint_count: n(process.env.LINT_COUNT),
+              bundle_size_bytes: n(process.env.BUNDLE_BYTES),
+            }));
+          ' > metrics.json
+          cat metrics.json
 
-      - name: Record the build outcome
-        if: always()
-        run: echo "outcome=${{ steps.build.outcome }}" > build-outcome.txt
+      # PER-REPO: the source tree(s) the holdout imports. capsid-mcp: src.
+      - name: Stage the scored source
+        run: |
+          set -euo pipefail
+          mkdir -p code
+          cp -r src code/
 
-      # The artifact carries the numbers plus the attempt's SOURCE, which the score
-      # job overlays so the holdout runs against this attempt. It carries no
-      # node_modules and no .git.
       - name: Upload the attempt artifact
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: attempt
-          include-hidden-files: true
           retention-days: 1
           path: |
-            src
-            test-report.json
-            lint-count.txt
-            bundle-bytes.txt
-            build-outcome.txt
+            metrics.json
             started.txt
+            code
 
+  # ============================================================================
+  # BYTE-IDENTICAL BELOW THIS LINE ACROSS ALL FIVE ROSTER REPOS. Do not edit one
+  # copy; edit capsid-mcp's and re-copy.
+  # ============================================================================
   score:
     name: score (holds secrets)
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      # The DEFAULT branch only: the scoring glue, the test loader and
-      # scripts/improve-report.mjs are trusted, never the attempt's copies.
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
@@ -165,18 +149,19 @@ jobs:
           name: attempt
           path: attempt
 
-      # Overlay the attempt's source over the trusted checkout so the holdout, which
-      # imports it, exercises THIS attempt. The loader and scripts stay the trusted
-      # default-branch copies. PER-REPO: the tree the holdout imports.
       - name: Overlay the attempt source
         run: |
           set -euo pipefail
-          rm -rf src
-          cp -r attempt/src src
+          if [ -d attempt/code ]; then
+            for d in attempt/code/*; do
+              [ -e "$d" ] || continue
+              t="$(basename "$d")"
+              rm -rf "./$t"
+              cp -r "$d" "./$t"
+            done
+          fi
 
-      # THE HOLDOUT SET, pulled with a read-only R2 token held as a repo secret. The
-      # three IMPROVE_HOLDOUT_R2_* secrets are env ON THIS STEP ONLY, never
-      # job-wide, and no attempt code runs in this step. Do not hoist them.
+      # R2 holdout secrets are env ON THIS STEP ONLY; no attempt code runs here.
       - name: Pull the holdout suite
         id: holdout
         continue-on-error: true
@@ -193,27 +178,21 @@ jobs:
             .improve-holdout/ \
             --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
 
-      # Run each holdout case with the JSON reporter and count passes from the events
-      # via the trusted script. A case passes iff its report has a top-level pass and
-      # no failure; an attempt that exits 0 before asserting emits no pass and is not
-      # credited. The per-case report file name is randomised so attempt code cannot
-      # predict and forge it.
+      # Count passes from the JSON reporter via the trusted script, never exit codes.
       - name: Run the holdout suite
         id: holdout_run
         continue-on-error: true
         run: |
           set -uo pipefail
-          TOTAL=$(node -e 'process.stdout.write(String(require("./.improve-holdout/manifest.json").total))')
+          TOTAL=$(node -e 'try{process.stdout.write(String(require("./.improve-holdout/manifest.json").total))}catch{process.stdout.write("")}')
           LOADER=""
           [ -f ./test/resolve-ts.mjs ] && LOADER="--import ./test/resolve-ts.mjs"
           PASSED=0
           for f in .improve-holdout/*.test.*; do
             [ -e "$f" ] || continue
-            # A randomised report path attempt code cannot predict and pre-forge.
             REPORT=".improve-holdout/.report-$(node -e 'process.stdout.write(require("crypto").randomUUID())').json"
             # shellcheck disable=SC2086
             node --test --test-reporter=json --test-reporter-destination="$REPORT" $LOADER "$f" > /dev/null 2>&1 || true
-            # The trusted counter decides pass/fail from the events, not the exit code.
             if node scripts/improve-report.mjs --holdout "$REPORT"; then
               PASSED=$((PASSED+1))
             fi
@@ -221,13 +200,10 @@ jobs:
           echo "total=${TOTAL}" >> "$GITHUB_OUTPUT"
           echo "passed=${PASSED}" >> "$GITHUB_OUTPUT"
 
-      # THE REPORT. Signed with this namespace's derived key and posted back. RUN_ID,
-      # ATTEMPT_ID and the key are declared in THIS step's own env so nothing an
-      # earlier step wrote to GITHUB_ENV can override them; NODE_OPTIONS is cleared so
-      # a poisoned value cannot inject a --require into the trusted node calls; the
-      # HMAC is computed by node with the key read from the environment, never from
-      # argv; and curl is called by absolute path. ci_minutes is computed BEFORE the
-      # body is built.
+      # RUN_ID, ATTEMPT_ID and the key are in THIS step's own env so a poisoned
+      # GITHUB_ENV cannot override them; NODE_OPTIONS is cleared; the HMAC is
+      # computed by node with the key read from the environment, never argv; curl is
+      # absolute-pathed. ci_minutes is computed before the body.
       - name: Post the score report
         if: always()
         env:
@@ -237,8 +213,6 @@ jobs:
           RUN_ID: ${{ inputs.run_id }}
           ATTEMPT_ID: ${{ inputs.attempt_id }}
           ATTEMPT_HEAD_SHA: ${{ needs.build.outputs.head_sha }}
-          # Numeric step outputs pass through env, never interpolated into the run
-          # script, the same rule the dispatch inputs follow.
           HOLDOUT_TOTAL: ${{ steps.holdout_run.outputs.total }}
           HOLDOUT_PASSED: ${{ steps.holdout_run.outputs.passed }}
           NODE_OPTIONS: ""
@@ -248,32 +222,13 @@ jobs:
             echo "IMPROVE_SCORE_KEY is unset; the report cannot be signed and will not be sent." >&2
             exit 1
           fi
-
-          BUILD_OUTCOME=$(sed -n 's/^outcome=//p' attempt/build-outcome.txt)
-          LINT_COUNT=$(sed -n 's/^count=//p' attempt/lint-count.txt)
-          BUNDLE_BYTES=$(sed -n 's/^bytes=//p' attempt/bundle-bytes.txt)
           STARTED_EPOCH=$(sed -n 's/^epoch=//p' attempt/started.txt)
-
-          # ci_minutes first, so the body carries a real duration rather than 0.
           export CI_MINUTES=$(S="${STARTED_EPOCH}" N="$(date -u +%s)" node -e 'const s=Number(process.env.S||"0"),n=Number(process.env.N||"0");process.stdout.write(s>0?((n-s)/60).toFixed(2):"0")')
-
-          # The body: numbers plus a fresh jti. The key is not in scope for this call.
-          BODY=$(node scripts/improve-report.mjs \
-            attempt/test-report.json \
-            "${HOLDOUT_TOTAL}" \
-            "${HOLDOUT_PASSED}" \
-            "${LINT_COUNT}" \
-            "${BUNDLE_BYTES}" \
-            "${BUILD_OUTCOME}")
-
+          BODY=$(node scripts/improve-report.mjs attempt/metrics.json "${HOLDOUT_TOTAL}" "${HOLDOUT_PASSED}")
           TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          # Sign with node's crypto, key and body read from the ENVIRONMENT, never
-          # from argv, so neither appears in /proc/<pid>/cmdline.
           SIG=$(TS="${TS}" BODY="${BODY}" node -e 'const c=require("crypto");const h=c.createHmac("sha256",process.env.IMPROVE_SCORE_KEY);h.update(process.env.TS+"."+process.env.BODY);process.stdout.write(h.digest("hex"))')
-
           echo "Posting score report for ${ATTEMPT_ID}:"
           echo "${BODY}"
-
           /usr/bin/curl --fail-with-body --silent --show-error \
             -X POST "${CAPSID_URL}/improve/score" \
             -H "Content-Type: application/json" \
