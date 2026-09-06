@@ -40,7 +40,7 @@ import { parseLinks } from "./links";
 import { validateDocStatus, validateDocType } from "./doc-meta";
 import { authoritativeFor, scanCountClaims } from "./counts";
 import { b64urlDecode, b64urlEncode } from "./encoding";
-import { bounded, BRIEF_BUDGET, DEFAULT_SCAN_FILES, DEFAULT_SCAN_RESULTS, docPath, GATHER_BUDGET, MAX_BODY, MAX_DOC_STATUS, MAX_COMMIT_MESSAGE, MAX_DOC_TYPE, MAX_GLOB, MAX_LINKS_JSON, MAX_PATH, MAX_PR_BODY, MAX_PR_TITLE, MAX_QUERY, MAX_REF, MAX_REPO_SELECTOR, MAX_REPOS_JSON, MAX_ROWS, MAX_SCAN_CAP, MAX_SHA, MAX_TAGS, MAX_TITLE, nsName, SEARCH_ROWS } from "./limits";
+import { bounded, BRIEF_BUDGET, CI_DISPATCH_MAX_INPUTS, DEFAULT_SCAN_FILES, DEFAULT_SCAN_RESULTS, docPath, GATHER_BUDGET, HISTORY_ROWS, LINT_CONSUMED_MAX, MAX_BODY, MAX_DOC_STATUS, MAX_COMMIT_MESSAGE, MAX_DOC_TYPE, MAX_GLOB, MAX_LINKS_JSON, MAX_PATH, MAX_PR_BODY, MAX_PR_TITLE, MAX_QUERY, MAX_REF, MAX_REPO_SELECTOR, MAX_REPOS_JSON, MAX_ROWS, MAX_SCAN_CAP, MAX_SHA, MAX_TAGS, MAX_TITLE, nsName, SEARCH_ROWS } from "./limits";
 import { assembleBody } from "./write-modes";
 import { ROSTER as IMPROVE_ROSTER, onRoster, RUN_CONDITIONS } from "./improve-schema";
 import { improveRunManual, improveStatus } from "./improve-run";
@@ -873,12 +873,20 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
       // The guard itself is armed by commit.run() below, from this same pre-read.
       const statements: D1PreparedStatement[] = [];
       if (prior) {
+        // SNAPSHOT FROM THE LIVE ROW, INSIDE THE BATCH (audit 2026-09-06, Grok
+        // MAJOR 20 / 4.1b). Binding the pre-read body filed whatever this
+        // handler had READ, not what the table HELD at commit: on an unguarded
+        // update, a body written in the gap was overwritten while the snapshot
+        // recorded its predecessor, so the racer's body existed nowhere. The
+        // SELECT runs in the same transaction as the overwrite and cannot be a
+        // write behind.
         statements.push(
           db
             .prepare(
-              "INSERT INTO document_versions (document_id, namespace, path, title, body) VALUES (?1, ?2, ?3, ?4, ?5)"
+              `INSERT INTO document_versions (document_id, namespace, path, title, body)
+               SELECT id, namespace, path, title, body FROM documents WHERE namespace = ?1 AND path = ?2`
             )
-            .bind(prior.id, namespace, path, prior.title, prior.body)
+            .bind(namespace, path)
         );
       }
       statements.push(
@@ -1065,12 +1073,16 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
       }
       const { results } = await db
         .prepare(
+          // Bounded (audit 2026-09-06): retention is 90 days, so HISTORY_ROWS
+          // covers more than a snapshot a day; without a LIMIT this returned
+          // every snapshot ever taken of a hot document in one response.
           `SELECT id, snapshot_at, title, LENGTH(body) AS bytes
            FROM document_versions
            WHERE namespace = ?1 AND path = ?2
-           ORDER BY snapshot_at DESC, id DESC`
+           ORDER BY snapshot_at DESC, id DESC
+           LIMIT ?3`
         )
-        .bind(namespace, path)
+        .bind(namespace, path, HISTORY_ROWS)
         .all();
       const live = await db
         .prepare("SELECT title, updated_at, LENGTH(body) AS bytes FROM documents WHERE namespace = ?1 AND path = ?2")
@@ -1239,22 +1251,30 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
         unsupported: `confirmation required: re-run delete with confirm: true to remove ${namespace}/${path}. It will be snapshotted to document_versions first.`,
       });
       if (!deleteRefusal.ok) return fail(deleteRefusal.message);
+      const elicited = deleteRefusal.elicited;
       // Read the edges before pathMutation removes them: the audit row is the
       // only place they survive, since document_versions holds title and body
       // only.
       const { results: removedEdges } = await edgesTouching(db, namespace, path).all();
-      // requireExists is not redundant with the `prior` read above: that read is
-      // a separate transaction, and a delete that matches zero rows would
+      // The guard is not redundant with the `prior` read above: that read is a
+      // separate transaction, and a delete that matches zero rows would
       // otherwise snapshot a body, write an audit row saying 'delete', and answer
-      // "deleted" having removed nothing.
+      // "deleted" having removed nothing. AFTER AN ELICITATION the guard is the
+      // body one (audit 2026-09-06, Grok 4.1b), for the same reason write and
+      // restore arm it: the human who answered the 90-second prompt consented to
+      // deleting the body they were shown, and a body written in that window
+      // must abort the delete rather than vanish under a stale snapshot.
+      // The snapshot itself SELECTs the live row inside the batch, never the
+      // pre-read body; see the write handler's snapshot for why.
       try {
         await db.batch([
-          requireExists(db, namespace, path),
+          elicited ? requireBodyUnchanged(db, namespace, path, prior.body) : requireExists(db, namespace, path),
           db
             .prepare(
-              "INSERT INTO document_versions (document_id, namespace, path, title, body) VALUES (?1, ?2, ?3, ?4, ?5)"
+              `INSERT INTO document_versions (document_id, namespace, path, title, body)
+               SELECT id, namespace, path, title, body FROM documents WHERE namespace = ?1 AND path = ?2`
             )
-            .bind(prior.id, namespace, path, prior.title, prior.body),
+            .bind(namespace, path),
           ...pathMutation(db, namespace, path, null),
           db
             .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES (?1, 'delete', ?2, ?3, ?4)")
@@ -1262,7 +1282,11 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
         ]);
       } catch (err) {
         if (isMissingRowAbort(err)) {
-          return fail(`delete aborted, nothing changed: ${namespace}/${path} no longer exists. Another session removed it after this call started.`);
+          return fail(
+            elicited
+              ? `delete aborted, nothing changed: ${namespace}/${path} changed or was removed while the confirmation was open. Re-read it and try again.`
+              : `delete aborted, nothing changed: ${namespace}/${path} no longer exists. Another session removed it after this call started.`
+          );
         }
         return fail(`delete failed, nothing changed: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -1527,7 +1551,10 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
       inputSchema: {
         namespace: nsName,
         mode: z.enum(["gather", "finalize"]).optional(),
-        consumed: z.array(docPath).optional(),
+        // Bounded (audit 2026-09-06): the finalize batch spends four statements
+        // per path plus one audit row, and D1 caps a batch at 100 statements.
+        // The bound keeps the archive one atomic batch; see LINT_CONSUMED_MAX.
+        consumed: z.array(docPath).max(LINT_CONSUMED_MAX).optional(),
         confirm: z.boolean().optional(),
       },
     },
@@ -2023,7 +2050,13 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
         workflow: bounded(MAX_PATH).optional().describe("Workflow file name, e.g. ci.yml. Requires ref."),
         ref: bounded(MAX_REF).optional().describe("The branch or sha to run the workflow on. Requires workflow."),
         run_id: z.number().int().positive().optional().describe("Rerun this run's failed jobs. Not combinable with workflow."),
-        inputs: z.record(bounded(MAX_REF), bounded(MAX_REF)).optional().describe("workflow_dispatch inputs, as a flat string map."),
+        inputs: z
+          .record(bounded(MAX_REF), bounded(MAX_REF))
+          .refine((map) => Object.keys(map).length <= CI_DISPATCH_MAX_INPUTS, {
+            message: `at most ${CI_DISPATCH_MAX_INPUTS} workflow inputs: GitHub's own workflow_dispatch ceiling is ${CI_DISPATCH_MAX_INPUTS}, so a larger map can never be valid`,
+          })
+          .optional()
+          .describe("workflow_dispatch inputs, as a flat string map."),
         repo: bounded(MAX_REPO_SELECTOR).optional().describe(REPO_ARG),
       },
     },
@@ -2181,6 +2214,18 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   // prompt document exists today, so this collides with nothing yet.
   const PLACEHOLDER = /\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g;
   const promptVariables = (body: string) => [...new Set([...body.matchAll(PLACEHOLDER)].map((m) => m[1]))];
+  // TITLES ARE STORED TEXT AND REACH THE CLIENT'S MODEL AS A DESCRIPTION (audit
+  // 2026-09-06, Grok MAJOR 8). A description is trusted UI text the way a tool
+  // description is, and a D1 row is writable by any write-grant session, so the
+  // title passes a CHARACTER ALLOWLIST: enough for a human-legible name, no
+  // backticks, no braces, no control characters, nothing a description-reading
+  // model can be steered with, capped well under the title bound.
+  const PROMPT_TITLE_DISALLOWED = /[^A-Za-z0-9 ,.;:()'"!?_/-]+/g;
+  const promptSafeTitle = (title: string | null): string | undefined => {
+    if (!title) return undefined;
+    const safe = title.replace(PROMPT_TITLE_DISALLOWED, " ").replace(/\s+/g, " ").trim().slice(0, 200);
+    return safe || undefined;
+  };
   server.server.registerCapabilities({ prompts: { listChanged: false } });
   server.server.setRequestHandler(ListPromptsRequestSchema, async () => {
     const { results } = await db
@@ -2189,7 +2234,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
     return {
       prompts: results.map((row) => ({
         name: `${row.namespace}/${row.path.replace(/\.md$/, "")}`,
-        description: row.title ?? undefined,
+        description: promptSafeTitle(row.title),
         arguments: promptVariables(row.body ?? "").map((name) => ({ name, required: true })),
       })),
     };
@@ -2228,8 +2273,23 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
       throw new McpError(ErrorCode.InvalidParams, `missing arguments for prompt ${name}: ${[...missing].join(", ")}`);
     }
     return {
-      description: row.title ?? undefined,
-      messages: [{ role: "user" as const, content: { type: "text" as const, text } }],
+      description: promptSafeTitle(row.title),
+      // THE BODY IS DATA, NOT THE USER'S OWN WORDS (audit 2026-09-06, Grok MAJOR
+      // 8; the Fable audit's "prompts/get as role:user"). A document body is
+      // writable by any write-grant session, and returning it as plain user text
+      // hands whoever last wrote the row a message the client's model reads as
+      // its human speaking. An embedded resource is the protocol's shape for
+      // "content from a store": same body, same substitution, but carried as a
+      // cited document rather than as authored instructions.
+      messages: [
+        {
+          role: "user" as const,
+          content: {
+            type: "resource" as const,
+            resource: { uri: `capsid://${promptNs}/${promptPath}`, mimeType: "text/markdown", text },
+          },
+        },
+      ],
     };
   });
 

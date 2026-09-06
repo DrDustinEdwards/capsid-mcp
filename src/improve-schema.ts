@@ -123,6 +123,14 @@ export const PROPOSAL_PREFIX = "improve/proposals/";
 export const PROMPTS_PREFIX = "improve/prompts/";
 export const SKILLS_PREFIX = "improve/skills/";
 
+// The workflow file every roster repo carries. One spelling, HERE rather than in
+// improve-scorer.ts where it used to live, because github.ts's ci_dispatch now
+// refuses it by name (audit 2026-09-06, Fable MAJOR 7: a hand dispatch of the
+// scorer mints a genuinely signed score report for whatever ref it is pointed
+// at) and importing it from improve-scorer would cycle: improve-scorer already
+// imports dispatchWorkflow from github.
+export const SCORER_WORKFLOW = "improve-score.yml";
+
 // ---- states -----------------------------------------------------------------
 
 export const RUN_STATUSES = [

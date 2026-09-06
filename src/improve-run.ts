@@ -62,6 +62,7 @@ import {
   type BestRecord,
   type ImproveMode,
   type RunCondition,
+  type RunStatus,
 } from "./improve-schema";
 import { selectBase } from "./improve-select";
 import { abstractSkill, candidateSkills, readSkillBody, recordSkill, recordSkillOutcome } from "./improve-skills";
@@ -276,21 +277,39 @@ export async function tickRuns(env: Env, now: Date): Promise<TickOutcome[]> {
   const runs = await advanceableRuns(env.DB, RUNS_PER_TICK);
   const outcomes: TickOutcome[] = [];
   for (const run of runs) {
+    // Captured BEFORE the step runs: the claim CAS moves the row's status, so by
+    // the time the catch reads it, run.status can already say 'awaiting-score'
+    // about work that began in 'attempting'.
+    const entered = run.status;
     try {
       outcomes.push(await advanceOne(env, run, now));
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      console.error(`IMPROVE_TICK_THREW ${run.id} in '${run.status}': ${message}`);
+      console.error(`IMPROVE_TICK_THREW ${run.id} in '${entered}': ${message}`);
       // A throwing step does NOT wedge the run: it is finalized with the error
       // recorded. The alternative is a namespace whose one active-run slot is
       // held forever by a run nothing can advance.
-      await advanceRun(env.DB, {
-        runId: run.id,
-        expected: run.status,
-        next: "finalizing",
-        patch: { note: `a step threw in '${run.status}': ${message.slice(0, 400)}` },
-      });
-      outcomes.push({ runId: run.id, namespace: run.namespace, from: run.status, to: "finalizing", note: message });
+      //
+      // TWO CAS ATTEMPTS, deliberately (audit 2026-09-06, Grok MAJOR 21). The
+      // steps now claim the run (opening/attempting -> awaiting-score) BEFORE
+      // their external calls, so a step that throws mid-work has usually already
+      // moved the run past the status this loop read. The first CAS covers a
+      // throw before the claim; the re-read covers a throw after it. A losing
+      // tick cannot reach here at all (it returns at the failed claim), so the
+      // re-read cannot finalize a run some other tick is driving; and a run that
+      // went terminal in the meantime has no active row and is left alone.
+      const finalize = (expected: RunStatus) =>
+        advanceRun(env.DB, {
+          runId: run.id,
+          expected,
+          next: "finalizing",
+          patch: { note: `a step threw in '${entered}': ${message.slice(0, 400)}` },
+        });
+      if (!(await finalize(entered))) {
+        const current = await activeRun(env.DB, run.namespace);
+        if (current && current.id === run.id) await finalize(current.status);
+      }
+      outcomes.push({ runId: run.id, namespace: run.namespace, from: entered, to: "finalizing", note: message });
     }
   }
   return outcomes;
@@ -315,12 +334,22 @@ async function advanceOne(env: Env, run: RunRow, now: Date): Promise<TickOutcome
       return startAttempt(env, run, now);
     case "awaiting-score":
       return checkStaleScore(env, run, now);
-    case "judging":
+    case "judging": {
       // Only ever held inside an HTTP score ingest. A run found here by a tick
-      // means that request died mid-decision; putting it back to awaiting-score
-      // lets the stale guard resolve it rather than leaving it stuck.
+      // MAY mean that request died mid-decision, or may mean the ingest is alive
+      // right now: the five-minute tick and an HTTP ingest overlap freely, and
+      // yanking a live ingest's run back to awaiting-score re-opens it to the
+      // duplicate report the judging CAS exists to exclude (audit 2026-09-06,
+      // Grok MAJOR 21). So judging is left alone until advanced_at says the
+      // ingest is dead: no request lives SCORE_TIMEOUT_MS, so past that the hop
+      // back to awaiting-score is safe and the stale guard resolves it.
+      const heldMs = now.getTime() - Date.parse(`${run.advanced_at.replace(" ", "T")}Z`);
+      if (heldMs < SCORE_TIMEOUT_MS) {
+        return { runId: run.id, namespace: run.namespace, from: "judging", to: "judging", note: `an ingest holds this run (${Math.round(heldMs / 1000)}s); left alone` };
+      }
       await advanceRun(env.DB, { runId: run.id, expected: "judging", next: "awaiting-score" });
       return { runId: run.id, namespace: run.namespace, from: "judging", to: "awaiting-score", note: "a score ingest did not finish; returned to awaiting-score" };
+    }
     case "finalizing":
       return finalizeRun(env, run, now);
     default:
@@ -335,16 +364,26 @@ async function dispatchBaseline(env: Env, run: RunRow): Promise<TickOutcome> {
   }
   const id = baselineId(run.id);
   const branch = branchName(id);
-  // An empty push: the branch is created at the base commit and nothing is
-  // written to it, which is exactly what "measure the base" means.
-  await pushAttempt(env, { namespace: run.namespace, branch, baseSha: run.base_sha, summary: "baseline", files: [] });
-  await dispatchScorer(env, run.namespace, { branch, run_id: run.id, attempt_id: id });
-  await advanceRun(env.DB, {
+  // THE CLAIM COMES BEFORE ANY GITHUB CALL (audit 2026-09-06, Grok MAJOR 21).
+  // Two overlapping cron ticks both read this run as 'opening'; without the CAS
+  // here, both pushed the branch and both dispatched the scorer, and the loser's
+  // eventual failed transition could not un-run the duplicate CI job. The CAS is
+  // the claim: exactly one tick wins it, the loser returns without spending
+  // anything, and a throw AFTER the claim is finalized by the tick loop's catch
+  // from the claimed status.
+  const claimed = await advanceRun(env.DB, {
     runId: run.id,
     expected: "opening",
     next: "awaiting-score",
     patch: { current_attempt: id },
   });
+  if (!claimed) {
+    return { runId: run.id, namespace: run.namespace, from: "opening", to: run.status, note: "another tick claimed this run first; nothing dispatched" };
+  }
+  // An empty push: the branch is created at the base commit and nothing is
+  // written to it, which is exactly what "measure the base" means.
+  await pushAttempt(env, { namespace: run.namespace, branch, baseSha: run.base_sha, summary: "baseline", files: [] });
+  await dispatchScorer(env, run.namespace, { branch, run_id: run.id, attempt_id: id });
   return { runId: run.id, namespace: run.namespace, from: "opening", to: "awaiting-score", note: `baseline dispatched on ${branch}` };
 }
 
@@ -359,15 +398,32 @@ async function startAttempt(env: Env, run: RunRow, now: Date): Promise<TickOutco
     return { runId: run.id, namespace: run.namespace, from: "attempting", to: "finalizing", note: "attempt ceiling reached" };
   }
 
-  const { doc, refusal } = await loadScores(env, run.namespace);
-  if (refusal) {
-    await advanceRun(env.DB, { runId: run.id, expected: "attempting", next: "finalizing", patch: { note: refusal } });
-    return { runId: run.id, namespace: run.namespace, from: "attempting", to: "finalizing", note: refusal };
-  }
-
   const index = run.attempts + 1;
   const id = attemptId(run.id, index);
   const branch = branchName(id);
+  // THE CLAIM COMES BEFORE ANY ANTHROPIC OR GITHUB CALL (audit 2026-09-06, Grok
+  // MAJOR 21). Two overlapping ticks both read this run as 'attempting'; without
+  // the CAS here both paid for a model proposal and both pushed and dispatched
+  // it. awaiting-score doubles as the working status: the attempt id is claimed
+  // as current_attempt, a loser tick that arrives during the work sees a young
+  // awaiting-score and waits, and a claim owner that dies mid-work is resolved by
+  // the stale guard as "no score report", which is exactly what happened.
+  const claimed = await advanceRun(env.DB, {
+    runId: run.id,
+    expected: "attempting",
+    next: "awaiting-score",
+    patch: { current_attempt: id },
+  });
+  if (!claimed) {
+    return { runId: run.id, namespace: run.namespace, from: "attempting", to: run.status, note: "another tick claimed this run first; nothing spent" };
+  }
+
+  const { doc, refusal } = await loadScores(env, run.namespace);
+  if (refusal) {
+    await advanceRun(env.DB, { runId: run.id, expected: "awaiting-score", next: "finalizing", patch: { note: refusal } });
+    return { runId: run.id, namespace: run.namespace, from: "attempting", to: "finalizing", note: refusal };
+  }
+
   const priorAttempts = await attemptsForRun(env.DB, run.id);
   const best = await readBest(env.APP_KV, run.namespace);
   // CONDITION 'no-memory': lineage history is withheld from base selection, so the
@@ -414,13 +470,14 @@ async function startAttempt(env: Env, run: RunRow, now: Date): Promise<TickOutco
     ]);
     await advanceRun(env.DB, {
       runId: run.id,
-      expected: "attempting",
+      expected: "awaiting-score",
       next: run.consecutive_reverts + 1 >= MAX_CONSECUTIVE_REVERTS ? "finalizing" : "attempting",
       patch: {
         attempts: run.attempts + 1,
         reverts: run.reverts + 1,
         consecutive_reverts: run.consecutive_reverts + 1,
         cost_usd: run.cost_usd + proposal.costUsd,
+        current_attempt: null,
       },
     });
     return { runId: run.id, namespace: run.namespace, from: "attempting", to: "attempting", note };
@@ -448,13 +505,14 @@ async function startAttempt(env: Env, run: RunRow, now: Date): Promise<TickOutco
     ]);
     await advanceRun(env.DB, {
       runId: run.id,
-      expected: "attempting",
+      expected: "awaiting-score",
       next: run.consecutive_reverts + 1 >= MAX_CONSECUTIVE_REVERTS ? "finalizing" : "attempting",
       patch: {
         attempts: run.attempts + 1,
         reverts: run.reverts + 1,
         consecutive_reverts: run.consecutive_reverts + 1,
         cost_usd: run.cost_usd + proposal.costUsd,
+        current_attempt: null,
       },
     });
     return { runId: run.id, namespace: run.namespace, from: "attempting", to: "attempting", note: `reverted before push: ${preflight.reason}` };
@@ -494,9 +552,11 @@ async function startAttempt(env: Env, run: RunRow, now: Date): Promise<TickOutco
   ]);
 
   await dispatchScorer(env, run.namespace, { branch, run_id: run.id, attempt_id: id });
+  // The status was claimed at the top; this books the attempt and the spend, and
+  // refreshes advanced_at so the stale guard measures from the dispatch.
   await advanceRun(env.DB, {
     runId: run.id,
-    expected: "attempting",
+    expected: "awaiting-score",
     next: "awaiting-score",
     patch: { current_attempt: id, attempts: run.attempts + 1, cost_usd: run.cost_usd + proposal.costUsd },
   });
@@ -593,16 +653,27 @@ export async function ingestScore(env: Env, report: ScoreReport, now: Date): Pro
       // The BASE does not pass its own anchors. Nothing the loop does tonight can
       // be judged, and the honest response is to stop and say so rather than to
       // measure ten attempts against a broken floor.
-      await advanceRun(env.DB, {
+      // Checked (audit 2026-09-06): a lost judging CAS means a tick's stale
+      // guard reclaimed the run mid-ingest, and pretending the stop landed would
+      // report a state the row does not hold.
+      const stopped = await advanceRun(env.DB, {
         runId: run.id,
         expected: "judging",
         next: "finalizing",
         patch: { note: `the base commit fails its own anchors: ${verdict.reasons.join("; ")}`, ci_minutes: run.ci_minutes + report.ci_minutes },
       });
-      return { ok: true, message: "baseline recorded; the base fails its own anchors, so the run stops" };
+      return {
+        ok: true,
+        message: stopped
+          ? "baseline recorded; the base fails its own anchors, so the run stops"
+          : "baseline recorded; the base fails its own anchors, but the run moved out of judging mid-ingest and was not transitioned here",
+      };
     }
-    await advanceRun(env.DB, { runId: run.id, expected: "judging", next: "attempting", patch: { current_attempt: null, ci_minutes: run.ci_minutes + report.ci_minutes } });
-    return { ok: true, message: "baseline recorded" };
+    const resumed = await advanceRun(env.DB, { runId: run.id, expected: "judging", next: "attempting", patch: { current_attempt: null, ci_minutes: run.ci_minutes + report.ci_minutes } });
+    return {
+      ok: true,
+      message: resumed ? "baseline recorded" : "baseline recorded, but the run moved out of judging mid-ingest and was not transitioned here",
+    };
   }
 
   const attempt = await attemptById(env.DB, report.attempt_id);
@@ -733,7 +804,10 @@ export async function ingestScore(env: Env, report: ScoreReport, now: Date): Pro
 
   const ceiling = run.attempts >= MAX_ATTEMPTS_PER_RUN;
   const exhausted = consecutive >= MAX_CONSECUTIVE_REVERTS;
-  await advanceRun(env.DB, {
+  // Checked (audit 2026-09-06): the verdict above is already committed on the
+  // attempt row; if a tick's stale guard reclaimed the run while it was being
+  // judged, the counters were not advanced here and the caller is told so.
+  const advanced = await advanceRun(env.DB, {
     runId: run.id,
     expected: "judging",
     next: ceiling || exhausted ? "finalizing" : "attempting",
@@ -752,7 +826,11 @@ export async function ingestScore(env: Env, report: ScoreReport, now: Date): Pro
     },
   });
 
-  return { ok: true, message: reason, kept: keep };
+  return {
+    ok: true,
+    message: advanced ? reason : `${reason} (the run moved out of judging mid-ingest; its counters were not updated here)`,
+    kept: keep,
+  };
 }
 
 async function maybeAbstract(env: Env, run: RunRow, attempt: AttemptRow, change: string, delta: number): Promise<void> {

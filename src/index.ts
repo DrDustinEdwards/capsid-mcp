@@ -4,7 +4,7 @@ import { isAdminUser } from "./auth";
 import { runBackup } from "./backup";
 import { callerIp, checkRegistrationRate, dcrRedirectRefusal } from "./rate-limit";
 import { defaultHandler } from "./routes";
-import { withSecurityHeaders } from "./headers";
+import { mcpOriginProblem, withSecurityHeaders } from "./headers";
 import type { Env, Props } from "./env";
 import { buildServer } from "./server";
 import { chicagoHour } from "./improve-schema";
@@ -144,13 +144,22 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     // Seen by the registration callback, which the library calls without an env.
     currentEnv = env;
+    const pathname = new URL(request.url).pathname;
+    // The Origin allowlist runs BEFORE the provider so a refused browser request
+    // never reaches token validation. Why and what it admits: mcpOriginProblem.
+    if (pathname === "/mcp") {
+      const originProblem = mcpOriginProblem(request);
+      if (originProblem) {
+        return withSecurityHeaders(withCacheDefault(new Response(originProblem, { status: 403 }), pathname));
+      }
+    }
     const response = await provider.fetch(request, env, ctx);
     // Both wrappers sit here, at the only point that sees every response: this
     // handler's own, everything routes.ts returns, and everything
     // workers-oauth-provider generates for /token, /register and .well-known.
     // Security headers go outside Cache-Control so they are applied to the
     // rebuilt response rather than to one that is about to be replaced.
-    return withSecurityHeaders(withCacheDefault(response, new URL(request.url).pathname));
+    return withSecurityHeaders(withCacheDefault(response, pathname));
   },
   // THREE CRON EXPRESSIONS, DISPATCHED BY WHICH ONE FIRED.
   //

@@ -75,5 +75,7 @@ test("every destructive tool goes through the one confirmation helper", () => {
 test("move and lint finalize still accept a confirm argument", () => {
   const text = sourceFiles().map((f) => f.text).join("\n");
   assert.match(text, /path: docPath, new_path: docPath, confirm: z\.boolean\(\)\.optional\(\)/);
-  assert.match(text, /consumed: z\.array\(docPath\)\.optional\(\),\s*\n\s*confirm: z\.boolean\(\)\.optional\(\)/);
+  // consumed gained .max(LINT_CONSUMED_MAX) and a comment on 2026-09-06; the pin
+  // is about confirm still being accepted beside it, not about the bound.
+  assert.match(text, /consumed: z\.array\(docPath\)\.max\(LINT_CONSUMED_MAX\)\.optional\(\),\s*\n\s*confirm: z\.boolean\(\)\.optional\(\)/);
 });

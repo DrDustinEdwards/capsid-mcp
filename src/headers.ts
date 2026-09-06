@@ -67,6 +67,24 @@ export const CSP_REPORT_ONLY_NON_HTML =
 // evidence. Ruled 2026-08-12.
 export const COOP_REPORT_ONLY = "same-origin";
 
+// THE /mcp ORIGIN ALLOWLIST (audit 2026-09-06, Grok 2.5; the MCP streamable-HTTP
+// spec says servers MUST validate Origin). A browser attaches Origin to every
+// cross-origin fetch; a native MCP client attaches none. So: no Origin passes
+// (SDKs, curl, claude.ai's server-side connector), the Worker's own origin
+// passes, and claude.ai passes for a browser-side client. Everything else,
+// including the opaque "null" Origin a sandboxed frame sends, is refused before
+// the provider spends a token check on it. Bearer auth already blunts CSRF; this
+// closes the DNS-rebinding and browser-origin residue and the spec gap.
+const MCP_BROWSER_ORIGINS = new Set(["https://claude.ai"]);
+
+export function mcpOriginProblem(request: Request): string | null {
+  const origin = request.headers.get("Origin");
+  if (!origin) return null;
+  if (origin === new URL(request.url).origin) return null;
+  if (MCP_BROWSER_ORIGINS.has(origin)) return null;
+  return `forbidden: Origin ${origin} is not allowed on /mcp. This endpoint accepts same-origin requests, https://claude.ai, and clients that send no Origin header.`;
+}
+
 export function classifySurface(contentType: string | null): SurfaceClass {
   if (!contentType) return "other";
   const ct = contentType.toLowerCase();

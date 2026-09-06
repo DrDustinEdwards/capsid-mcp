@@ -91,6 +91,23 @@ export const BRIEF_BUDGET = 40_000;
 // the section gather itself tells the caller to batch.
 export const GATHER_BUDGET = 150_000;
 
+// lint finalize's consumed bound (audit 2026-09-06, Grok MAJOR 22 / Fable MAJOR
+// 16). Finalize issues one existence guard plus three pathMutation statements
+// per path plus one audit row: 20 paths is 81 statements, safely under D1's
+// 100-statement batch ceiling with the archive still ATOMIC. Chunking was
+// considered and rejected: a partial archive silently drops documents out of
+// the lint loop's view, which is the exact failure the in-batch guards stop.
+export const LINT_CONSUMED_MAX = 20;
+
+// ci_dispatch's inputs key bound (audit 2026-09-06, Grok §10 MINOR). GitHub's
+// own workflow_dispatch ceiling is 10 inputs, so a larger map can never be
+// valid; refusing it here costs the caller a clear message instead of a 422.
+export const CI_DISPATCH_MAX_INPUTS = 10;
+
+// history's listing bound (audit 2026-09-06, Grok §10 MINOR). Retention is 90
+// days, so 100 rows covers better than one snapshot a day before truncating.
+export const HISTORY_ROWS = 100;
+
 // search_code's ceiling, here rather than inside searchCode (quality audit 2.4).
 // It lived as a local const, so the tool description quoting "max 200" was a
 // second copy of the number that nothing could keep honest. Both the clamp and

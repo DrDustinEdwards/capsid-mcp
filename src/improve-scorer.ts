@@ -24,12 +24,12 @@
 import { hmacHex, timingSafeEqual } from "./auth";
 import type { Env } from "./env";
 import { dispatchWorkflow } from "./github";
-import { holdoutManifestKey, type HoldoutManifest } from "./improve-schema";
+import { holdoutManifestKey, SCORER_WORKFLOW, type HoldoutManifest } from "./improve-schema";
 import type { MetricMap } from "./improve-scores";
 
-// The workflow file every roster repo carries. One spelling, here, because the
-// dispatcher and the documentation that tells Dustin what to add both read it.
-export const SCORER_WORKFLOW = "improve-score.yml";
+// Re-exported from improve-schema (moved there so ci_dispatch can refuse it
+// without an import cycle); existing importers keep this path.
+export { SCORER_WORKFLOW };
 
 // The report endpoint. Not under /ops/: an /ops/ path means "an operator key
 // opens this", and this path is opened by a per-namespace HMAC instead. Naming
@@ -302,6 +302,20 @@ export function checkHoldout(manifest: HoldoutManifest | null, report: ScoreRepo
       passRate: null,
     };
   }
+  // ZERO TESTS IS A REFUSAL, exactly like no manifest (audit 2026-09-06). An
+  // empty hidden suite scores 1.0 by arithmetic, so a namespace whose manifest
+  // says total: 0 would pass the one anchor the loop rests on without a single
+  // hidden test running. Uploading an empty manifest is indistinguishable from
+  // forgetting to write the suite, and both must stop scoring, not pass it.
+  if (manifest.total === 0) {
+    return {
+      ok: false,
+      refusal:
+        `the holdout manifest for ${report.namespace} declares zero tests. An empty hidden suite scores exactly like a passing one, ` +
+        `so it is refused until the suite exists. Upload real tests and a manifest with their count to the holdout bucket.`,
+      passRate: null,
+    };
+  }
   if (report.holdout.total !== manifest.total) {
     return {
       ok: false,
@@ -319,7 +333,8 @@ export function checkHoldout(manifest: HoldoutManifest | null, report: ScoreRepo
     };
   }
   // Computed from the manifest's total, deliberately. See HoldoutVerdict.
-  return { ok: true, refusal: null, passRate: manifest.total === 0 ? 1 : report.holdout.passed / manifest.total };
+  // total is > 0 here: the zero-test manifest was refused above.
+  return { ok: true, refusal: null, passRate: report.holdout.passed / manifest.total };
 }
 
 // ---- dispatch ---------------------------------------------------------------

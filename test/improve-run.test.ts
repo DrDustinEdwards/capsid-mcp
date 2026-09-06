@@ -716,9 +716,15 @@ test("A RUN PAST ITS AGE CEILING FINALIZES wherever it is", async () => {
   });
 });
 
-test("a run found in 'judging' by a tick is returned to awaiting-score, not stranded", async () => {
+test("a run found STALE in 'judging' by a tick is returned to awaiting-score, not stranded", async () => {
+  // Stale advanced_at, past SCORE_TIMEOUT_MS: the ingest that held it is dead.
+  // The fresh-judging case (a live ingest, left alone) is pinned in
+  // test/audit-2026-09-06-round2.test.ts.
   await withFetch({}, async () => {
-    const { d1, env } = await harness({ improveRuns: [{ ...AWAITING, status: "judging" }], improveAttempts: [ATTEMPT] });
+    const { d1, env } = await harness({
+      improveRuns: [{ ...AWAITING, status: "judging", advanced_at: "2026-09-04 07:00:00" }],
+      improveAttempts: [ATTEMPT],
+    });
     const outcomes = await tickRuns(env, NOW);
     assert.equal(outcomes[0].to, "awaiting-score");
     assert.equal(d1.rows.improve_runs[0].status, "awaiting-score");

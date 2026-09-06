@@ -6,7 +6,7 @@
 // over the live GitHub REST API. No PAT, no clone.
 
 import { b64urlFromBytes, b64urlEncode, base64Decode, base64Encode } from "./encoding";
-import { IMPROVE_BRANCH_PREFIX, isImproveBranch } from "./improve-schema";
+import { IMPROVE_BRANCH_PREFIX, isImproveBranch, SCORER_WORKFLOW } from "./improve-schema";
 import { DEFAULT_SCAN_FILES, DEFAULT_SCAN_RESULTS, MAX_SCAN_CAP, pathProblem, repoPathProblem } from "./limits";
 // AttemptEnv, not Env, and the narrowing is deliberate rather than cosmetic.
 //
@@ -39,7 +39,10 @@ const READ_CACHE_TTL_SECONDS = 60; // brief cache for read tools
 // to run. Fixing the writer does not fix the entries it already wrote, so the
 // reader stops looking at them.
 const installKey = (owner: string) => `gh:install:v2:${owner}`;
-const tokenKey = (owner: string) => `gh:token:v2:${owner}`;
+// v3 and keyed per owner AND repo (audit 2026-09-06, Grok MAJOR 10): tokens are
+// minted scoped to one repo below, so a cached one must never answer for a
+// sibling repo, and the v2 unscoped tokens age out rather than being reused.
+const tokenKey = (owner: string, repo: string) => `gh:token:v3:${owner}/${repo}`;
 const readKey = (path: string) => `gh:get:${path}`;
 // The trailing slash matters: without it, owner/r would also match owner/repo2.
 const readPrefix = (owner: string, repo: string) => `gh:get:/repos/${owner}/${repo}/`;
@@ -129,19 +132,28 @@ async function getInstallationId(env: Env, owner: string, repo: string): Promise
 }
 
 async function getInstallationToken(env: Env, owner: string, repo: string): Promise<string> {
-  const cacheKey = tokenKey(owner);
+  const cacheKey = tokenKey(owner, repo);
   const cached = await env.APP_KV.get(cacheKey);
   if (cached) return cached;
   const installationId = await getInstallationId(env, owner, repo);
-  const resp = await appFetch(env, `/app/installations/${installationId}/access_tokens`, { method: "POST" });
+  // SCOPED TO THE ONE REPO BEING ASKED ABOUT (audit 2026-09-06, Grok MAJOR 10).
+  // An access_tokens POST with no body mints a token for every repo the
+  // installation covers, and that token then sits in APP_KV: anything that can
+  // read the KV entry holds the whole portfolio. With `repositories` it holds
+  // exactly the repo the caller resolved, which is all any call path here needs.
+  const resp = await appFetch(env, `/app/installations/${installationId}/access_tokens`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ repositories: [repo] }),
+  });
   if (!resp.ok) throw new Error(`installation token request failed (${resp.status}): ${await resp.text()}`);
   const data = (await resp.json()) as { token: string };
   await env.APP_KV.put(cacheKey, data.token, { expirationTtl: TOKEN_TTL_SECONDS });
   return data.token;
 }
 
-// One installation covers every repo under a single owner, so tokens are cached
-// per owner and reused across that owner's repos.
+// One installation covers every repo under a single owner, but each minted token
+// is scoped to one repo, so the cache is per owner+repo to match.
 // THE URL BUILT FOR A REPO CALL CANNOT ESCAPE /repos/<owner>/<repo>/ (audit
 // 2026-09-06, CRITICAL). Every ghFetch/cachedGet path in this module is under that
 // prefix; a "../.." smuggled through a file path or branch used to normalize out of
@@ -173,7 +185,7 @@ async function ghFetch(env: Env, owner: string, repo: string, path: string, init
     });
   let resp = await call(await getInstallationToken(env, owner, repo));
   if (resp.status === 401) {
-    await env.APP_KV.delete(tokenKey(owner));
+    await env.APP_KV.delete(tokenKey(owner, repo));
     resp = await call(await getInstallationToken(env, owner, repo));
   }
   return resp;
@@ -735,6 +747,11 @@ export async function openPr(
   return { repo: `${owner}/${repo}`, number: data.number, url: data.html_url, head, base: baseBranch };
 }
 
+// The repo this Worker deploys from. A write landing on its default branch is a
+// production deploy of the server itself, which is why commitOnBranch refuses
+// direct mode (and pr mode aimed at the default branch) against it.
+export const SELF_REPO = "DrDustinEdwards/capsid-mcp";
+
 function branchSlug(path: string): string {
   return path.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "file";
 }
@@ -776,7 +793,24 @@ async function commitOnBranch<R>(
   assertRepoArg("path", path);
   if (branch) assertRepoArg("branch", branch);
   const { owner, repo } = await resolveRepo(env, namespace, repoSelector);
+  // THE SERVER'S OWN REPO CANNOT BE WRITTEN DIRECTLY (audit 2026-09-06, Fable
+  // MAJOR 8, the self-inflicted rug pull): CI deploys this Worker on every push
+  // to its default branch, so a direct commit here IS a production deploy behind
+  // nothing but a write-grant key. Refused before the default-branch lookup so it
+  // costs no network. PR mode stays open, but a pr-mode call whose explicit work
+  // branch IS the default branch is a direct write with extra steps, and that is
+  // refused below once the default branch is known.
+  if (`${owner}/${repo}` === SELF_REPO && mode === "direct") {
+    throw new Error(
+      `refuses: ${SELF_REPO} is this server's own repo, and a direct commit to it redeploys the Worker. Use mode "pr" and merge through manage_pr.`
+    );
+  }
   const defaultBranch = await getDefaultBranch(env, owner, repo);
+  if (`${owner}/${repo}` === SELF_REPO && branch === defaultBranch) {
+    throw new Error(
+      `refuses: ${branch} is the default branch of this server's own repo (${SELF_REPO}); committing to it redeploys the Worker. Use mode "pr" with a work branch and merge through manage_pr.`
+    );
+  }
   const target =
     mode === "direct"
       ? branch || defaultBranch
@@ -1590,13 +1624,19 @@ export async function deleteBranch(
       );
     }
     const prResp = await cachedGet(env, owner, repo, `${base}/pulls?state=open&head=${encodeURIComponent(`${owner}:${branch}`)}`);
-    if (prResp.ok) {
-      const prs = (await prResp.json()) as Array<{ number: number; html_url: string }>;
-      if (prs.length > 0) {
-        throw new Error(
-          `delete_branch refuses: ${branch} has open pull request #${prs[0].number} (${prs[0].html_url}). Pass force: true to delete it anyway.`
-        );
-      }
+    // FAIL CLOSED (audit 2026-09-06): a lookup that errors is not "no open PRs".
+    // Skipping the refusal on a 5xx would delete exactly the branches this check
+    // exists to protect, on exactly the days GitHub is flaky.
+    if (!prResp.ok) {
+      throw new Error(
+        `delete_branch refuses: could not verify open pull requests for ${branch} on ${full} (${prResp.status}), so the open-PR refusal cannot run. Retry, or pass force: true to delete without the check.`
+      );
+    }
+    const prs = (await prResp.json()) as Array<{ number: number; html_url: string }>;
+    if (prs.length > 0) {
+      throw new Error(
+        `delete_branch refuses: ${branch} has open pull request #${prs[0].number} (${prs[0].html_url}). Pass force: true to delete it anyway.`
+      );
     }
   }
 
@@ -1628,6 +1668,18 @@ export async function ciDispatch(
 ) {
   const timeoutMs = poll.timeoutMs ?? CI_DISPATCH_POLL_MS;
   const intervalMs = poll.intervalMs ?? CI_DISPATCH_POLL_INTERVAL_MS;
+  // THE SCORER IS NOT HAND-DISPATCHABLE THROUGH THIS TOOL (audit 2026-09-06,
+  // Fable MAJOR 7). improve-score.yml signs whatever it measured with the repo's
+  // score key, so a ci_dispatch of it against an arbitrary ref mints a genuinely
+  // signed report the ingest endpoint has no reason to doubt. Ingest also binds
+  // the report to the run's in-flight attempt and head sha, but that is the
+  // second lock; this is the first. The loop dispatches its own scorer through
+  // dispatchScorer, and a human shakedown goes through GitHub directly.
+  if (args.workflow === SCORER_WORKFLOW) {
+    throw new Error(
+      `ci_dispatch refuses: ${SCORER_WORKFLOW} is the improve loop's scorer, and a hand dispatch of it can mint a signed score report for an arbitrary ref. The loop dispatches it itself; run a shakedown from GitHub directly.`
+    );
+  }
   const { owner, repo, full } = await resolveRepo(env, namespace, repoSelector);
 
   if (args.run_id) {
