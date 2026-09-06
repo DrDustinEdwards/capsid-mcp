@@ -143,10 +143,20 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version-file: .nvmrc
-          cache: npm
 
+      # PACKAGE-MANAGER AGNOSTIC so this job stays byte-identical across an npm repo
+      # and a pnpm workspace: pnpm-lock.yaml picks pnpm (via corepack, honouring the
+      # repo's packageManager field), otherwise npm ci. No setup-node cache, because
+      # a cache key would have to name one manager.
       - name: Install dependencies
-        run: npm ci
+        run: |
+          set -euo pipefail
+          if [ -f pnpm-lock.yaml ]; then
+            corepack enable
+            pnpm install --frozen-lockfile
+          else
+            npm ci
+          fi
 
       - name: Download the attempt artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
