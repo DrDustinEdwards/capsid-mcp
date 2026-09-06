@@ -180,13 +180,21 @@ jobs:
           fi
 
       # R2 holdout secrets are env ON THIS STEP ONLY; no attempt code runs here.
+      # The aws CLI reads only the AWS_* names, so the secrets are mapped onto
+      # them (R2_ACCESS_KEY_ID was invisible to it: every sync failed with
+      # "Unable to locate credentials" and the holdout scored 0). Checksums are
+      # when_required because R2 rejects the CRC headers newer aws CLIs send by
+      # default.
       - name: Pull the holdout suite
         id: holdout
         continue-on-error: true
         env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.IMPROVE_HOLDOUT_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.IMPROVE_HOLDOUT_R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
           R2_ACCOUNT_ID: ${{ secrets.IMPROVE_HOLDOUT_R2_ACCOUNT_ID }}
-          R2_ACCESS_KEY_ID: ${{ secrets.IMPROVE_HOLDOUT_R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.IMPROVE_HOLDOUT_R2_SECRET_ACCESS_KEY }}
           IMPROVE_NAMESPACE: ${{ vars.IMPROVE_NAMESPACE }}
         run: |
           set -euo pipefail
