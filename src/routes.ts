@@ -20,7 +20,7 @@ import { callerIp, checkCspReportRate, rateLimitedResponse } from "./rate-limit"
 import type { Env } from "./env";
 import { buildServer } from "./server";
 import { ingestScore } from "./improve-run";
-import { MAX_REPORT_BYTES, parseScoreReport, SCORE_PATH, verifySignedReport } from "./improve-scorer";
+import { claimJti, MAX_REPORT_BYTES, parseScoreReport, readBoundedText, SCORE_PATH, verifySignedReport } from "./improve-scorer";
 import { probeFts } from "./store-probe";
 
 const GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize";
@@ -86,10 +86,21 @@ function escapeHtml(text: string): string {
     .replace(/'/g, "&#39;");
 }
 
-function renderApprovalDialog(oauthReq: AuthRequest, clientName: string, csrf: string): Response {
+function renderApprovalDialog(oauthReq: AuthRequest, clientName: string, csrf: string, registeredUris: string[] | undefined): Response {
   const name = escapeHtml(clientName);
   const redirect = escapeHtml(oauthReq.redirectUri);
   const req = b64urlEncode(JSON.stringify(oauthReq));
+  // EVERY registered redirect URI is shown, not just the one being requested
+  // (audit 2026-09-06). A dynamically registered client may hold several, and the
+  // approval only covers the one requested; listing the rest is what lets the admin
+  // see that a client named "Claude" also carries an attacker's redirect before
+  // approving anything. The requested one is marked.
+  const others = (registeredUris ?? []).filter((u) => u !== oauthReq.redirectUri);
+  const othersHtml = others.length
+    ? `<p>This client also has these registered redirect URIs (not covered by this approval):</p><ul>${others
+        .map((u) => `<li><code>${escapeHtml(u)}</code></li>`)
+        .join("")}</ul>`
+    : "";
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -107,7 +118,8 @@ button { background: #1a7f37; color: #fff; border: 0; border-radius: 6px; paddin
 <div class="card">
 <h1>Capsid access request</h1>
 <p><strong>${name}</strong> is asking to connect to this MCP server.</p>
-<p>Redirect URI: <code>${redirect}</code></p>
+<p>Requested redirect URI: <code>${redirect}</code></p>
+${othersHtml}
 <p>Approving will send you to GitHub to sign in. Only the configured admin account is admitted.</p>
 <form method="post" action="/authorize">
 <input type="hidden" name="csrf" value="${csrf}">
@@ -191,10 +203,10 @@ async function handleAuthorizeGet(request: Request, env: Env): Promise<Response>
   const client = await env.OAUTH_PROVIDER.lookupClient(oauthReq.clientId);
   if (!client) return textResponse("unknown client", 400);
   const approved = await approvedClients(request, env.COOKIE_ENCRYPTION_KEY);
-  if (approved.includes(await approvalTag(oauthReq.clientId, client.redirectUris))) {
+  if (approved.includes(await approvalTag(oauthReq.clientId, oauthReq.redirectUri))) {
     return startGithubFlow(request, env, oauthReq);
   }
-  return renderApprovalDialog(oauthReq, client.clientName ?? oauthReq.clientId, crypto.randomUUID());
+  return renderApprovalDialog(oauthReq, client.clientName ?? oauthReq.clientId, crypto.randomUUID(), client.redirectUris);
 }
 
 async function handleAuthorizePost(request: Request, env: Env): Promise<Response> {
@@ -213,7 +225,7 @@ async function handleAuthorizePost(request: Request, env: Env): Promise<Response
   const client = oauthReq.clientId ? await env.OAUTH_PROVIDER.lookupClient(oauthReq.clientId) : null;
   if (!client) return textResponse("unknown client", 400);
   const approved = await approvedClients(request, env.COOKIE_ENCRYPTION_KEY);
-  const tag = await approvalTag(oauthReq.clientId, client.redirectUris);
+  const tag = await approvalTag(oauthReq.clientId, oauthReq.redirectUri);
   if (!approved.includes(tag)) approved.push(tag);
   const cookies = [
     await approvalCookie(approved, env.COOKIE_ENCRYPTION_KEY),
@@ -539,13 +551,20 @@ async function handleImproveScore(request: Request, env: Env): Promise<Response>
   const timestamp = request.headers.get("X-Improve-Timestamp") ?? "";
   const signature = request.headers.get("X-Improve-Signature") ?? "";
 
-  // Bounded BEFORE the body is read into memory, using the declared length where
-  // there is one. A score report is a few hundred bytes of numbers.
+  // Bounded BEFORE any HMAC. The Content-Length fast-path rejects a declared-large
+  // body cheaply, but it only fires when the header is present and finite; a report
+  // with no Content-Length, or a lying one, used to be read in full and HMAC'd
+  // before parseScoreReport enforced the ceiling (audit 2026-09-06, MAJOR). The
+  // bounded reader below is the real enforcement: it stops pulling from the stream
+  // once MAX_REPORT_BYTES is exceeded, so neither the memory nor the crypto is
+  // spent on an oversized body.
   const declared = Number(request.headers.get("Content-Length") ?? "0");
   if (Number.isFinite(declared) && declared > MAX_REPORT_BYTES) {
     return textResponse(`report too large: ${declared} bytes exceeds ${MAX_REPORT_BYTES}`, 413);
   }
-  const body = await request.text();
+  const bounded = await readBoundedText(request, MAX_REPORT_BYTES);
+  if (!bounded.ok) return textResponse(`report too large: exceeds ${MAX_REPORT_BYTES} bytes`, 413);
+  const body = bounded.text;
 
   const verdict = await verifySignedReport(env, { namespace, timestamp, signature, body }, new Date());
   if (!verdict.ok) {
@@ -565,6 +584,16 @@ async function handleImproveScore(request: Request, env: Env): Promise<Response>
       `the report body names namespace '${parsed.report.namespace}' but it was signed with the key for '${verdict.namespace}'`,
       403
     );
+  }
+
+  // REPLAY CACHE (audit 2026-09-06). The jti is inside the signed body, so it
+  // cannot be swapped; a jti seen before, for this namespace, is refused. claimJti
+  // fails closed on a KV error, since a replay slipping past a sick KV is exactly
+  // what it exists to stop.
+  const claim = await claimJti(env.APP_KV, verdict.namespace, parsed.report.jti);
+  if (!claim.ok) {
+    if (claim.status === 503) console.error(`IMPROVE_SCORE_REPLAY_KV_ERROR ${verdict.namespace}: ${claim.refusal}`);
+    return textResponse(claim.refusal, claim.status);
   }
 
   const result = await ingestScore(env, parsed.report, new Date());

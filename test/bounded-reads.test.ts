@@ -292,7 +292,10 @@ test("read returns the named columns, and not the two dead CMS ones", async () =
   assert.equal(out.body, "the body", "read stopped returning the body");
   assert.deepEqual(
     Object.keys(out).sort(),
-    ["body", "created_at", "id", "namespace", "path", "status", "tags", "title", "type", "updated_at"],
+    // list's columns plus body, plus last_actor (the provenance field added
+    // 2026-09-06, deliberately on read/brief and not on list). Still NOT the two
+    // dead CMS columns frontmatter/publish_at, which is what this pins.
+    ["body", "created_at", "id", "last_actor", "namespace", "path", "status", "tags", "title", "type", "updated_at"],
     "read's column set drifted from list's"
   );
 });

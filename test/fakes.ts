@@ -214,6 +214,9 @@ export interface FakeD1Options {
   improveAttempts?: Array<Record<string, unknown>>;
   improveScores?: Array<Record<string, unknown>>;
   improveSkills?: Array<Record<string, unknown>>;
+  // Seed audit_log rows so the read/brief provenance lookup (last_actor) can be
+  // driven. Later entries win, matching ORDER BY id DESC. Absent by default.
+  auditLog?: Array<{ namespace: string; path: string; actor: string | null }>;
 }
 
 export interface FakeD1Rows {
@@ -225,6 +228,7 @@ export interface FakeD1Rows {
   improve_attempts: Array<Record<string, unknown>>;
   improve_scores: Array<Record<string, unknown>>;
   improve_skills: Array<Record<string, unknown>>;
+  audit_log: Array<{ namespace: string; path: string; actor: string | null }>;
 }
 
 export interface FakeD1 {
@@ -312,6 +316,7 @@ export function fakeD1(opts: FakeD1Options = {}): FakeD1 {
     improve_attempts: (opts.improveAttempts ?? []).map((a) => ({ ...IMPROVE_ATTEMPT_DEFAULTS, ...a })),
     improve_scores: opts.improveScores ?? [],
     improve_skills: (opts.improveSkills ?? []).map((k) => ({ ...IMPROVE_SKILL_DEFAULTS, ...k })),
+    audit_log: opts.auditLog ?? [],
   };
   const recorded: Recorded[] = [];
   // READS are logged SEPARATELY from writes, deliberately. `recorded` means "what
@@ -334,6 +339,13 @@ export function fakeD1(opts: FakeD1Options = {}): FakeD1 {
     }
     if (/FROM namespaces WHERE namespace/i.test(flat)) {
       return rows.namespaces.find((n) => n.namespace === params[0]) ?? null;
+    }
+    // Provenance lookup for read/brief: the most recent actor for a document.
+    // Later-seeded rows win, which is what ORDER BY id DESC LIMIT 1 does.
+    if (/SELECT actor FROM audit_log WHERE namespace/i.test(flat)) {
+      const [namespace, path] = params as [string, string];
+      const matches = rows.audit_log.filter((a) => a.namespace === namespace && a.path === path);
+      return matches.length ? { actor: matches[matches.length - 1].actor } : null;
     }
     if (/FROM document_versions WHERE id/i.test(flat)) {
       // id, namespace and path are ALL part of the lookup, deliberately: an id

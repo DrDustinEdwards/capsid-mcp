@@ -158,6 +158,45 @@ export async function anchorChecksum(doc: ScoresDoc): Promise<string> {
   return sha256Hex(doc.anchorBlock);
 }
 
+// THE ordinary write TOOL'S IMPROVE-PATH GUARD (audit 2026-09-06). Returns a
+// caller-facing refusal when a document write would touch the improve loop's
+// control surface without explicit opt-in, or null when the write may proceed.
+//
+// The two prefixes are refused outright: nothing legitimate edits the run prompt or
+// a skill through the ordinary write tool (the loop writes skills itself; the
+// prompt is edited by a human on purpose). scores.md is subtler: its Secondary
+// section is meant to be freely editable, so only a write that CHANGES the anchor
+// block is refused. That is detected by comparing the anchor checksum of the stored
+// body with the checksum of the body about to be written; a Secondary-only edit
+// leaves the checksum unchanged and passes. Creating scores.md from nothing counts
+// as introducing an anchor block and is refused unless opted in.
+export async function improveWriteRefusal(
+  namespace: string,
+  path: string,
+  priorBody: string | null,
+  newBody: string,
+  allow: boolean
+): Promise<string | null> {
+  if (allow) return null;
+  const promptsPrefix = "improve/prompts/";
+  const skillsPrefix = "improve/skills/";
+  const scoresPath = "improve/scores.md";
+  if (path.startsWith(promptsPrefix)) {
+    return `${namespace}/${path} is the improve loop's run-prompt surface and the ordinary write tool refuses it. It steers the nightly attempt generator, so a write here is only accepted with allow_improve_paths: true, which is audit-logged.`;
+  }
+  if (path.startsWith(skillsPrefix)) {
+    return `${namespace}/${path} is an improve loop skill document, re-injected into other projects' runs, and the ordinary write tool refuses it. Pass allow_improve_paths: true to write it anyway; the flag is audit-logged.`;
+  }
+  if (path === scoresPath) {
+    const before = priorBody === null ? null : await anchorChecksum(parseScoresDoc(namespace, priorBody));
+    const after = await anchorChecksum(parseScoresDoc(namespace, newBody));
+    if (before !== after) {
+      return `this write changes the checksummed Anchors block of ${namespace}/${scoresPath}, which is the improve loop's floor. Editing a Secondary weight is fine and does not trip this; changing an anchor needs allow_improve_paths: true (audit-logged) and a human re-pin afterwards.`;
+    }
+  }
+  return null;
+}
+
 export interface AnchorVerification {
   ok: boolean;
   // The refusal, in full, or null. Written as a sentence because it is what lands

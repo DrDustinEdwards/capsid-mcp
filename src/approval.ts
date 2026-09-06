@@ -11,19 +11,21 @@ import { sha256Hex } from "./auth";
 // twelve months is a long tail on a mistake nobody will remember making.
 export const APPROVAL_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 
-// An approval entry is the client id PLUS a digest of that client's redirect set.
+// An approval entry is the client id PLUS a digest of the EXACT redirect URI the
+// consent dialog displayed and the user approved (audit 2026-09-06, CRITICAL).
 //
-// The id alone was not enough. Dynamic registration is open, so a client id is a
-// handle anyone can obtain and a registration can be replaced; an approval keyed on
-// the id carried over to a different client that had re-registered the same display
-// name pointing somewhere else. Bind the redirects and that stops: change them, and
-// the consent dialog comes back showing the new one.
+// It used to bind the client's whole redirect SET. That still fixed the first
+// problem (a re-registered client id could not inherit consent), but it left a
+// phishing hole: the dialog prints only the ONE redirect being requested, while a
+// client may register several. Approve it for the claude.ai redirect it shows, and
+// consent silently covered a second attacker-controlled redirect in the same set,
+// which a later authorize could then use to receive the code. Binding the single
+// requested URI closes that: approving redirect A grants nothing for redirect B, so
+// a request for B comes back to the dialog.
 //
-// Sorted, so the same set in a different order is the same approval. 64 bits of the
-// digest, because this is an integrity binding rather than a secret, the whole
-// payload is HMAC signed, and the only attack it must resist is an attacker
-// choosing their own redirects to collide with an approved set.
-export async function approvalTag(clientId: string, redirectUris: string[] | undefined): Promise<string> {
-  const canonical = [...(redirectUris ?? [])].sort().join(" ");
-  return `${clientId}.${(await sha256Hex(canonical)).slice(0, 16)}`;
+// 64 bits of the digest, because this is an integrity binding rather than a secret:
+// the whole payload is HMAC signed, and the only attack it must resist is an
+// attacker choosing a redirect that collides with an approved one.
+export async function approvalTag(clientId: string, redirectUri: string | undefined): Promise<string> {
+  return `${clientId}.${(await sha256Hex(redirectUri ?? "")).slice(0, 16)}`;
 }

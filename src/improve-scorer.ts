@@ -47,6 +47,68 @@ export const SIGNATURE_MAX_AGE_MS = 30 * 60 * 1000;
 // trying to be something else.
 export const MAX_REPORT_BYTES = 16_384;
 
+// ---- body cap and replay cache (audit 2026-09-06) ---------------------------
+
+// Read a request body as text, stopping the moment it exceeds `max` bytes. Unlike
+// request.text(), which buffers the whole body before its size can be checked, this
+// pulls from the stream and aborts on overflow, so an oversized or lying-length
+// body is refused before it is fully in memory and before any HMAC touches it.
+export async function readBoundedText(
+  request: { body: ReadableStream<Uint8Array> | null },
+  max: number
+): Promise<{ ok: true; text: string } | { ok: false }> {
+  if (!request.body) return { ok: true, text: "" };
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > max) {
+      await reader.cancel();
+      return { ok: false };
+    }
+    chunks.push(value);
+  }
+  const joined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { ok: true, text: new TextDecoder().decode(joined) };
+}
+
+// The replay cache key and its TTL. The signature is valid across a +/-30 minute
+// window, so the TTL covers the whole span (past skew plus future skew) and a
+// captured signed report cannot be re-accepted anywhere inside it.
+export const jtiReplayKey = (namespace: string, jti: string) => `improve:jti:${namespace}:${jti}`;
+export const JTI_REPLAY_TTL_SECONDS = Math.ceil((2 * SIGNATURE_MAX_AGE_MS) / 1000);
+
+// Claim a report's nonce, or refuse it. First sight records the jti and returns ok;
+// a jti seen before for this namespace is a replay. FAILS CLOSED on a KV error,
+// because this endpoint moves the improve state machine and a replay slipping past
+// a sick KV is exactly what the cache exists to stop.
+export async function claimJti(
+  kv: KVNamespace,
+  namespace: string,
+  jti: string
+): Promise<{ ok: true } | { ok: false; status: number; refusal: string }> {
+  const key = jtiReplayKey(namespace, jti);
+  try {
+    if (await kv.get(key)) return { ok: false, status: 409, refusal: "replay: this score report (jti) was already accepted" };
+    await kv.put(key, "1", { expirationTtl: JTI_REPLAY_TTL_SECONDS });
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      status: 503,
+      refusal: `could not verify replay status (${err instanceof Error ? err.message : String(err)}); refusing the report`,
+    };
+  }
+}
+
 // ---- the per-namespace key --------------------------------------------------
 
 // ONE WORKER SECRET, N REPO SECRETS.
@@ -72,6 +134,11 @@ export interface ScoreReport {
   run_id: string;
   attempt_id: string;
   head_sha: string;
+  // A per-report nonce, inside the signed body so it cannot be swapped. The Worker
+  // keeps a KV replay cache keyed on (namespace, jti) for the signature window, so
+  // a captured, still-in-window signed report cannot be posted twice (audit
+  // 2026-09-06). The workflow generates a fresh uuid per post.
+  jti: string;
   anchors: MetricMap;
   secondary: MetricMap;
   // What CI says it ran. Checked against the manifest, which is the half CI
@@ -117,7 +184,7 @@ export function parseScoreReport(bodyText: string): ReportParse {
   }
   if (raw === null || typeof raw !== "object") return { ok: false, refusal: "report body is not an object" };
   const r = raw as Record<string, unknown>;
-  for (const field of ["namespace", "run_id", "attempt_id", "head_sha"]) {
+  for (const field of ["namespace", "run_id", "attempt_id", "head_sha", "jti"]) {
     if (typeof r[field] !== "string" || (r[field] as string).length === 0 || (r[field] as string).length > 256) {
       return { ok: false, refusal: `report.${field} must be a non-empty string under 256 characters` };
     }
@@ -140,6 +207,7 @@ export function parseScoreReport(bodyText: string): ReportParse {
       run_id: r.run_id as string,
       attempt_id: r.attempt_id as string,
       head_sha: r.head_sha as string,
+      jti: r.jti as string,
       anchors: anchors.map,
       secondary: secondary.map,
       holdout: { total: holdout.total, passed: holdout.passed },

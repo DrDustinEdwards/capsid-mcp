@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { APPROVAL_MAX_AGE_SECONDS, approvalTag } from "../src/approval.ts";
-import { callerIp, checkRegistrationRate, MAX_PER_DAY, MAX_PER_HOUR, type RateVerdict } from "../src/rate-limit.ts";
+import { callerIp, checkRegistrationRate, dcrRedirectRefusal, isLoopbackRedirect, MAX_PER_DAY, MAX_PER_HOUR, type RateVerdict } from "../src/rate-limit.ts";
 import { fakeKv } from "./fakes.ts";
 
 const src = (name: string) => readFileSync(join(import.meta.dirname, "..", "src", name), "utf8");
@@ -160,12 +160,20 @@ test("the approval cookie lives 30 days, not a year", () => {
   assert.doesNotMatch(handler, /Max-Age=31536000/, "the one year approval cookie is back");
 });
 
-test("an approval is bound to the client's redirect set, not the bare id", () => {
+test("an approval is bound to the EXACT requested redirect URI, not the set (audit 2026-09-06)", () => {
   const handler = src("routes.ts");
-  // Both sides use the tag: the check and the store.
-  assert.match(handler, /approved\.includes\(await approvalTag\(oauthReq\.clientId, client\.redirectUris\)\)/);
-  assert.match(handler, /const tag = await approvalTag\(oauthReq\.clientId, client\.redirectUris\);/);
+  // Both sides bind the single requested redirectUri, not client.redirectUris.
+  assert.match(handler, /approved\.includes\(await approvalTag\(oauthReq\.clientId, oauthReq\.redirectUri\)\)/);
+  assert.match(handler, /const tag = await approvalTag\(oauthReq\.clientId, oauthReq\.redirectUri\);/);
+  assert.doesNotMatch(handler, /approvalTag\(oauthReq\.clientId, client\.redirectUris\)/, "the set-based binding is back");
   assert.doesNotMatch(handler, /approved\.includes\(oauthReq\.clientId\)/, "the bare client id check is back");
+});
+
+test("the dialog renders every registered redirect URI, not only the requested one", () => {
+  const handler = src("routes.ts");
+  // renderApprovalDialog takes the full registered set and lists the others.
+  assert.match(handler, /renderApprovalDialog\(oauthReq, client\.clientName \?\? oauthReq\.clientId, crypto\.randomUUID\(\), client\.redirectUris\)/);
+  assert.match(handler, /registeredUris/);
 });
 
 test("the client is resolved before the cookie can skip the dialog", () => {
@@ -180,18 +188,55 @@ test("the client is resolved before the cookie can skip the dialog", () => {
 });
 
 // The REAL function, not a copy of it: this is the security property of the cookie.
-test("the tag is stable across ordering and changes with the redirect set", async () => {
-  const claude = ["https://claude.ai/api/mcp/auth_callback", "http://localhost:1/callback"];
-  const a = await approvalTag("abc", claude);
-  const b = await approvalTag("abc", [...claude].reverse());
-  assert.equal(a, b, "ordering changed the approval");
-  const moved = await approvalTag("abc", ["https://evil.example/callback"]);
-  assert.notEqual(a, moved, "a re-registered client with new redirects kept the old approval");
-  const added = await approvalTag("abc", [...claude, "https://evil.example/callback"]);
-  assert.notEqual(a, added, "adding a redirect kept the old approval");
-  const otherClient = await approvalTag("xyz", claude);
-  assert.notEqual(a, otherClient, "two clients with the same redirects share an approval");
-  // The measured shape: 16 char id, dot, 16 hex.
-  assert.match(a, /^[A-Za-z0-9_-]+\.[0-9a-f]{16}$/);
-  assert.equal(await approvalTag("abc", undefined), await approvalTag("abc", []));
+test("the tag binds one redirect URI, so approving one does not authorize a sibling", async () => {
+  const claudeUri = "https://claude.ai/api/mcp/auth_callback";
+  const attackerUri = "https://evil.example/callback";
+  const approvedForClaude = await approvalTag("abc", claudeUri);
+  // The phishing case: same client, a DIFFERENT redirect. On the old set-based tag,
+  // approving the client covered every URI it had registered; now the sibling has
+  // its own tag and comes back to the dialog.
+  const forAttacker = await approvalTag("abc", attackerUri);
+  assert.notEqual(approvedForClaude, forAttacker, "approving one redirect covered a sibling redirect");
+  // The exact same URI is stable.
+  assert.equal(approvedForClaude, await approvalTag("abc", claudeUri));
+  // Two clients with the same redirect do not share an approval.
+  assert.notEqual(approvedForClaude, await approvalTag("xyz", claudeUri));
+  // The measured shape: id, dot, 16 hex.
+  assert.match(approvedForClaude, /^[A-Za-z0-9_-]+\.[0-9a-f]{16}$/);
+  assert.equal(await approvalTag("abc", undefined), await approvalTag("abc", ""));
+});
+
+// ---- Fix 4: DCR redirect cap and resource pinning ---------------------------
+
+test("dcrRedirectRefusal refuses more than one non-loopback redirect (old code had no such check)", () => {
+  // One non-loopback plus any number of loopbacks: allowed (native client).
+  assert.equal(
+    dcrRedirectRefusal({ redirect_uris: ["https://claude.ai/cb", "http://127.0.0.1:1/cb", "http://localhost:2/cb"] }),
+    null
+  );
+  // Two non-loopback: refused. This is the registration that carries an attacker's
+  // second redirect alongside a legitimate one.
+  const refusal = dcrRedirectRefusal({ redirect_uris: ["https://claude.ai/cb", "https://evil.example/cb"] });
+  assert.ok(refusal);
+  assert.equal(refusal.status, 400);
+  assert.match(refusal.description, /at most one non-loopback/);
+  // No redirects, or metadata absent: nothing to refuse here.
+  assert.equal(dcrRedirectRefusal({}), null);
+  assert.equal(dcrRedirectRefusal(null), null);
+});
+
+test("isLoopbackRedirect classifies hosts and treats a malformed URI as non-loopback", () => {
+  assert.equal(isLoopbackRedirect("http://127.0.0.1:8976/cb"), true);
+  assert.equal(isLoopbackRedirect("http://localhost/cb"), true);
+  assert.equal(isLoopbackRedirect("http://[::1]:3000/cb"), true);
+  assert.equal(isLoopbackRedirect("https://claude.ai/cb"), false);
+  assert.equal(isLoopbackRedirect("not a url"), false);
+});
+
+test("the provider pins resourceMetadata.resource to the canonical /mcp URL", () => {
+  const index = src("index.ts");
+  assert.match(index, /resourceMetadata: \{ resource: CANONICAL_MCP_URL \}/);
+  assert.match(index, /CANONICAL_MCP_URL = "https:\/\/capsid\.dustin-edwards\.workers\.dev\/mcp"/);
+  // And the registration callback wires the redirect cap.
+  assert.match(index, /dcrRedirectRefusal\(clientMetadata\)/);
 });

@@ -49,6 +49,51 @@ export const REGISTRATION_LIMIT: RateLimitPolicy = {
   label: "DCR",
 };
 
+// AT MOST ONE NON-LOOPBACK redirect_uri PER REGISTERED CLIENT (audit 2026-09-06).
+//
+// The consent phishing the exact-URI approvalTag defends against begins at
+// registration: a client registers a legitimate-looking redirect (claude.ai)
+// alongside an attacker's, then phishes an approval for the first and drives the
+// second. Refusing more than one non-loopback redirect at registration removes the
+// room to carry the second URI at all. Loopback redirects are exempt because a
+// native client legitimately cycles ports on 127.0.0.1 / localhost / [::1].
+//
+// Lives here rather than inline in the registration callback so it is testable
+// without loading the OAuth provider (which pulls cloudflare:workers and cannot be
+// imported under node).
+export function isLoopbackRedirect(uri: string): boolean {
+  try {
+    const host = new URL(uri).hostname.toLowerCase();
+    return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+  } catch {
+    // An unparseable URI counts as non-loopback, so a malformed entry cannot slip
+    // the cap.
+    return false;
+  }
+}
+
+export interface DcrRefusal {
+  code: string;
+  status: number;
+  description: string;
+}
+
+// Returns a refusal when clientMetadata declares more than one non-loopback
+// redirect_uri, or null when the registration may proceed.
+export function dcrRedirectRefusal(clientMetadata: unknown): DcrRefusal | null {
+  const raw = (clientMetadata as { redirect_uris?: unknown } | null | undefined)?.redirect_uris;
+  const uris = Array.isArray(raw) ? raw.filter((u): u is string => typeof u === "string") : [];
+  const nonLoopback = uris.filter((u) => !isLoopbackRedirect(u));
+  if (nonLoopback.length > 1) {
+    return {
+      code: "invalid_redirect_uri",
+      status: 400,
+      description: `A client may register at most one non-loopback redirect_uri; this one declared ${nonLoopback.length}. Register a single redirect, or use loopback addresses for a native client.`,
+    };
+  }
+  return null;
+}
+
 // /csp-report is the other unauthenticated write, and it is the more expensive one
 // per call: every accepted report becomes an R2 OBJECT. The handler already bounds
 // content type, body size and shape; nothing bounded arrival rate.

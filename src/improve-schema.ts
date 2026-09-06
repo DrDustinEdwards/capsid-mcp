@@ -113,6 +113,16 @@ export const proposalPath = (kind: string, day: string) => `improve/proposals/${
 // against it and test/improve-meta.test.ts drives that assertion.
 export const PROPOSAL_PREFIX = "improve/proposals/";
 
+// THE IMPROVE CONTROL SURFACE THE ORDINARY write TOOL GUARDS (audit 2026-09-06).
+// These paths steer the nightly loop: the attempt generator's system prompt, the
+// cross-project skills it re-injects, and the checksummed anchor block of a scores
+// document. A one-shot prompt injection that could write any of them turns into a
+// standing, nightly-re-injected instruction, so the write tool refuses them unless
+// the caller passes allow_improve_paths: true, which is audit-logged. The prefixes
+// are namespace-relative, matching a document's `path` in any namespace.
+export const PROMPTS_PREFIX = "improve/prompts/";
+export const SKILLS_PREFIX = "improve/skills/";
+
 // ---- states -----------------------------------------------------------------
 
 export const RUN_STATUSES = [
@@ -244,6 +254,21 @@ export const PROTECTED_PATH_PATTERNS: Array<{ pattern: RegExp; why: string }> = 
   { pattern: /(^|\/)\.?eslint[^/]*$/i, why: "lint configuration" },
   { pattern: /(^|\/)\.claude\//i, why: "the agent steering layer" },
   { pattern: /(^|\/)CLAUDE\.md$/i, why: "the repo briefing" },
+  // Toolchain and build-glue the scorer runs THROUGH (audit 2026-09-06). .nvmrc /
+  // .node-version pick the Node the scorer job uses (setup-node reads them);
+  // .npmrc / .yarnrc control the registry and install-script policy npm ci obeys;
+  // .gitattributes changes what the checkout even contains; a husky hook and
+  // scripts/ and a Makefile are code CI executes. An attempt editing any of these
+  // steers the measurement without touching a file the earlier patterns name.
+  { pattern: /(^|\/)\.nvmrc$/i, why: "the Node version the scorer runs" },
+  { pattern: /(^|\/)\.node-version$/i, why: "the Node version the scorer runs" },
+  { pattern: /(^|\/)\.npmrc$/i, why: "npm registry and install-script policy" },
+  { pattern: /(^|\/)\.yarnrc[^/]*$/i, why: "yarn registry and install policy" },
+  { pattern: /(^|\/)\.tool-versions$/i, why: "the toolchain versions asdf resolves" },
+  { pattern: /(^|\/)\.gitattributes$/i, why: "what the checkout contains" },
+  { pattern: /(^|\/)\.husky\//i, why: "a git hook CI may run" },
+  { pattern: /(^|\/)scripts\//i, why: "scripts CI executes" },
+  { pattern: /(^|\/)Makefile$/i, why: "build glue CI executes" },
 ];
 
 // Returns the reasons a change set is disqualified, or an empty array.

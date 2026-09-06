@@ -2,7 +2,7 @@ import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { createMcpHandler } from "agents/mcp";
 import { isAdminUser } from "./auth";
 import { runBackup } from "./backup";
-import { callerIp, checkRegistrationRate } from "./rate-limit";
+import { callerIp, checkRegistrationRate, dcrRedirectRefusal } from "./rate-limit";
 import { defaultHandler } from "./routes";
 import { withSecurityHeaders } from "./headers";
 import type { Env, Props } from "./env";
@@ -92,6 +92,14 @@ const CLIENT_REGISTRATION_TTL_SECONDS = 90 * 24 * 60 * 60;
 // same fail-open posture the limiter itself takes.
 let currentEnv: Env | null = null;
 
+// The canonical resource identifier for this MCP server. Pinned as
+// resourceMetadata.resource so the provider binds every access-token audience to
+// this exact URL and checks it on every /mcp request (RFC 8707 / RFC 9728). Without
+// it, a token minted with no `resource` parameter is admitted unbound, which is the
+// MAJOR the 2026-09-06 audit named. A single-deployment constant, not derived,
+// because the provider is built at module scope with no request in hand.
+const CANONICAL_MCP_URL = "https://capsid.dustin-edwards.workers.dev/mcp";
+
 const provider = new OAuthProvider({
   apiRoute: "/mcp",
   apiHandler,
@@ -100,11 +108,21 @@ const provider = new OAuthProvider({
   tokenEndpoint: "/token",
   clientRegistrationEndpoint: "/register",
   clientRegistrationTTL: CLIENT_REGISTRATION_TTL_SECONDS,
-  // Rate limit on the one unauthenticated write path this Worker exposes. Returning
-  // an object rejects with the library's own error response; returning nothing
-  // allows. See src/rate-limit.ts for the measured thresholds and for why every
-  // failure path in it allows the registration.
-  clientRegistrationCallback: async ({ request }) => {
+  // Bind and check the access-token audience against this exact resource.
+  resourceMetadata: { resource: CANONICAL_MCP_URL },
+  // Rate limit on the one unauthenticated write path this Worker exposes, and cap
+  // the redirect set. Returning an object rejects with the library's own error
+  // response; returning nothing allows. See src/rate-limit.ts for the measured
+  // thresholds and for why every failure path in it allows the registration.
+  clientRegistrationCallback: async ({ clientMetadata, request }) => {
+    // AT MOST ONE non-loopback redirect_uri (audit 2026-09-06). The decision lives
+    // in dcrRedirectRefusal so it is testable without loading the provider.
+    const redirectRefusal = dcrRedirectRefusal(clientMetadata);
+    if (redirectRefusal) {
+      console.error(`DCR_REDIRECT_REFUSED ${redirectRefusal.description}`);
+      return redirectRefusal;
+    }
+
     const env = currentEnv;
     if (!env) {
       console.error("DCR_RATE_LIMIT_UNAVAILABLE env was not available, allowing");

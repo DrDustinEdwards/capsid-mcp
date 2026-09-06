@@ -31,7 +31,7 @@
 import type { Env } from "./env";
 import { defaultBranchSha, listRepoTree, openPr, resolveRepo } from "./github";
 import { proposeChange, pushAttempt, renderChange } from "./improve-attempt";
-import { anchorDriftVerdict, driftVerdict, monitorAttempt } from "./improve-gates";
+import { anchorDriftVerdict, driftVerdict, monitorAttempt, pathMonitor } from "./improve-gates";
 import { runMetaLoop } from "./improve-meta";
 import {
   anchorVerdict,
@@ -426,6 +426,40 @@ async function startAttempt(env: Env, run: RunRow, now: Date): Promise<TickOutco
     return { runId: run.id, namespace: run.namespace, from: "attempting", to: "attempting", note };
   }
 
+  // THE DETERMINISTIC PATH MONITOR RUNS BEFORE THE BRANCH IS PUSHED (audit
+  // 2026-09-06). It used to run only at ingest, after pushAttempt and
+  // dispatchScorer had already put the attempt's files on a branch and started CI
+  // on them: a change that added a package.json postinstall, or a new
+  // .github/workflows/*.yml with `on: push`, executed in CI (secrets in scope)
+  // before the monitor ever flagged it, and a revert cannot un-run that. Checking
+  // the proposed paths here means a change touching a protected path never reaches
+  // GitHub at all. The model half still runs at ingest for the cases a pattern
+  // cannot name; this is only the half that can be decided with no push and no key.
+  const preflight = pathMonitor(proposal.changedPaths);
+  if (preflight.flagged) {
+    await env.DB.batch([
+      env.DB
+        .prepare(
+          `INSERT INTO improve_attempts (id, namespace, run_id, change_summary, reason, lineage_parent, status, base_sha, skill_id, kept, flagged, flag_reason)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'flagged', ?7, ?8, 0, 1, ?5)`
+        )
+        .bind(id, run.namespace, run.id, proposal.summary || null, preflight.reason, choice.attemptId, baseSha, skill?.id ?? null),
+      ...(skill ? recordSkillOutcome(env.DB, skill.id, false) : []),
+    ]);
+    await advanceRun(env.DB, {
+      runId: run.id,
+      expected: "attempting",
+      next: run.consecutive_reverts + 1 >= MAX_CONSECUTIVE_REVERTS ? "finalizing" : "attempting",
+      patch: {
+        attempts: run.attempts + 1,
+        reverts: run.reverts + 1,
+        consecutive_reverts: run.consecutive_reverts + 1,
+        cost_usd: run.cost_usd + proposal.costUsd,
+      },
+    });
+    return { runId: run.id, namespace: run.namespace, from: "attempting", to: "attempting", note: `reverted before push: ${preflight.reason}` };
+  }
+
   const pushed = await pushAttempt(env, {
     namespace: run.namespace,
     branch,
@@ -574,6 +608,33 @@ export async function ingestScore(env: Env, report: ScoreReport, now: Date): Pro
   const attempt = await attemptById(env.DB, report.attempt_id);
   if (!attempt) return { ok: false, message: `unknown attempt ${report.attempt_id}` };
 
+  // BIND THE REPORT TO THE RUN'S IN-FLIGHT ATTEMPT (audit 2026-09-06). Before this,
+  // ingest looked the attempt up by id alone and moved on: a signed report minted by
+  // ci_dispatch of the scorer against an arbitrary ref, or a captured report
+  // replayed, could score a DIFFERENT attempt (or the same run's stale attempt, or
+  // the attempt's code at a different commit) than the one the run is waiting on.
+  // Three checks close that:
+  //   1. the attempt belongs to this run,
+  //   2. the run is still awaiting a score for THIS attempt (else it is a
+  //      duplicate, a replay, or a report for an attempt already decided), and
+  //   3. the report scored the commit the attempt actually pushed, not some other
+  //      ref (this is the ci_dispatch-against-master defeat).
+  if (attempt.run_id !== run.id) {
+    return { ok: false, message: `attempt ${attempt.id} belongs to run ${attempt.run_id}, not ${run.id}` };
+  }
+  if (run.status !== "awaiting-score" || run.current_attempt !== report.attempt_id) {
+    return {
+      ok: true,
+      message: `run ${run.id} is not awaiting a score for ${report.attempt_id}; ignored as a duplicate or stale report`,
+    };
+  }
+  if ((attempt.head_sha ?? "") !== report.head_sha) {
+    return {
+      ok: false,
+      message: `report head_sha ${report.head_sha} does not match attempt ${attempt.id} head_sha ${attempt.head_sha ?? "(none)"}: the report scored a different commit`,
+    };
+  }
+
   const moved = await advanceRun(env.DB, { runId: run.id, expected: "awaiting-score", next: "judging" });
   if (!moved) return { ok: true, message: `run ${run.id} is not awaiting a score; this report is a duplicate and was ignored` };
 
@@ -611,10 +672,15 @@ export async function ingestScore(env: Env, report: ScoreReport, now: Date): Pro
   await env.DB.batch([
     env.DB
       .prepare(
+        // STATUS-KEYED with RETURNING (audit 2026-09-06). The run-level judging CAS
+        // above already serialises ingest, but keying the attempt write on its own
+        // awaiting-score status makes a late or duplicated write unable to flip an
+        // attempt that a timeout already marked timed-out, or score one twice.
         `UPDATE improve_attempts
          SET status = ?2, kept = ?3, reason = ?4, score_before = ?5, score_after = ?6,
              flagged = ?7, flag_reason = ?8, anchors_json = ?9, secondary_json = ?10
-         WHERE id = ?1`
+         WHERE id = ?1 AND status = 'awaiting-score'
+         RETURNING id`
       )
       .bind(
         attempt.id,

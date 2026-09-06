@@ -7,7 +7,7 @@
 
 import { b64urlFromBytes, b64urlEncode, base64Decode, base64Encode } from "./encoding";
 import { IMPROVE_BRANCH_PREFIX, isImproveBranch } from "./improve-schema";
-import { DEFAULT_SCAN_FILES, DEFAULT_SCAN_RESULTS, MAX_SCAN_CAP, pathProblem } from "./limits";
+import { DEFAULT_SCAN_FILES, DEFAULT_SCAN_RESULTS, MAX_SCAN_CAP, pathProblem, repoPathProblem } from "./limits";
 // AttemptEnv, not Env, and the narrowing is deliberate rather than cosmetic.
 //
 // Nothing in this module needs the holdout bucket, and saying so in the type is
@@ -142,9 +142,32 @@ async function getInstallationToken(env: Env, owner: string, repo: string): Prom
 
 // One installation covers every repo under a single owner, so tokens are cached
 // per owner and reused across that owner's repos.
+// THE URL BUILT FOR A REPO CALL CANNOT ESCAPE /repos/<owner>/<repo>/ (audit
+// 2026-09-06, CRITICAL). Every ghFetch/cachedGet path in this module is under that
+// prefix; a "../.." smuggled through a file path or branch used to normalize out of
+// it once fetch() parsed the string as a URL. This is the belt-and-suspenders check
+// that runs AFTER assembly and AFTER WHATWG normalization, so it sees the escape the
+// input-level repoPathProblem guard is also there to stop. owner and repo come from
+// the namespace mapping (REPO_SHAPE excludes "." and ".."), so the expected base is
+// itself traversal-free.
+//
+// It builds the same URL new URL() will, which is exactly why a fake fetch keyed on
+// the raw concatenated string cannot substitute for this guard: the raw string still
+// contains the "..", the parsed pathname does not.
+function repoApiUrl(owner: string, repo: string, path: string): string {
+  const url = `${GH}${path}`;
+  const base = `/repos/${owner}/${repo}`;
+  const { pathname } = new URL(url);
+  if (pathname !== base && !pathname.startsWith(`${base}/`)) {
+    throw new Error(`refusing GitHub request that escapes ${base}: it resolves to ${pathname}`);
+  }
+  return url;
+}
+
 async function ghFetch(env: Env, owner: string, repo: string, path: string, init?: RequestInit): Promise<Response> {
+  const url = repoApiUrl(owner, repo, path);
   const call = (token: string) =>
-    fetch(`${GH}${path}`, {
+    fetch(url, {
       ...init,
       headers: { ...GH_HEADERS, ...(init?.headers as Record<string, string>), Authorization: `Bearer ${token}` },
     });
@@ -160,6 +183,9 @@ async function ghFetch(env: Env, owner: string, repo: string, path: string, init
 // path and the ref (as the literal ?ref= query), so entries for different refs are
 // different keys and cannot collide. What was missing was deletion.
 async function cachedGet(env: Env, owner: string, repo: string, path: string): Promise<Response> {
+  // Assert the URL is in-bounds before it is ever used as a cache key, so a
+  // traversal path cannot be stored under a key the invalidator will not find.
+  repoApiUrl(owner, repo, path);
   const cacheKey = readKey(path);
   const cached = (await env.APP_KV.get(cacheKey, "json")) as { status: number; body: string } | null;
   if (cached) return new Response(cached.body, { status: cached.status });
@@ -215,8 +241,20 @@ async function invalidateRepoReads(env: Env, owner: string, repo: string): Promi
 
 // ---- repo resolution ---------------------------------------------------------
 
-// The shape of a single repos entry: "owner/name" with no spaces or extra slashes.
-export const REPO_SHAPE = /^[^/\s]+\/[^/\s]+$/;
+// The shape of a single repos entry: "owner/name". Tightened 2026-09-06 from
+// /^[^/\s]+\/[^/\s]+$/, which admitted "../other" as a legal mapping and made the
+// authorization boundary itself traversable. GitHub owner and repo names are drawn
+// from [A-Za-z0-9._-]; a segment that is exactly "." or ".." is additionally
+// rejected by repoTokenOk below, because the charset alone still matches "..".
+export const REPO_SHAPE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+
+// Neither side of an owner/name may be "." or "..": those are the tokens that walk
+// a URL out of /repos/<owner>/<repo>/ even though they satisfy the charset.
+export function repoTokenOk(repoFull: string): boolean {
+  if (!REPO_SHAPE.test(repoFull)) return false;
+  const [owner, name] = repoFull.split("/");
+  return owner !== "." && owner !== ".." && name !== "." && name !== "..";
+}
 
 export interface RepoEntry {
   repo: string;
@@ -240,7 +278,7 @@ export function parseReposList(reposJson: string): { list: RepoEntry[] } | { err
   }
   const list: RepoEntry[] = [];
   for (const r of parsed) {
-    if (!r || typeof r.repo !== "string" || !REPO_SHAPE.test(r.repo)) {
+    if (!r || typeof r.repo !== "string" || !repoTokenOk(r.repo)) {
       return { error: `each repos entry needs a "repo" of the form owner/name (got ${JSON.stringify(r)})` };
     }
     list.push({ repo: r.repo, label: typeof r.label === "string" && r.label.trim() ? r.label.trim() : "primary" });
@@ -302,17 +340,39 @@ export async function resolveRepo(env: Env, namespace: string, selector?: string
   return { owner, repo, full: chosen.repo };
 }
 
-function encodePath(path: string): string {
+// encodePath preserves the "/" between segments (a real repo path has directories),
+// so it CANNOT be the place that stops traversal on its own: it is why "../../x"
+// survived as real slashes plus real "..". It now refuses a "." or ".." segment as
+// an inner guard, and repoApiUrl asserts the assembled URL as the outer one. Both
+// are kept: this gives a clear caller-facing error, that catches anything this
+// misses. Exported for the traversal test.
+export function encodePath(path: string): string {
   return path
     .split("/")
     .filter(Boolean)
-    .map(encodeURIComponent)
+    .map((segment) => {
+      if (segment === "." || segment === "..") {
+        throw new Error(`refusing repo path with a '${segment}' segment: ${path}`);
+      }
+      return encodeURIComponent(segment);
+    })
     .join("/");
+}
+
+// Refuse a caller-supplied repo argument (path, branch, ref or workflow) at the
+// door, with a message that names the argument. The URL assertion in repoApiUrl is
+// the backstop; this is the friendly error and the guard for arguments that reach
+// GitHub through encodeURIComponent (refs, workflow names) rather than encodePath.
+export function assertRepoArg(kind: string, value: string): void {
+  const problem = repoPathProblem(value);
+  if (problem) throw new Error(`${kind} ${problem}`);
 }
 
 // ---- read --------------------------------------------------------------------
 
 export async function listRepoTree(env: Env, namespace: string, path = "", ref?: string, repoSelector?: string) {
+  if (path) assertRepoArg("path", path);
+  if (ref) assertRepoArg("ref", ref);
   const { owner, repo } = await resolveRepo(env, namespace, repoSelector);
   const query = ref ? `?ref=${encodeURIComponent(ref)}` : "";
   const resp = await cachedGet(env, owner, repo, `/repos/${owner}/${repo}/contents/${encodePath(path)}${query}`);
@@ -332,6 +392,8 @@ export async function listRepoTree(env: Env, namespace: string, path = "", ref?:
 }
 
 export async function readRepoFile(env: Env, namespace: string, path: string, ref?: string, repoSelector?: string) {
+  assertRepoArg("path", path);
+  if (ref) assertRepoArg("ref", ref);
   const { owner, repo } = await resolveRepo(env, namespace, repoSelector);
   const query = ref ? `?ref=${encodeURIComponent(ref)}` : "";
   const resp = await cachedGet(env, owner, repo, `/repos/${owner}/${repo}/contents/${encodePath(path)}${query}`);
@@ -618,6 +680,8 @@ async function ensureBranch(env: Env, owner: string, repo: string, branch: strin
 }
 
 export async function createBranch(env: Env, namespace: string, branch: string, from?: string, repoSelector?: string) {
+  assertRepoArg("branch", branch);
+  if (from) assertRepoArg("from", from);
   const { owner, repo } = await resolveRepo(env, namespace, repoSelector);
   const base = from || (await getDefaultBranch(env, owner, repo));
   const sha = await getRefSha(env, owner, repo, base);
@@ -709,6 +773,8 @@ async function commitOnBranch<R>(
   result: R;
   pr: { number: number; url: string } | null;
 }> {
+  assertRepoArg("path", path);
+  if (branch) assertRepoArg("branch", branch);
   const { owner, repo } = await resolveRepo(env, namespace, repoSelector);
   const defaultBranch = await getDefaultBranch(env, owner, repo);
   const target =
@@ -934,6 +1000,7 @@ export async function ciStatus(
   repoSelector?: string,
   opts: { limit?: number; logTail?: boolean; ref?: string; runId?: number } = {}
 ) {
+  if (opts.ref) assertRepoArg("ref", opts.ref);
   const { owner, repo, full } = await resolveRepo(env, namespace, repoSelector);
   const limit = opts.limit && opts.limit > 0 ? Math.min(opts.limit, 20) : 10;
   let query = `/repos/${owner}/${repo}/actions/runs?per_page=${limit}`;
@@ -1173,6 +1240,8 @@ export async function dispatchWorkflow(
   repoSelector?: string,
   refOverride?: string
 ): Promise<{ repo: string; workflow: string; ref: string; inputs: Record<string, string> }> {
+  assertRepoArg("workflow", workflowFile);
+  if (refOverride) assertRepoArg("ref", refOverride);
   const { owner, repo, full } = await resolveRepo(env, namespace, repoSelector);
   const ref = refOverride ?? (await getDefaultBranch(env, owner, repo));
   const resp = await ghFetch(
@@ -1415,6 +1484,9 @@ export async function repoHistory(
   args: { ref?: string; base?: string; head?: string; sha?: string; limit?: number; patch?: boolean },
   repoSelector?: string
 ) {
+  for (const [kind, value] of [["ref", args.ref], ["base", args.base], ["head", args.head], ["sha", args.sha]] as const) {
+    if (value) assertRepoArg(kind, value);
+  }
   const { owner, repo, full } = await resolveRepo(env, namespace, repoSelector);
   const apiBase = `/repos/${owner}/${repo}`;
 
@@ -1499,6 +1571,7 @@ export async function deleteBranch(
   opts: { force?: boolean } = {},
   repoSelector?: string
 ) {
+  assertRepoArg("branch", branch);
   const { owner, repo, full } = await resolveRepo(env, namespace, repoSelector);
   const base = `/repos/${owner}/${repo}`;
   const defaultBranch = await getDefaultBranch(env, owner, repo);

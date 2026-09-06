@@ -4,15 +4,19 @@ import { hmacHex } from "../src/auth.ts";
 import { ROSTER } from "../src/improve-schema.ts";
 import {
   checkHoldout,
+  claimJti,
   deriveScoreKey,
+  JTI_REPLAY_TTL_SECONDS,
   MAX_REPORT_BYTES,
   parseScoreReport,
+  readBoundedText,
   SCORE_PATH,
   signaturePayload,
   SIGNATURE_MAX_AGE_MS,
   verifySignedReport,
   type ScoreReport,
 } from "../src/improve-scorer.ts";
+import { fakeKv } from "./fakes.ts";
 
 // The scorer seam: who may report a score, and what a report has to say to be
 // believed. Nothing here needs a database or a network.
@@ -26,6 +30,7 @@ function report(over: Partial<ScoreReport> = {}): ScoreReport {
     run_id: "capsid-2026-09-04T08-00-00",
     attempt_id: "capsid-2026-09-04T08-00-00-a01",
     head_sha: "abc123",
+    jti: "jti-scorer-01",
     anchors: { build_passes: 1 },
     secondary: { lint_count: 3 },
     holdout: { total: 11, passed: 11 },
@@ -168,7 +173,7 @@ test("a metric that is a STRING is refused, not coerced", () => {
 test("a non-finite metric is refused", () => {
   // JSON cannot carry Infinity, so it arrives as null or as a string; both are
   // covered. This is the shape a hand-built body would use.
-  const parsed = parseScoreReport('{"namespace":"capsid","run_id":"r","attempt_id":"a","head_sha":"s","anchors":{},"secondary":{"x":1e999},"holdout":{"total":1,"passed":1}}');
+  const parsed = parseScoreReport('{"namespace":"capsid","run_id":"r","attempt_id":"a","head_sha":"s","jti":"j","anchors":{},"secondary":{"x":1e999},"holdout":{"total":1,"passed":1}}');
   assert.equal(parsed.ok, false);
 });
 
@@ -196,6 +201,54 @@ test("an invalid metric NAME is refused", () => {
   const parsed = parseScoreReport(JSON.stringify({ ...report(), secondary: { "../etc": 1 } }));
   assert.equal(parsed.ok, false);
   assert.match(parsed.ok === false ? parsed.refusal : "", /invalid metric name/);
+});
+
+// ---- Fix 5: jti nonce, body cap, replay cache -------------------------------
+
+test("a report with no jti is refused (old code did not require one)", () => {
+  const { jti, ...rest } = report();
+  void jti;
+  const parsed = parseScoreReport(JSON.stringify(rest));
+  assert.equal(parsed.ok, false);
+  assert.match(parsed.ok === false ? parsed.refusal : "", /jti must be a non-empty string/);
+});
+
+test("readBoundedText refuses a body over the cap before it is fully buffered", async () => {
+  const oversized = "x".repeat(MAX_REPORT_BYTES + 100);
+  const stream = new Response(oversized).body;
+  const result = await readBoundedText({ body: stream }, MAX_REPORT_BYTES);
+  assert.equal(result.ok, false);
+});
+
+test("readBoundedText returns the body when it is under the cap", async () => {
+  const body = JSON.stringify(report());
+  const stream = new Response(body).body;
+  const result = await readBoundedText({ body: stream }, MAX_REPORT_BYTES);
+  assert.equal(result.ok, true);
+  assert.equal(result.ok && result.text, body);
+});
+
+test("claimJti admits a nonce once, then refuses the replay for the window", async () => {
+  const { kv, puts } = fakeKv();
+  const first = await claimJti(kv, "capsid", "nonce-abc");
+  assert.equal(first.ok, true);
+  // Recorded with a TTL that covers the whole signature window.
+  const put = puts.find((p) => p.key === "improve:jti:capsid:nonce-abc");
+  assert.ok(put);
+  assert.equal(put.ttl, JTI_REPLAY_TTL_SECONDS);
+  const replay = await claimJti(kv, "capsid", "nonce-abc");
+  assert.equal(replay.ok, false);
+  assert.equal(replay.ok === false && replay.status, 409);
+  // A different nonce, or the same nonce in another namespace, is not a replay.
+  assert.equal((await claimJti(kv, "capsid", "nonce-xyz")).ok, true);
+  assert.equal((await claimJti(kv, "foxing", "nonce-abc")).ok, true);
+});
+
+test("claimJti FAILS CLOSED when KV cannot be read", async () => {
+  const { kv } = fakeKv({ failGet: true });
+  const verdict = await claimJti(kv, "capsid", "nonce-abc");
+  assert.equal(verdict.ok, false);
+  assert.equal(verdict.ok === false && verdict.status, 503);
 });
 
 // ---- the holdout check ------------------------------------------------------

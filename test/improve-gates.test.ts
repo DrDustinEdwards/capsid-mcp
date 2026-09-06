@@ -30,6 +30,16 @@ test("the path monitor flags every class of protected path", () => {
     [".eslintrc", /lint configuration/],
     [".claude/settings.json", /agent steering layer/],
     ["CLAUDE.md", /repo briefing/],
+    // Added 2026-09-04 audit fixes: toolchain and build-glue the scorer runs through.
+    [".nvmrc", /Node version/],
+    [".node-version", /Node version/],
+    [".npmrc", /npm registry/],
+    [".yarnrc.yml", /yarn/],
+    [".tool-versions", /toolchain versions/],
+    [".gitattributes", /the checkout contains/],
+    [".husky/pre-commit", /git hook/],
+    ["scripts/build.mjs", /scripts CI executes/],
+    ["Makefile", /build glue/],
   ];
   for (const [path, why] of cases) {
     const verdict = pathMonitor([path]);

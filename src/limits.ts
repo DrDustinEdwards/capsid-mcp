@@ -123,6 +123,38 @@ export function pathProblem(path: string): string | null {
   return null;
 }
 
+// THE GITHUB REPO ARGUMENT GRAMMAR (audit 2026-09-06, CRITICAL: GitHub path
+// traversal). A sibling of pathProblem for repo file paths, branches, refs and
+// workflow filenames. It is deliberately LOOSER than docPath (a repo path is
+// whatever the repo contains, so a leading dot like .npmrc or a dotted name like
+// a.test.ts is fine) but it rejects the two things that let a caller walk out of
+// the mapped repo once the string is concatenated into a GitHub API URL:
+//
+//   1. Any segment that is exactly "." or ".." . encodePath preserved "/" between
+//      segments and encodeURIComponent leaves "." and ".." untouched, so
+//      "../../other-repo/contents/x" reached fetch() as real slashes plus real
+//      "..", and WHATWG URL normalization then walked it out of
+//      /repos/<owner>/<repo>/ into a repo the namespace never mapped.
+//   2. Control characters, which have no place in a ref or a path and would ride
+//      into a log line or a header.
+//
+// A whole-segment check, not path.includes(".."), because "a..b" is a legal file
+// name and "..." is not traversal; only a segment that IS "." or ".." moves the
+// URL. Empty and leading/trailing slash are also refused so the string cannot
+// introduce an empty segment that changes how the URL parses.
+export function repoPathProblem(value: string): string | null {
+  if (value.length === 0) return "must not be empty";
+  if (value.length > MAX_PATH) return `is longer than ${MAX_PATH} characters`;
+  if (hasControlChar(value)) return "must not contain control characters (including newlines and tabs)";
+  if (value.startsWith("/")) return "must not start with '/'";
+  if (value.endsWith("/")) return "must not end with '/'";
+  if (value.includes("//")) return "must not contain an empty segment ('//')";
+  for (const segment of value.split("/")) {
+    if (segment === "." || segment === "..") return "must not contain a '.' or '..' path segment";
+  }
+  return null;
+}
+
 // The one document path schema. Every tool that names a document uses it, so the
 // grammar cannot be enforced in one place and forgotten in another.
 //
