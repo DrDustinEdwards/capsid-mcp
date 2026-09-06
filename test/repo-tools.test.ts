@@ -452,7 +452,7 @@ test("ci_status names an unavailable log fetch for a write-grant caller", async 
       const result = await ciStatus(makeEnv(ONE_REPO), "ns", undefined, { logTail: true });
       const failed = result.failed_run as FailedRun;
       assert.match(failed.log_tail_unavailable ?? "", /^410: log expired/);
-      assert.equal(failed.log_tail, undefined);
+      assert.equal(failed.log, undefined);
       // Not the read-only message: this caller was allowed the log and did not get one.
       assert.equal(failed.log_tail_withheld, undefined);
     }
@@ -469,7 +469,7 @@ test("ci_status still withholds the log tail from a read-only key", async () => 
       const result = await ciStatus(makeEnv(ONE_REPO), "ns", undefined, { logTail: false });
       const failed = result.failed_run as FailedRun;
       assert.match(failed.log_tail_withheld ?? "", /read-only key/);
-      assert.equal(failed.log_tail, undefined);
+      assert.equal(failed.log, undefined);
       assert.equal(failed.log_tail_unavailable, undefined);
       // And the log was never fetched, so it cannot leak by another route.
       assert.equal(calls.some((c) => c.path.includes("/logs")), false);
@@ -504,7 +504,7 @@ test("a read-grant server does not hand the CI log tail to ci_status", async () 
       await client.close();
       const failed = (JSON.parse(result.content[0].text) as { failed_run: FailedRun }).failed_run;
       assert.match(failed.log_tail_withheld ?? "", /read-only key/);
-      assert.equal(failed.log_tail, undefined);
+      assert.equal(failed.log, undefined);
       // The strongest form: the log was never REQUESTED, so it cannot leak by any
       // other route, however the response is later assembled.
       assert.equal(calls.some((c) => c.path.includes("/logs")), false, "a read-grant call fetched the job log");
