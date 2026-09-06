@@ -43,6 +43,15 @@ on:
 permissions:
   contents: read
 
+# Rapid pushes supersede each other: a newer run on the same ref cancels the
+# older one, so two push deploys cannot interleave and a stale commit cannot
+# deploy after a newer one. Keyed on the event name too, because the six-hourly
+# schedule run shares refs/heads/master with push runs and must never cancel a
+# deploy mid-flight (nor be cancelled by one; its whole job is time-to-detect).
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
 # THIRD PARTY ACTIONS ARE PINNED BY COMMIT SHA, not by tag. A tag is a moving
 # pointer that the tag's owner can repoint at any time, and these actions run with
 # the checkout of this repository and the environment of the deploy job next to
