@@ -55,17 +55,34 @@ export interface Env {
   // One Worker secret, N repo secrets: see deriveScoreKey in src/improve-scorer.ts
   // for why the repos never hold this value itself.
   IMPROVE_SCORE_SECRET?: string;
+  // R2 TEMPORARY-CREDENTIAL MINTING (platform arc 2026-09-06). The score job no
+  // longer holds a long-lived S3 key: it POSTs /improve/holdout-credential,
+  // signed with its per-namespace score key, and the Worker mints a one-hour
+  // object-read-only credential scoped to that namespace's holdout prefix. These
+  // exist ONLY for that mint: the API token that authorizes it, the ACCESS KEY
+  // ID of the parent R2 token the credential derives from (object-read-only on
+  // the holdout bucket; its secret never leaves the dashboard), and the account
+  // id the API path and S3 endpoint need. The two credential values are omitted
+  // from AttemptEnv below, the same structural withholding as HOLDOUT itself,
+  // and only src/improve-scorer.ts may name the token
+  // (test/improve-holdout.test.ts).
+  R2_TEMP_CRED_TOKEN?: string;
+  R2_TEMP_CRED_PARENT_ACCESS_KEY_ID?: string;
+  R2_ACCOUNT_ID?: string;
 }
 
-// THE ATTEMPT-SIDE ENVIRONMENT: everything except the holdout bucket.
+// THE ATTEMPT-SIDE ENVIRONMENT: everything except the holdout bucket and the
+// credentials that could mint read access to it.
 //
 // This is the type-level half of the isolation. src/improve-attempt.ts takes
 // AttemptEnv, so the binding is not merely unused there, it is not present in the
-// value's type at all and a `.HOLDOUT` reference does not compile. The other two
-// halves are the separate bucket (infrastructure) and the source guard (a scan),
-// and all three are needed: a type can be cast away, a scan can be evaded by an
-// alias, and a shared bucket defeats both.
-export type AttemptEnv = Omit<Env, "HOLDOUT">;
+// value's type at all and a `.HOLDOUT` reference does not compile; the same goes
+// for the temp-credential secrets, or attempt code could reach the suite over the
+// S3 API with a credential it minted itself. The other two halves are the
+// separate bucket (infrastructure) and the source guard (a scan), and all three
+// are needed: a type can be cast away, a scan can be evaded by an alias, and a
+// shared bucket defeats both.
+export type AttemptEnv = Omit<Env, "HOLDOUT" | "R2_TEMP_CRED_TOKEN" | "R2_TEMP_CRED_PARENT_ACCESS_KEY_ID">;
 
 export interface Props extends Record<string, unknown> {
   id: number;

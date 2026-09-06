@@ -24,7 +24,7 @@
 import { hmacHex, timingSafeEqual } from "./auth";
 import type { Env } from "./env";
 import { dispatchWorkflow } from "./github";
-import { holdoutManifestKey, SCORER_WORKFLOW, type HoldoutManifest } from "./improve-schema";
+import { HOLDOUT_PREFIX, holdoutManifestKey, SCORER_WORKFLOW, type HoldoutManifest } from "./improve-schema";
 import type { MetricMap } from "./improve-scores";
 
 // Re-exported from improve-schema (moved there so ci_dispatch can refuse it
@@ -36,6 +36,12 @@ export { SCORER_WORKFLOW };
 // it /ops/ would invite the next reader to add the operator-key check to it and
 // hand five repos a key that can write every document in the store.
 export const SCORE_PATH = "/improve/score";
+
+// The holdout-credential endpoint (platform arc 2026-09-06). Same auth as
+// SCORE_PATH, same reasoning for not being under /ops/: it is opened by the
+// per-namespace HMAC key, so a repo can mint read access to ITS OWN holdout
+// prefix and nothing else, and no long-lived S3 secret sits in any repo.
+export const CREDENTIAL_PATH = "/improve/holdout-credential";
 
 // A signature older than this is refused. Bounds replay to the window in which a
 // report is still plausibly in flight; a CI job that takes longer than half an
@@ -335,6 +341,106 @@ export function checkHoldout(manifest: HoldoutManifest | null, report: ScoreRepo
   // Computed from the manifest's total, deliberately. See HoldoutVerdict.
   // total is > 0 here: the zero-test manifest was refused above.
   return { ok: true, refusal: null, passRate: report.holdout.passed / manifest.total };
+}
+
+// ---- temporary holdout credentials (platform arc 2026-09-06) ----------------
+
+// The bucket NAME, named here and nowhere else in src/ (the guard in
+// test/improve-holdout.test.ts exempts exactly this module, which already holds
+// the binding). It has to be spelled for the temp-access-credentials API, which
+// scopes by bucket name, not by binding.
+export const HOLDOUT_BUCKET_NAME = "capsid-improve-holdout";
+
+// One hour. The score job pulls the suite within minutes of asking; an hour is
+// generous headroom and three orders of magnitude under the API's 7-day ceiling.
+export const HOLDOUT_CREDENTIAL_TTL_SECONDS = 3600;
+
+// What the credential request body must say: which namespace (bound to the
+// signing key by the same rule as a score report) and a jti so a captured
+// request cannot be replayed inside the signature window.
+export function parseCredentialRequest(
+  body: string
+): { ok: true; namespace: string; jti: string } | { ok: false; refusal: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return { ok: false, refusal: "the credential request body is not JSON" };
+  }
+  const record = parsed as { namespace?: unknown; jti?: unknown };
+  if (typeof record?.namespace !== "string" || record.namespace.length === 0) {
+    return { ok: false, refusal: "the credential request body must name a namespace" };
+  }
+  if (typeof record?.jti !== "string" || record.jti.length < 8 || record.jti.length > 128) {
+    return { ok: false, refusal: "the credential request body must carry a jti of 8 to 128 characters" };
+  }
+  return { ok: true, namespace: record.namespace, jti: record.jti };
+}
+
+// What the score job receives: everything it needs to run `aws s3 sync` with no
+// repo secret at all. The endpoint is included so the account id does not have
+// to live in any repo either.
+export interface HoldoutCredential {
+  access_key_id: string;
+  secret_access_key: string;
+  session_token: string;
+  endpoint: string;
+  bucket: string;
+  prefix: string;
+  expires_in: number;
+}
+
+// Mint a one-hour, object-read-only credential scoped to ONE namespace's
+// holdout prefix, via Cloudflare's temp-access-credentials API. The credential
+// derives from a parent R2 token (object-read-only, scoped to the holdout
+// bucket) whose secret never leaves the dashboard; the Worker holds only the
+// parent's ACCESS KEY ID plus the API token that authorizes the mint. Both
+// live outside AttemptEnv, the same structural withholding as the HOLDOUT
+// binding itself: attempt code cannot mint its way to the suite.
+export async function mintHoldoutCredential(
+  env: Env,
+  namespace: string
+): Promise<{ ok: true; credential: HoldoutCredential } | { ok: false; status: number; refusal: string }> {
+  if (!env.R2_TEMP_CRED_TOKEN || !env.R2_TEMP_CRED_PARENT_ACCESS_KEY_ID || !env.R2_ACCOUNT_ID) {
+    return {
+      ok: false,
+      status: 503,
+      refusal:
+        "holdout credential minting is not configured. Set R2_TEMP_CRED_TOKEN, R2_TEMP_CRED_PARENT_ACCESS_KEY_ID and R2_ACCOUNT_ID with wrangler secret put.",
+    };
+  }
+  const prefix = `${HOLDOUT_PREFIX}${namespace}/`;
+  const resp = await fetch(`https://api.cloudflare.com/client/v4/accounts/${env.R2_ACCOUNT_ID}/r2/temp-access-credentials`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${env.R2_TEMP_CRED_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      bucket: HOLDOUT_BUCKET_NAME,
+      parentAccessKeyId: env.R2_TEMP_CRED_PARENT_ACCESS_KEY_ID,
+      permission: "object-read-only",
+      ttlSeconds: HOLDOUT_CREDENTIAL_TTL_SECONDS,
+      prefixes: [prefix],
+    }),
+  });
+  if (!resp.ok) {
+    return { ok: false, status: 502, refusal: `the temp-access-credentials API answered ${resp.status}: ${(await resp.text()).slice(0, 300)}` };
+  }
+  const data = (await resp.json()) as { result?: { accessKeyId?: string; secretAccessKey?: string; sessionToken?: string } };
+  const minted = data.result;
+  if (!minted?.accessKeyId || !minted.secretAccessKey || !minted.sessionToken) {
+    return { ok: false, status: 502, refusal: "the temp-access-credentials API answered without the three credential fields" };
+  }
+  return {
+    ok: true,
+    credential: {
+      access_key_id: minted.accessKeyId,
+      secret_access_key: minted.secretAccessKey,
+      session_token: minted.sessionToken,
+      endpoint: `https://${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+      bucket: HOLDOUT_BUCKET_NAME,
+      prefix,
+      expires_in: HOLDOUT_CREDENTIAL_TTL_SECONDS,
+    },
+  };
 }
 
 // ---- dispatch ---------------------------------------------------------------

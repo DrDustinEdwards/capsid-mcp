@@ -179,30 +179,54 @@ jobs:
             cp -r attempt/code/. .
           fi
 
-      # R2 holdout secrets are env ON THIS STEP ONLY; no attempt code runs here.
-      # The aws CLI reads only the AWS_* names, so the secrets are mapped onto
-      # them (R2_ACCESS_KEY_ID was invisible to it: every sync failed with
-      # "Unable to locate credentials" and the holdout scored 0). Checksums are
-      # when_required because R2 rejects the CRC headers newer aws CLIs send by
-      # default.
+      # NO LONG-LIVED R2 SECRET (platform arc 2026-09-06). The holdout is pulled
+      # with a ONE-HOUR object-read-only credential scoped to this namespace's
+      # prefix, minted by the Worker on request. The request is signed with the
+      # same per-namespace key as the score report, so a key leaking from one
+      # repo grants read access to that repo's own hidden suite and nothing
+      # else, for an hour, instead of an account-wide S3 token forever. This
+      # step's env holds only the signing key; no attempt code runs here.
+      # Checksums are when_required because R2 rejects the CRC headers newer aws
+      # CLIs send by default.
       - name: Pull the holdout suite
         id: holdout
         continue-on-error: true
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.IMPROVE_HOLDOUT_R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.IMPROVE_HOLDOUT_R2_SECRET_ACCESS_KEY }}
+          IMPROVE_SCORE_KEY: ${{ secrets.IMPROVE_SCORE_KEY }}
+          IMPROVE_NAMESPACE: ${{ vars.IMPROVE_NAMESPACE }}
+          CAPSID_URL: https://capsid.dustin-edwards.workers.dev
           AWS_DEFAULT_REGION: auto
           AWS_REQUEST_CHECKSUM_CALCULATION: when_required
           AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
-          R2_ACCOUNT_ID: ${{ secrets.IMPROVE_HOLDOUT_R2_ACCOUNT_ID }}
-          IMPROVE_NAMESPACE: ${{ vars.IMPROVE_NAMESPACE }}
+          NODE_OPTIONS: ""
         run: |
           set -euo pipefail
+          TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          BODY=$(node -e 'process.stdout.write(JSON.stringify({ namespace: process.env.IMPROVE_NAMESPACE, jti: require("crypto").randomUUID() }))')
+          SIG=$(TS="${TS}" BODY="${BODY}" node -e 'const c=require("crypto");const h=c.createHmac("sha256",process.env.IMPROVE_SCORE_KEY);h.update(process.env.TS+"."+process.env.BODY);process.stdout.write(h.digest("hex"))')
+          CRED_FILE=$(mktemp)
+          STATUS=$(/usr/bin/curl --silent --show-error -o "${CRED_FILE}" -w '%{http_code}' \
+            -X POST "${CAPSID_URL}/improve/holdout-credential" \
+            -H "Content-Type: application/json" \
+            -H "X-Improve-Namespace: ${IMPROVE_NAMESPACE}" \
+            -H "X-Improve-Timestamp: ${TS}" \
+            -H "X-Improve-Signature: ${SIG}" \
+            --data "${BODY}")
+          if [ "${STATUS}" != "200" ]; then
+            echo "holdout credential request failed (HTTP ${STATUS}):" >&2
+            cat "${CRED_FILE}" >&2
+            exit 1
+          fi
+          # The credential values are exported for the aws CLI and never echoed.
+          eval "$(CRED_FILE="${CRED_FILE}" node -e '
+            const c = JSON.parse(require("fs").readFileSync(process.env.CRED_FILE, "utf8"));
+            const fields = [["AWS_ACCESS_KEY_ID", c.access_key_id], ["AWS_SECRET_ACCESS_KEY", c.secret_access_key], ["AWS_SESSION_TOKEN", c.session_token], ["HOLDOUT_ENDPOINT", c.endpoint], ["HOLDOUT_BUCKET", c.bucket], ["HOLDOUT_PREFIX", c.prefix]];
+            for (const [name, value] of fields) {
+              if (!value) { console.error("missing " + name + " in the credential response"); process.exit(1); }
+              process.stdout.write("export " + name + "=" + JSON.stringify(value) + "\n");
+            }')"
           mkdir -p .improve-holdout
-          aws s3 sync \
-            "s3://capsid-improve-holdout/improve/holdout/${IMPROVE_NAMESPACE}/" \
-            .improve-holdout/ \
-            --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          aws s3 sync "s3://${HOLDOUT_BUCKET}/${HOLDOUT_PREFIX}" .improve-holdout/ --endpoint-url "${HOLDOUT_ENDPOINT}"
 
       # Count passes from the TAP reporter via the trusted script, never exit codes.
       - name: Run the holdout suite

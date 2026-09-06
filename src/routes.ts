@@ -20,7 +20,17 @@ import { callerIp, checkCspReportRate, rateLimitedResponse } from "./rate-limit"
 import type { Env } from "./env";
 import { buildServer } from "./server";
 import { ingestScore } from "./improve-run";
-import { claimJti, MAX_REPORT_BYTES, parseScoreReport, readBoundedText, SCORE_PATH, verifySignedReport } from "./improve-scorer";
+import {
+  claimJti,
+  CREDENTIAL_PATH,
+  MAX_REPORT_BYTES,
+  mintHoldoutCredential,
+  parseCredentialRequest,
+  parseScoreReport,
+  readBoundedText,
+  SCORE_PATH,
+  verifySignedReport,
+} from "./improve-scorer";
 import { probeFts } from "./store-probe";
 
 const GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize";
@@ -546,6 +556,51 @@ async function handleCspReport(request: Request, env: Env): Promise<Response> {
 // all until a signature over the body verifies against a secret only the target
 // repo holds. An unsigned flood costs two HMAC computations per request and
 // reaches no storage.
+// The holdout-credential mint (platform arc 2026-09-06). Same envelope as the
+// score report: per-namespace HMAC over timestamp.body, bounded body, jti
+// replay cache. The signed namespace is the authority, so a repo can mint read
+// access to ITS OWN holdout prefix and nothing else; the actual minting, and
+// the secrets it needs, live in src/improve-scorer.ts with the rest of the
+// holdout surface.
+async function handleHoldoutCredential(request: Request, env: Env): Promise<Response> {
+  const namespace = request.headers.get("X-Improve-Namespace") ?? "";
+  const timestamp = request.headers.get("X-Improve-Timestamp") ?? "";
+  const signature = request.headers.get("X-Improve-Signature") ?? "";
+
+  const bounded = await readBoundedText(request, MAX_REPORT_BYTES);
+  if (!bounded.ok) return textResponse(`request too large: exceeds ${MAX_REPORT_BYTES} bytes`, 413);
+  const body = bounded.text;
+
+  const verdict = await verifySignedReport(env, { namespace, timestamp, signature, body }, new Date());
+  if (!verdict.ok) {
+    console.error(`IMPROVE_CREDENTIAL_REJECTED ${namespace || "(no namespace)"}: ${verdict.refusal}`);
+    return textResponse(verdict.refusal, verdict.status);
+  }
+
+  const parsed = parseCredentialRequest(body);
+  if (!parsed.ok) return textResponse(parsed.refusal, 400);
+  if (parsed.namespace !== verdict.namespace) {
+    return textResponse(
+      `the request body names namespace '${parsed.namespace}' but it was signed with the key for '${verdict.namespace}'`,
+      403
+    );
+  }
+
+  const claim = await claimJti(env.APP_KV, verdict.namespace, parsed.jti);
+  if (!claim.ok) return textResponse(claim.refusal, claim.status);
+
+  const minted = await mintHoldoutCredential(env, verdict.namespace);
+  if (!minted.ok) {
+    console.error(`IMPROVE_CREDENTIAL_FAILED ${verdict.namespace}: ${minted.refusal}`);
+    return textResponse(minted.refusal, minted.status);
+  }
+  console.log(`IMPROVE_CREDENTIAL_MINTED ns=${verdict.namespace} ttl=${minted.credential.expires_in}s`);
+  return new Response(JSON.stringify(minted.credential), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
 async function handleImproveScore(request: Request, env: Env): Promise<Response> {
   const namespace = request.headers.get("X-Improve-Namespace") ?? "";
   const timestamp = request.headers.get("X-Improve-Timestamp") ?? "";
@@ -632,6 +687,7 @@ export const defaultHandler = {
     if (url.pathname === "/ops/mcp") return handleOperatorMcp(request, env, ctx);
     if (url.pathname === "/ops/backup" && request.method === "POST") return handleBackup(request, env);
     if (url.pathname === SCORE_PATH && request.method === "POST") return handleImproveScore(request, env);
+    if (url.pathname === CREDENTIAL_PATH && request.method === "POST") return handleHoldoutCredential(request, env);
     if (url.pathname === "/authorize" && request.method === "GET") return handleAuthorizeGet(request, env);
     if (url.pathname === "/authorize" && request.method === "POST") return handleAuthorizePost(request, env);
     if (url.pathname === "/callback") return handleCallback(request, env);

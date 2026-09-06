@@ -27,7 +27,10 @@ const BUCKET_NAME = "capsid-improve-holdout";
 // whole file would let a later field there reach for it, so the exact permitted
 // occurrences are listed and a third one in that file fails. Same technique as
 // the bounding-primitive pin in test/limits.test.ts.
-const ENV_PERMITTED = ["  HOLDOUT: R2Bucket;", 'export type AttemptEnv = Omit<Env, "HOLDOUT">;'];
+const ENV_PERMITTED = [
+  "  HOLDOUT: R2Bucket;",
+  'export type AttemptEnv = Omit<Env, "HOLDOUT" | "R2_TEMP_CRED_TOKEN" | "R2_TEMP_CRED_PARENT_ACCESS_KEY_ID">;',
+];
 
 // A COMMENT IS NOT A USE. Several modules explain this isolation at length, and
 // naming the binding while doing so is the opposite of the problem. Same
@@ -74,11 +77,15 @@ test("the guard is NOT VACUOUS: the scorer really does use the binding", () => {
   assert.match(scorer, /env\.HOLDOUT\.get\(/, "the scorer no longer reads the holdout bucket");
 });
 
-test("no source file hardcodes the bucket NAME either", () => {
+test("no source file hardcodes the bucket NAME either, except the scorer", () => {
   // The binding is what is withheld, but a module that reached the bucket by name
   // through some other path would be just as wrong, and would pass the binding
-  // scan above.
+  // scan above. improve-scorer.ts is exempt since the platform arc (2026-09-06):
+  // it already holds the binding, and the temp-access-credentials API it calls
+  // scopes by bucket NAME, which therefore has to be spelled somewhere the
+  // attempt path cannot reach.
   const offenders = sourceFiles()
+    .filter((f) => f.name !== "improve-scorer.ts")
     .filter((f) =>
       f.text
         .split("\n")
@@ -86,12 +93,12 @@ test("no source file hardcodes the bucket NAME either", () => {
         .some((line) => !isComment(line) && line.includes(BUCKET_NAME))
     )
     .map((f) => `src/${f.name}`);
-  assert.deepEqual(offenders, [], "a source file hardcodes the holdout bucket name");
+  assert.deepEqual(offenders, [], "a source file outside the scorer hardcodes the holdout bucket name");
 });
 
 test("the attempt module takes AttemptEnv, and AttemptEnv omits the binding", () => {
   const env = sourceFile("env.ts");
-  assert.match(env, /export type AttemptEnv = Omit<Env, "HOLDOUT">;/);
+  assert.match(env, /export type AttemptEnv = Omit<Env, "HOLDOUT" \| "R2_TEMP_CRED_TOKEN" \| "R2_TEMP_CRED_PARENT_ACCESS_KEY_ID">;/);
   const attempt = sourceFile("improve-attempt.ts");
   assert.match(attempt, /import type \{ AttemptEnv \} from "\.\/env";/);
   // Both exported entry points take it. A helper that took Env would hand the
@@ -135,4 +142,92 @@ test("the manifest key is namespaced under the holdout prefix", () => {
   assert.equal(holdoutManifestKey("foxing"), `${HOLDOUT_PREFIX}foxing/manifest.json`);
   // A namespace cannot read out of another's prefix by construction of the key.
   assert.ok(holdoutManifestKey("foxing").startsWith(`${HOLDOUT_PREFIX}foxing/`));
+});
+
+// ---- temporary credentials (platform arc 2026-09-06) ------------------------
+//
+// The score job no longer holds a long-lived S3 key: it asks the Worker for a
+// one-hour object-read-only credential scoped to its own namespace's prefix.
+// The mint needs two secrets, and those secrets are exactly as dangerous as the
+// binding, so the same three-layer isolation applies: AttemptEnv omits them
+// (asserted above), and this scan keeps them out of every module but the scorer.
+
+const TEMP_CRED_SECRETS = ["R2_TEMP_CRED_TOKEN", "R2_TEMP_CRED_PARENT_ACCESS_KEY_ID"];
+
+test("ONLY src/improve-scorer.ts names the temp-credential secrets", () => {
+  const offenders = sourceFiles()
+    .filter((f) => f.name !== "improve-scorer.ts" && f.name !== "env.ts")
+    .flatMap((f) =>
+      f.text
+        .split("\n")
+        .map((line, i) => ({ file: f.name, line: i + 1, text: line.trim() }))
+        .filter((l) => !isComment(l.text) && TEMP_CRED_SECRETS.some((s) => l.text.includes(s)))
+    );
+  assert.deepEqual(
+    offenders.map((o) => `src/${o.file}:${o.line} ${o.text}`),
+    [],
+    "a module other than the scorer names a temp-credential secret. Attempt code must not be able to mint read access to the suite."
+  );
+});
+
+test("the credential mint asks for object-read-only, one hour, this namespace's prefix only", async () => {
+  const { mintHoldoutCredential } = await import("../src/improve-scorer.ts");
+  const { fakeEnv, withFetch } = await import("./fakes.ts");
+  await withFetch(
+    {
+      "POST /client/v4/accounts/acct-1/r2/temp-access-credentials": (body: unknown) => {
+        const request = body as Record<string, unknown>;
+        assert.equal(request.bucket, BUCKET_NAME);
+        assert.equal(request.permission, "object-read-only");
+        assert.equal(request.ttlSeconds, 3600);
+        assert.equal(request.parentAccessKeyId, "parent-key-id");
+        assert.deepEqual(request.prefixes, [`${HOLDOUT_PREFIX}foxing/`]);
+        return { body: { success: true, result: { accessKeyId: "AK", secretAccessKey: "SK", sessionToken: "ST" } } };
+      },
+    },
+    async () => {
+      const env = fakeEnv({
+        R2_TEMP_CRED_TOKEN: "cf-api-token",
+        R2_TEMP_CRED_PARENT_ACCESS_KEY_ID: "parent-key-id",
+        R2_ACCOUNT_ID: "acct-1",
+      });
+      const minted = await mintHoldoutCredential(env, "foxing");
+      assert.ok(minted.ok, `mint refused: ${minted.ok ? "" : minted.refusal}`);
+      assert.equal(minted.credential.access_key_id, "AK");
+      assert.equal(minted.credential.session_token, "ST");
+      assert.equal(minted.credential.endpoint, "https://acct-1.r2.cloudflarestorage.com");
+      assert.equal(minted.credential.bucket, BUCKET_NAME);
+      assert.equal(minted.credential.prefix, `${HOLDOUT_PREFIX}foxing/`);
+    }
+  );
+});
+
+test("an unconfigured mint is a clear 503, not a crash and not a wider credential", async () => {
+  const { mintHoldoutCredential } = await import("../src/improve-scorer.ts");
+  const { fakeEnv, withFetch } = await import("./fakes.ts");
+  await withFetch({}, async (calls) => {
+    const minted = await mintHoldoutCredential(fakeEnv({}), "foxing");
+    assert.equal(minted.ok, false);
+    assert.equal(minted.ok ? 0 : minted.status, 503);
+    assert.match(minted.ok ? "" : minted.refusal, /wrangler secret put/);
+    assert.equal(calls.length, 0, "an unconfigured mint still called the Cloudflare API");
+  });
+});
+
+test("a credential request without a namespace or jti is refused at the parse", async () => {
+  const { parseCredentialRequest } = await import("../src/improve-scorer.ts");
+  assert.equal(parseCredentialRequest("not json").ok, false);
+  assert.equal(parseCredentialRequest(JSON.stringify({ jti: "0123456789" })).ok, false);
+  assert.equal(parseCredentialRequest(JSON.stringify({ namespace: "foxing" })).ok, false);
+  assert.equal(parseCredentialRequest(JSON.stringify({ namespace: "foxing", jti: "short" })).ok, false);
+  const good = parseCredentialRequest(JSON.stringify({ namespace: "foxing", jti: "0123456789" }));
+  assert.ok(good.ok && good.namespace === "foxing");
+});
+
+test("the scorer workflow holds NO long-lived R2 secret and asks the Worker instead", () => {
+  const yml = readFileSync(join(import.meta.dirname, "..", ".github", "workflows", "improve-score.yml"), "utf8");
+  for (const secret of ["IMPROVE_HOLDOUT_R2_ACCESS_KEY_ID", "IMPROVE_HOLDOUT_R2_SECRET_ACCESS_KEY", "IMPROVE_HOLDOUT_R2_ACCOUNT_ID"]) {
+    assert.ok(!yml.includes(secret), `improve-score.yml still references the long-lived repo secret ${secret}`);
+  }
+  assert.match(yml, /\/improve\/holdout-credential/, "the Pull step no longer asks the Worker for a temporary credential");
 });
