@@ -255,10 +255,25 @@ jobs:
           SIG=$(TS="${TS}" BODY="${BODY}" node -e 'const c=require("crypto");const h=c.createHmac("sha256",process.env.IMPROVE_SCORE_KEY);h.update(process.env.TS+"."+process.env.BODY);process.stdout.write(h.digest("hex"))')
           echo "Posting score report for ${ATTEMPT_ID}:"
           echo "${BODY}"
-          /usr/bin/curl --fail-with-body --silent --show-error \
+          # A shakedown dispatch (the literal RUN_ID "shakedown") has no run row in
+          # the Worker, so its report is answered 409 "unknown run" by design, AFTER
+          # the signature verified (a bad signature is 401 before the run lookup).
+          # That one answer, on that one RUN_ID, is success: it proves the pipeline
+          # end to end. Any other non-2xx, and a 409 on a real run id, still fails
+          # this step loudly.
+          RESPONSE_FILE=$(mktemp)
+          STATUS=$(/usr/bin/curl --silent --show-error -o "${RESPONSE_FILE}" -w '%{http_code}' \
             -X POST "${CAPSID_URL}/improve/score" \
             -H "Content-Type: application/json" \
             -H "X-Improve-Namespace: ${IMPROVE_NAMESPACE}" \
             -H "X-Improve-Timestamp: ${TS}" \
             -H "X-Improve-Signature: ${SIG}" \
-            --data "${BODY}"
+            --data "${BODY}")
+          cat "${RESPONSE_FILE}"; echo
+          case "${STATUS}" in 2*) exit 0 ;; esac
+          if [ "${STATUS}" = "409" ] && [ "${RUN_ID}" = "shakedown" ] && grep -q "unknown run" "${RESPONSE_FILE}"; then
+            echo "shakedown accepted: the Worker verified the signature and refused the nonexistent run, which is the expected terminal answer."
+            exit 0
+          fi
+          echo "score report rejected (HTTP ${STATUS})" >&2
+          exit 1
