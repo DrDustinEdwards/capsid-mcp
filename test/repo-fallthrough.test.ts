@@ -522,51 +522,92 @@ test("ci_status run_id returns just that run, and refuses one that does not exis
   });
 });
 
-test("ci_status returns the FAILING STEP's region, not the end of the job log", async () => {
-  // This is the whole reason the bound changed. A job log ends in post-run cleanup,
-  // so a tail of the job returned git plumbing while the real failure sat earlier.
-  const log = [
-    "##[group]Set up job",
-    "setup noise",
-    "##[endgroup]",
-    "##[group]Gates",
-    "THE ACTUAL FAILURE IS HERE",
-    "##[endgroup]",
-    "##[group]Post Run actions/checkout",
-    "git config --unset-all http.extraheader",
-    "cleaning up orphan processes",
-  ].join("\n");
+// A REALISTIC job log: every line timestamped, groups labelled "Run <command>"
+// rather than by step name, and post-run cleanup at the end. The step name appears
+// NOWHERE in it, which is what defeated the first implementation.
+const JOB_LOG = [
+  "2026-09-06T00:57:25.0Z ##[group]Run actions/checkout@abc",
+  "2026-09-06T00:57:26.0Z setup noise nobody asked for",
+  "2026-09-06T00:57:27.0Z ##[endgroup]",
+  "2026-09-06T00:58:31.0Z ##[group]Run npm run check:ci",
+  "2026-09-06T00:58:40.0Z check:types ... ok",
+  "2026-09-06T01:00:00.0Z check:floors ... FAILED",
+  "2026-09-06T01:01:52.0Z ##[error]Process completed with exit code 1.",
+  "2026-09-06T01:01:54.0Z ##[group]Post Run actions/checkout@abc",
+  "2026-09-06T01:01:54.5Z git config --unset-all http.extraheader",
+  "2026-09-06T01:01:54.9Z Cleaning up orphan processes",
+].join("\n");
+
+const FAILED_STEP = {
+  name: "Gates",
+  conclusion: "failure",
+  started_at: "2026-09-06T00:58:30Z",
+  completed_at: "2026-09-06T01:01:53Z",
+};
+
+test("ci_status finds the failing step BY TIMESTAMP, since its name is not in the log", async () => {
+  // The first implementation searched for the step name, which appears nowhere in an
+  // Actions job log (groups are labelled "Run <command>"), matched an incidental
+  // occurrence, and then reported a region it had not located. Measured on
+  // dustinedwards-info run 34002625535.
   await withFetch(
     {
       "GET /repos/o/r/actions/runs": { body: { workflow_runs: [RUN_ROW()] } },
       "GET /repos/o/r/actions/runs/42/jobs": {
-        body: { jobs: [{ id: 9, name: "verify", conclusion: "failure", steps: [{ name: "Gates", conclusion: "failure" }] }] },
+        body: { jobs: [{ id: 9, name: "Gates, clean checkout", conclusion: "failure", steps: [FAILED_STEP] }] },
       },
-      "GET /repos/o/r/actions/jobs/9/logs": { text: log },
+      "GET /repos/o/r/actions/jobs/9/logs": { text: JOB_LOG },
     },
     async () => {
       const out = (await ciStatus(makeEnv(), "ns", undefined, { logTail: true })) as {
         failed_run: { log?: string; log_region?: string; failing_step?: string | null; failing_job?: string };
       };
       const failed = out.failed_run;
-      assert.equal(failed.failing_job, "verify");
+      const body = failed.log ?? "";
+      assert.equal(failed.failing_job, "Gates, clean checkout");
       assert.equal(failed.failing_step, "Gates");
-      assert.match(failed.log ?? "", /THE ACTUAL FAILURE IS HERE/, "the failing step's output was not returned");
-      assert.equal(/setup noise/.test(failed.log ?? ""), false, "it returned the whole log rather than the step's region");
-      assert.match(failed.log_region ?? "", /failing step "Gates"/);
+      assert.match(body, /check:floors \.\.\. FAILED/, "the actual failure was not returned");
+      // Neither the setup before the step NOR the cleanup after it.
+      assert.equal(/setup noise/.test(body), false, "output from before the step leaked in");
+      assert.equal(/orphan processes/.test(body), false, "post-run cleanup leaked in, which is the whole defect");
+      assert.equal(/git config --unset-all/.test(body), false, "post-run git plumbing leaked in");
+      assert.match(failed.log_region ?? "", /timestamp window/);
+    }
+  );
+});
+
+test("ci_status NAMES the fallback when the step has no usable window", async () => {
+  // Failing to locate the step is allowed; claiming to have located it is not.
+  await withFetch(
+    {
+      "GET /repos/o/r/actions/runs": { body: { workflow_runs: [RUN_ROW()] } },
+      "GET /repos/o/r/actions/runs/42/jobs": {
+        body: { jobs: [{ id: 9, name: "verify", conclusion: "failure", steps: [{ name: "Gates", conclusion: "failure" }] }] },
+      },
+      "GET /repos/o/r/actions/jobs/9/logs": { text: JOB_LOG },
+    },
+    async () => {
+      const out = (await ciStatus(makeEnv(), "ns", undefined, { logTail: true })) as {
+        failed_run: { log?: string; log_region?: string };
+      };
+      assert.match(out.failed_run.log_region ?? "", /no usable timestamp window/);
+      assert.match(out.failed_run.log_region ?? "", /cleanup included/, "the fallback did not admit what it returned");
+      // And it really is the whole job, cleanup and all, as it says.
+      assert.match(out.failed_run.log ?? "", /orphan processes/);
     }
   );
 });
 
 test("ci_status caps the failing step's log at the budget, keeping the END", async () => {
   const marker = "DIAGNOSIS AT THE VERY END";
-  const log = `##[group]Gates\n${"filler\n".repeat(20_000)}${marker}`;
+  const filler = Array.from({ length: 20_000 }, () => "2026-09-06T01:00:00.0Z filler").join("\n");
+  const log = `2026-09-06T00:58:31.0Z start\n${filler}\n2026-09-06T01:01:52.0Z ${marker}`;
   assert.ok(log.length > CI_LOG_BUDGET, "the fixture is not larger than the budget");
   await withFetch(
     {
       "GET /repos/o/r/actions/runs": { body: { workflow_runs: [RUN_ROW()] } },
       "GET /repos/o/r/actions/runs/42/jobs": {
-        body: { jobs: [{ id: 9, name: "verify", conclusion: "failure", steps: [{ name: "Gates", conclusion: "failure" }] }] },
+        body: { jobs: [{ id: 9, name: "verify", conclusion: "failure", steps: [FAILED_STEP] }] },
       },
       "GET /repos/o/r/actions/jobs/9/logs": { text: log },
     },
@@ -577,6 +618,7 @@ test("ci_status caps the failing step's log at the budget, keeping the END", asy
       // From the END, because CI failures print their diagnosis last.
       assert.match(body, new RegExp(marker), "the budget kept the start and dropped the diagnosis");
       assert.match(out.failed_run.log_region ?? "", /last \d+ bytes/);
+      assert.match(out.failed_run.log_region ?? "", /timestamp window/);
     }
   );
 });
@@ -586,7 +628,7 @@ test("ci_status still withholds the log from a read-only key", async () => {
     {
       "GET /repos/o/r/actions/runs": { body: { workflow_runs: [RUN_ROW()] } },
       "GET /repos/o/r/actions/runs/42/jobs": {
-        body: { jobs: [{ id: 9, name: "verify", conclusion: "failure", steps: [{ name: "Gates", conclusion: "failure" }] }] },
+        body: { jobs: [{ id: 9, name: "verify", conclusion: "failure", steps: [FAILED_STEP] }] },
       },
     },
     async () => {

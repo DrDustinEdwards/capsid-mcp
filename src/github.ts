@@ -925,27 +925,54 @@ interface CiRun {
 // capsid/decisions.md, 2026-09-06.
 export const CI_LOG_BUDGET = 64 * 1024;
 
-function failingStepLog(log: string, stepName: string | undefined): { text: string; how: string } {
-  if (stepName) {
-    // Actions writes one `##[group]` per step, titled with the step's name.
-    const marker = log.lastIndexOf(`##[group]${stepName}`);
-    const at = marker === -1 ? log.lastIndexOf(stepName) : marker;
-    if (at !== -1) {
-      const region = log.slice(at);
+// THE STEP IS FOUND BY TIMESTAMP, NOT BY NAME, and the first attempt at this got it
+// wrong in a way worth recording. Actions labels each group `##[group]Run <command>`,
+// NOT `##[group]<step name>`, so a step called "Gates" appears nowhere in its own
+// log. Searching for the name matched an incidental later occurrence and the tool
+// then reported a region it had not actually located: a false claim, which is worse
+// than the tail it replaced. Measured on dustinedwards-info run 34002625535.
+//
+// Every log line carries an ISO timestamp and the jobs API gives each step's
+// started_at and completed_at, so the step's own output is the lines inside that
+// window. On that run it is 51 lines and 3137 bytes, with the real `check:floors ...
+// FAILED` inside it and no post-run cleanup, against a 93KB job log.
+function failingStepLog(
+  log: string,
+  step: { name?: string; started_at?: string | null; completed_at?: string | null } | undefined
+): { text: string; how: string } {
+  const name = step?.name;
+  const from = step?.started_at ? Date.parse(step.started_at) : NaN;
+  const to = step?.completed_at ? Date.parse(step.completed_at) : NaN;
+
+  if (Number.isFinite(from) && Number.isFinite(to)) {
+    const windowed = log
+      .split("\n")
+      .filter((line) => {
+        const stamp = /^(\S+Z)/.exec(line);
+        if (!stamp) return false;
+        const at = Date.parse(stamp[1]);
+        return Number.isFinite(at) && at >= from && at <= to;
+      })
+      .join("\n");
+    if (windowed.length > 0) {
       return {
-        text: region.length > CI_LOG_BUDGET ? region.slice(-CI_LOG_BUDGET) : region,
-        how: region.length > CI_LOG_BUDGET ? `failing step "${stepName}", last ${CI_LOG_BUDGET} bytes of it` : `failing step "${stepName}", whole`,
+        text: windowed.length > CI_LOG_BUDGET ? windowed.slice(-CI_LOG_BUDGET) : windowed,
+        how:
+          windowed.length > CI_LOG_BUDGET
+            ? `failing step "${name}" by timestamp window, last ${CI_LOG_BUDGET} bytes of it`
+            : `failing step "${name}" by timestamp window, whole (${windowed.length} bytes)`,
       };
     }
   }
-  // NAMED FALLBACK, not a silent one. If the step could not be located the caller is
-  // told that, because "the end of the job log" and "the failing step" are different
-  // claims and only one of them is being made.
+
+  // NAMED FALLBACK, not a silent one. If the window could not be applied the caller
+  // is told so, because "the end of the job log" and "the failing step" are different
+  // claims and only one of them is being made here.
   return {
     text: log.slice(-CI_LOG_BUDGET),
-    how: stepName
-      ? `step "${stepName}" was not locatable in the log, so this is the last ${CI_LOG_BUDGET} bytes of the whole job`
-      : `no failing step was named, so this is the last ${CI_LOG_BUDGET} bytes of the whole job`,
+    how: name
+      ? `step "${name}" had no usable timestamp window, so this is the last ${CI_LOG_BUDGET} bytes of the whole job, cleanup included`
+      : `no failing step was named, so this is the last ${CI_LOG_BUDGET} bytes of the whole job, cleanup included`,
   };
 }
 
@@ -996,7 +1023,12 @@ async function ciStatusFromRuns(
       failedRun.jobs_unavailable = `${jobsResp.status}: ${(await jobsResp.text()).slice(0, 200) || "no response body"}`;
     } else {
       const jobsData = (await jobsResp.json()) as {
-        jobs: Array<{ id: number; name: string; conclusion: string | null; steps?: Array<{ name: string; conclusion: string | null }> }>;
+        jobs: Array<{
+          id: number;
+          name: string;
+          conclusion: string | null;
+          steps?: Array<{ name: string; conclusion: string | null; started_at?: string | null; completed_at?: string | null }>;
+        }>;
       };
       failedRun.jobs = jobsData.jobs
         .filter((j) => j.conclusion === "failure")
@@ -1014,10 +1046,10 @@ async function ciStatusFromRuns(
       } else {
         const logResp = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/actions/jobs/${firstFailedJob.id}/logs`);
         if (logResp.ok) {
-          const stepName = (firstFailedJob.steps ?? []).find((s) => s.conclusion === "failure")?.name;
-          const picked = failingStepLog(await logResp.text(), stepName);
+          const failedStep = (firstFailedJob.steps ?? []).find((s) => s.conclusion === "failure");
+          const picked = failingStepLog(await logResp.text(), failedStep);
           failedRun.failing_job = firstFailedJob.name;
-          failedRun.failing_step = stepName ?? null;
+          failedRun.failing_step = failedStep?.name ?? null;
           failedRun.log_region = picked.how;
           failedRun.log = picked.text;
         } else {

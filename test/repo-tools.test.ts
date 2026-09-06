@@ -553,7 +553,7 @@ test("ci_status returns the failing step's log when it can", async () => {
       // The step name is reported, and because this fixture's log does not contain
       // it, log_region says so rather than claiming the region is the step's.
       assert.equal(failed.failing_step, "npm test");
-      assert.match(failed.log_region ?? "", /not locatable/);
+      assert.match(failed.log_region ?? "", /no usable timestamp window/);
     }
   );
 });
