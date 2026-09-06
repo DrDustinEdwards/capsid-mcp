@@ -80,10 +80,13 @@ jobs:
         continue-on-error: true
         run: npm run check
 
+      # node directly, not `npm test --`: the reporter flags must come BEFORE the
+      # test glob or node ignores them (npm would append them after the script's
+      # fixed glob). PER-REPO command; mirrors package.json's test invocation.
       - name: Test
         id: test
         continue-on-error: true
-        run: npm test -- --test-reporter=tap --test-reporter-destination=test-report.json
+        run: node --import ./test/resolve-ts.mjs --test-reporter=tap --test-reporter-destination=test-report.json --test "test/*.test.ts"
 
       - name: Measure
         id: measure
