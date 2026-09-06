@@ -37,6 +37,25 @@ test(`no Cloudflare API call uses the legacy KV route /${LEGACY_KV_ROUTE}/ (dead
   }
 });
 
+// ---- the per-invocation CPU ceiling ------------------------------------------
+
+test("wrangler.jsonc.example and bindings.mjs agree on limits.cpu_ms", () => {
+  // The example is what CI writes wrangler.jsonc from; bindings.mjs is what the
+  // scripts read. Two spellings of one measured number (backup max 1390ms CPU
+  // plus 50%), pinned textually (bindings.mjs is untyped .mjs) so a retune of
+  // one cannot silently leave the other.
+  const example = readFileSync(join(ROOT, "wrangler.jsonc.example"), "utf8");
+  const inExample = /"limits":\s*\{\s*"cpu_ms":\s*(\d+)\s*\}/.exec(example);
+  assert.ok(inExample, "wrangler.jsonc.example no longer sets limits.cpu_ms: the runaway guard is gone");
+  const bindings = readFileSync(join(ROOT, "scripts", "bindings.mjs"), "utf8");
+  const inBindings = /export const LIMITS = \{ cpu_ms: (\d+) \}/.exec(bindings);
+  assert.ok(inBindings, "scripts/bindings.mjs no longer exports LIMITS.cpu_ms");
+  assert.equal(Number(inExample[1]), Number(inBindings[1]), "wrangler.jsonc.example and scripts/bindings.mjs disagree on cpu_ms");
+  // Sanity floor: the ceiling must clear the largest measured invocation (the
+  // 1390ms backup) or the guard kills the backup it exists to protect.
+  assert.ok(Number(inBindings[1]) >= 1390 * 1.5, `cpu_ms ${inBindings[1]} is under the measured backup ceiling plus headroom`);
+});
+
 test("the two KV REST call sites exist and use /storage/kv/namespaces/", () => {
   // The guard above would pass vacuously if the canary and the reaper stopped
   // calling the REST API at all; this pins that they still do, on the new route.

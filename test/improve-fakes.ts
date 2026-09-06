@@ -180,6 +180,14 @@ export function improveExec(sql: string, params: unknown[], rows: ImproveRows): 
     return { handled: true, results: [{ id: row.id }] };
   }
 
+  // The budget month-spend aggregate: whole-table sums bounded by started date.
+  if (/^SELECT COALESCE\(SUM\(cost_usd\), 0\) AS cost_usd/i.test(text) && /started >= \?1/i.test(text)) {
+    const from = String(params[0]);
+    const inMonth = rows.improve_runs.filter((r) => String(r.started) >= from);
+    const sum = (key: string) => inMonth.reduce((n, r) => n + Number(r[key] ?? 0), 0);
+    return { handled: true, results: [{ cost_usd: sum("cost_usd"), ci_minutes: sum("ci_minutes") }] };
+  }
+
   if (/^SELECT COUNT\(\*\) AS runs/i.test(text)) {
     const ns = params[0];
     const mine = rows.improve_runs.filter((r) => r.namespace === ns);

@@ -21,11 +21,14 @@ import type { Env } from "./env";
 import { normalizeDashes } from "./normalize";
 import {
   bestKey,
+  BUDGET_DEFAULTS,
+  BUDGET_KEY,
   DEFAULT_MODE,
   IMPROVE_MODES,
   MODE_KEY,
   pausedKey,
   type BestRecord,
+  type BudgetCaps,
   type ImproveMode,
   type RunCondition,
   type RunStatus,
@@ -70,6 +73,49 @@ export async function pausedReason(kv: KVNamespace, namespace: string): Promise<
 // namespace that was stopped for a reason nobody has looked at yet.
 export async function pauseNamespace(kv: KVNamespace, namespace: string, reason: string): Promise<void> {
   await kv.put(pausedKey(namespace), reason);
+}
+
+// The budget caps, defaults applied per FIELD: a partial value caps what it
+// names and defaults the rest, and an unreadable or malformed key means the
+// DEFAULTS apply rather than no cap at all. Same fail-closed posture as the
+// mode read: a KV outage must not uncap the loop.
+export async function readBudget(kv: KVNamespace): Promise<BudgetCaps> {
+  try {
+    const raw = await kv.get(BUDGET_KEY);
+    if (!raw) return { ...BUDGET_DEFAULTS };
+    const parsed = JSON.parse(raw) as Partial<BudgetCaps>;
+    return {
+      actions_minutes_month:
+        typeof parsed.actions_minutes_month === "number" && Number.isFinite(parsed.actions_minutes_month)
+          ? parsed.actions_minutes_month
+          : BUDGET_DEFAULTS.actions_minutes_month,
+      model_usd_month:
+        typeof parsed.model_usd_month === "number" && Number.isFinite(parsed.model_usd_month)
+          ? parsed.model_usd_month
+          : BUDGET_DEFAULTS.model_usd_month,
+      ...(typeof parsed.month === "string" && /^\d{4}-\d{2}$/.test(parsed.month) ? { month: parsed.month } : {}),
+    };
+  } catch {
+    return { ...BUDGET_DEFAULTS };
+  }
+}
+
+// What the loop has spent since the start of the budget month, from the run
+// rows themselves: cost_usd is the model estimate the run recorded, ci_minutes
+// is the scorer-reported Actions time. Both accrue on the run row as the run
+// advances, so an in-flight run's spend counts too.
+export async function monthSpend(
+  db: D1Database,
+  monthStart: string
+): Promise<{ cost_usd: number; ci_minutes: number }> {
+  const row = await db
+    .prepare(
+      `SELECT COALESCE(SUM(cost_usd), 0) AS cost_usd, COALESCE(SUM(ci_minutes), 0) AS ci_minutes
+       FROM improve_runs WHERE started >= ?1`
+    )
+    .bind(monthStart)
+    .first<{ cost_usd: number; ci_minutes: number }>();
+  return { cost_usd: Number(row?.cost_usd ?? 0), ci_minutes: Number(row?.ci_minutes ?? 0) };
 }
 
 export async function readBest(kv: KVNamespace, namespace: string): Promise<BestRecord | null> {

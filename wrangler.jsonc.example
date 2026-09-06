@@ -6,6 +6,14 @@
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "keep_vars": true,
   "observability": { "enabled": true },
+  // THE RUNAWAY GUARD (Cloudflare platform arc 2026-09-06). Budget alerts are
+  // informational and cannot stop a Worker, so the per-invocation CPU ceiling is
+  // the one platform-enforced hard stop. MEASURED, not guessed, over
+  // 2026-08-31..09-06 via Workers Observability (max cpuTimeMs per trigger):
+  // daily backup cron 1390ms, improve tick 1ms, largest HTTP request (POST /mcp)
+  // 249ms. Ceiling = 1390 * 1.5, rounded to 2100. scripts/bindings.mjs exports
+  // the same number and test/cloudflare-platform.test.ts fails if they drift.
+  "limits": { "cpu_ms": 2100 },
   // THREE CRONS. src/index.ts dispatches on which one fired and exports the same
   // three strings; test/improve-cron.test.ts derives one list from the other and
   // fails in both directions, so this config and the handler cannot drift.

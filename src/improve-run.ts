@@ -74,10 +74,12 @@ import {
   attemptsForRun,
   improveAudit,
   improveDocStatements,
+  monthSpend,
   pauseNamespace,
   pausedReason,
   priorDoc,
   readBest,
+  readBudget,
   readMode,
   runById,
   writeBest,
@@ -149,6 +151,62 @@ function scoreStatements(
   );
 }
 
+// ---- the budget kill switch -------------------------------------------------
+
+// Cloudflare's budget alerts are informational and cannot stop a Worker
+// (platform arc 2026-09-06), so this is the loop's own hard stop: monthly caps
+// on Actions minutes and model spend, read from KV (changeable without a
+// deploy, defaults 300 minutes / $50), checked by the opener and the tick
+// BEFORE they open or advance anything.
+export interface BudgetStatus {
+  month: string;
+  caps: { actions_minutes_month: number; model_usd_month: number };
+  spend: { ci_minutes: number; cost_usd: number };
+  exceeded: boolean;
+  reason: string | null;
+}
+
+export async function checkBudget(env: Env, now: Date): Promise<BudgetStatus> {
+  const caps = await readBudget(env.APP_KV);
+  const month = caps.month ?? now.toISOString().slice(0, 7);
+  const spend = await monthSpend(env.DB, `${month}-01 00:00:00`);
+  const overMinutes = spend.ci_minutes > caps.actions_minutes_month;
+  const overUsd = spend.cost_usd > caps.model_usd_month;
+  const exceeded = overMinutes || overUsd;
+  return {
+    month,
+    caps: { actions_minutes_month: caps.actions_minutes_month, model_usd_month: caps.model_usd_month },
+    spend,
+    exceeded,
+    reason: exceeded
+      ? `budget exceeded for ${month}: ` +
+        (overMinutes ? `${spend.ci_minutes.toFixed(1)} of ${caps.actions_minutes_month} Actions minutes` : "") +
+        (overMinutes && overUsd ? ", " : "") +
+        (overUsd ? `$${spend.cost_usd.toFixed(2)} of $${caps.model_usd_month} model spend` : "") +
+        `. Raise the caps in KV ${"improve:budget"} or wait for the month to turn.`
+      : null,
+  };
+}
+
+// Returns the refusal reason when a cap is exceeded, after pausing every roster
+// namespace with reason "budget" (skipping ones already paused, so a five-minute
+// tick does not rewrite eight KV keys forever). The pause is deliberate double
+// coverage: the opener and tick refuse on their own, and the pause makes the
+// stop visible in improve_status and survives a code path that forgets to ask.
+async function enforceBudget(env: Env, now: Date): Promise<string | null> {
+  const budget = await checkBudget(env, now);
+  if (!budget.exceeded) return null;
+  console.error(
+    `IMPROVE_BUDGET_EXCEEDED month=${budget.month} actions_minutes=${budget.spend.ci_minutes.toFixed(1)}/${budget.caps.actions_minutes_month} model_usd=${budget.spend.cost_usd.toFixed(2)}/${budget.caps.model_usd_month}`
+  );
+  for (const namespace of ROSTER) {
+    if (!(await pausedReason(env.APP_KV, namespace))) {
+      await pauseNamespace(env.APP_KV, namespace, "budget");
+    }
+  }
+  return budget.reason;
+}
+
 // ---- opening ----------------------------------------------------------------
 
 export interface OpenOutcome {
@@ -178,8 +236,18 @@ export async function openRuns(
 ): Promise<OpenSummary> {
   const { mode, reason } = await readMode(env.APP_KV);
   const namespaces = only ? [only] : [...ROSTER];
-  const outcomes: OpenOutcome[] = [];
 
+  // THE BUDGET COMES FIRST: an exceeded cap opens nothing anywhere.
+  const budgetReason = await enforceBudget(env, now);
+  if (budgetReason) {
+    return {
+      mode,
+      modeNote: reason,
+      outcomes: namespaces.map((namespace) => ({ namespace, opened: false, runId: null, note: budgetReason })),
+    };
+  }
+
+  const outcomes: OpenOutcome[] = [];
   for (const namespace of namespaces) {
     outcomes.push(await openOne(env, namespace, mode, now, condition));
   }
@@ -275,6 +343,16 @@ export interface TickOutcome {
 
 export async function tickRuns(env: Env, now: Date): Promise<TickOutcome[]> {
   const runs = await advanceableRuns(env.DB, RUNS_PER_TICK);
+  // THE BUDGET COMES FIRST: an exceeded cap advances nothing, dispatches
+  // nothing, calls nothing. Active runs are left exactly where they are and
+  // reported; the first tick after the caps rise or the month turns resumes
+  // them, and RUN_MAX_AGE finalizes any that aged out in the meantime.
+  if (runs.length > 0) {
+    const budgetReason = await enforceBudget(env, now);
+    if (budgetReason) {
+      return runs.map((run) => ({ runId: run.id, namespace: run.namespace, from: run.status, to: run.status, note: budgetReason }));
+    }
+  }
   const outcomes: TickOutcome[] = [];
   for (const run of runs) {
     // Captured BEFORE the step runs: the claim CAS moves the row's status, so by
@@ -1227,11 +1305,14 @@ export interface StatusReport {
   // Named as an estimate everywhere it appears. See the RATES comment in
   // src/improve-anthropic.ts for why a number here is not a bill.
   cost_note: string;
+  // Monthly spend against the KV caps the opener and tick enforce.
+  budget: BudgetStatus;
   namespaces: NamespaceStatus[];
 }
 
 export async function improveStatus(env: Env, only?: string): Promise<StatusReport> {
   const { mode, reason } = await readMode(env.APP_KV);
+  const budget = await checkBudget(env, new Date());
   const namespaces = only ? [only] : [...ROSTER];
   const out: NamespaceStatus[] = [];
 
@@ -1272,6 +1353,7 @@ export async function improveStatus(env: Env, only?: string): Promise<StatusRepo
     mode_note: reason,
     cost_note:
       "cost_usd is an ESTIMATE computed from token counts and published rates, including cache read and write multipliers. It is for sanity-checking, not accounting.",
+    budget,
     namespaces: out,
   };
 }

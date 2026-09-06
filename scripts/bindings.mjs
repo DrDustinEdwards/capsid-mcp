@@ -23,6 +23,14 @@
 // These values are published in capsid/core.md and are inert without an API
 // token: they are an assertion, not a credential.
 
+// THE PER-INVOCATION CPU CEILING, same number as wrangler.jsonc.example's
+// limits.cpu_ms (test/cloudflare-platform.test.ts asserts they agree). Measured
+// 2026-08-31..09-06 via Workers Observability, max cpuTimeMs per trigger: daily
+// backup 1390ms, improve tick 1ms, largest HTTP request 249ms. 1390 * 1.5
+// rounded to 2100. A runaway invocation is killed by the platform at this line,
+// which is the one hard stop budget alerts cannot provide.
+export const LIMITS = { cpu_ms: 2100 };
+
 export const D1 = { name: "capsid", id: "f24921c8-5e6f-499e-96a1-f124f52f12f7" };
 
 // TWO KV NAMESPACES, asserted INDEPENDENTLY since the 2026-08-15 split. They were

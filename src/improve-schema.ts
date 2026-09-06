@@ -65,6 +65,25 @@ export const anchorKey = (namespace: string) => `improve:anchor:${namespace}`;
 // meta-loop reasons across all of them at once.
 export const META_LAST_KEY = "improve:meta:last";
 
+// THE BUDGET KILL SWITCH (Cloudflare platform arc, 2026-09-06). Cloudflare's
+// budget alerts are informational and cannot stop a Worker, so the loop carries
+// its own hard stop: monthly caps on GitHub Actions minutes and model spend,
+// read by the opener and the tick BEFORE they open or advance anything. The
+// caps live in KV, not in code, so they can be changed without a deploy; the
+// key holds JSON { actions_minutes_month, model_usd_month, month? }, and a
+// missing or unreadable key falls back to these defaults rather than to "no
+// cap", the same fail-closed posture as improve_mode.
+export const BUDGET_KEY = "improve:budget";
+export const BUDGET_DEFAULTS = { actions_minutes_month: 300, model_usd_month: 50 } as const;
+
+export interface BudgetCaps {
+  actions_minutes_month: number;
+  model_usd_month: number;
+  // The month the spend is measured over, "YYYY-MM". Unset means the current
+  // UTC month; setting it forward is how a human resets the meter mid-month.
+  month?: string;
+}
+
 // A best record is the commit a namespace is known good at, plus the scores that
 // made it best. Both halves are needed: the sha says where to restore to, the
 // snapshot says what a later run is compared against.
