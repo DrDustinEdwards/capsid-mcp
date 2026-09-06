@@ -143,6 +143,9 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version-file: .nvmrc
+          # Off because it would auto-run the package manager to locate a cache dir
+          # before corepack has provisioned pnpm for a pnpm-workspace repo.
+          package-manager-cache: false
 
       # PACKAGE-MANAGER AGNOSTIC so this job stays byte-identical across an npm repo
       # and a pnpm workspace: pnpm-lock.yaml picks pnpm (via corepack, honouring the
