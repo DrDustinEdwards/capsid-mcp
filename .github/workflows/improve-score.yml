@@ -51,10 +51,6 @@ jobs:
     outputs:
       head_sha: ${{ steps.head.outputs.sha }}
     steps:
-      - name: Stamp the start
-        id: started
-        run: echo "epoch=$(date -u +%s)" > started.txt
-
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ inputs.branch }}
@@ -63,6 +59,12 @@ jobs:
       - name: Capture the attempt head sha
         id: head
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      # AFTER checkout: actions/checkout cleans the workspace, so a file written
+      # before it is deleted and never reaches the artifact.
+      - name: Stamp the start
+        id: started
+        run: echo "epoch=$(date -u +%s)" > started.txt
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
@@ -222,7 +224,7 @@ jobs:
             echo "IMPROVE_SCORE_KEY is unset; the report cannot be signed and will not be sent." >&2
             exit 1
           fi
-          STARTED_EPOCH=$(sed -n 's/^epoch=//p' attempt/started.txt)
+          STARTED_EPOCH=$(sed -n 's/^epoch=//p' attempt/started.txt 2>/dev/null || echo "")
           export CI_MINUTES=$(S="${STARTED_EPOCH}" N="$(date -u +%s)" node -e 'const s=Number(process.env.S||"0"),n=Number(process.env.N||"0");process.stdout.write(s>0?((n-s)/60).toFixed(2):"0")')
           BODY=$(node scripts/improve-report.mjs attempt/metrics.json "${HOLDOUT_TOTAL}" "${HOLDOUT_PASSED}")
           TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
