@@ -417,7 +417,10 @@ const JOBS_OK = {
 type FailedRun = {
   jobs?: unknown;
   jobs_unavailable?: string;
-  log_tail?: string;
+  failing_job?: string;
+  failing_step?: string | null;
+  log?: string;
+  log_region?: string;
   log_tail_unavailable?: string;
   log_tail_withheld?: string;
 };
@@ -529,13 +532,13 @@ test("a write-grant server does hand the log tail through, so the gate is a gate
       })) as { content: Array<{ text: string }> };
       await client.close();
       const failed = (JSON.parse(result.content[0].text) as { failed_run: FailedRun }).failed_run;
-      assert.match(failed.log_tail ?? "", /the last line/);
+      assert.match(failed.log ?? "", /the last line/);
       assert.equal(failed.log_tail_withheld, undefined);
     }
   );
 });
 
-test("ci_status returns the log tail when it can", async () => {
+test("ci_status returns the failing step's log when it can", async () => {
   await withFetch(
     {
       "GET /repos/o/r/actions/runs": { body: FAILED_RUNS },
@@ -545,8 +548,12 @@ test("ci_status returns the log tail when it can", async () => {
     async () => {
       const result = await ciStatus(makeEnv(ONE_REPO), "ns", undefined, { logTail: true });
       const failed = result.failed_run as FailedRun;
-      assert.equal(failed.log_tail, "the last line");
+      assert.equal(failed.log, "the last line");
       assert.equal(failed.log_tail_unavailable, undefined);
+      // The step name is reported, and because this fixture's log does not contain
+      // it, log_region says so rather than claiming the region is the step's.
+      assert.equal(failed.failing_step, "npm test");
+      assert.match(failed.log_region ?? "", /not locatable/);
     }
   );
 });

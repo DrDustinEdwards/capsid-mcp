@@ -18,6 +18,15 @@
 // That is the "derive the expected list from the source of truth" rule from
 // capsid/conventions.md, applied to numbers instead of table names.
 
+// tools moved 26 to 30 on 2026-09-06: repo_refs, repo_history, delete_branch and
+// ci_dispatch. The SECOND ruled exception of that day, recorded in
+// capsid/decisions.md alongside the improve one below. The measurement behind it: the
+// claude.ai GitHub connector authenticates and then 404s on every private repo in the
+// portfolio, while this Worker's App token has reached them all since 2026-07-06, so
+// the four tools make existing reach callable rather than adding capability. Two
+// widenings landed with them and are deliberately NOT new tools: ci_status gained ref
+// and run_id, read_repo_file gained paths.
+//
 // tools moved 24 to 26 in the improve arc: improve_run and improve_status. A
 // second ruled exception to the lean-surface rule, on the same reasoning as the
 // first and recorded in capsid/decisions.md: the improve loop is driven by cron,
@@ -59,7 +68,7 @@ export interface AuthoritativeCounts {
 
 export const AUTHORITATIVE: Record<string, AuthoritativeCounts> = {
   capsid: {
-    tools: 26,
+    tools: 30,
     liveGates: 10,
     htmlEnforcedHeaders: 6,
     htmlReportOnlyHeaders: 1,

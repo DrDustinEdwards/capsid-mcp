@@ -1,9 +1,9 @@
 # Capsid
 
-Capsid is a single-user, Cloudflare-native MCP server that serves a consolidated knowledge base from D1 and R2, and reaches your GitHub repositories directly. It speaks MCP over Streamable HTTP and exposes a small, purposeful tool set (24 tools):
+Capsid is a single-user, Cloudflare-native MCP server that serves a consolidated knowledge base from D1 and R2, and reaches your GitHub repositories directly. It speaks MCP over Streamable HTTP and exposes a small, purposeful tool set (30 tools):
 
 - **Documents:** list, read, write, delete, move, find, search (FTS5, with a plain-text fallback when a query is not valid FTS5 syntax), namespaces, backlinks (typed edges), brief (one-call session start), history and restore (read a retained version back, and write one back through a guarded path)
-- **Repo access:** list_repo_tree, read_repo_file, search_code, write_repo_file, create_branch, open_pr, delete_repo_file, manage_pr, ci_status (CI runs via the GitHub App)
+- **Repo access:** list_repo_tree, read_repo_file (one path or a batch of up to 20), search_code, repo_refs (branches, tags and open PRs in one call), repo_history (commits, a comparison, or one commit), write_repo_file, create_branch, delete_branch, open_pr, delete_repo_file, manage_pr, ci_status (CI runs, and the failing step's log), ci_dispatch (start a workflow or rerun failed jobs)
 - **Maintenance:** lint (the consolidation loop), register_namespace (create), update_namespace (remap)
 
 The `namespaces` tool reports each namespace's count of unconsolidated episodic/source docs, so any session can see where a lint run is due.
@@ -43,8 +43,17 @@ Capsid reaches your repositories directly through a dedicated GitHub App. The Wo
 
 A namespace can map to more than one repo, each with a label (for example a rebuild as `primary` and the app it replaces as `legacy`). Every repo tool takes an optional `repo` parameter, a label or a mapped `owner/name`; unmapped repos are rejected, so the namespace mapping is the authorization boundary. Default is the `primary` repo.
 
-- **Read** (open to admitted clients): `list_repo_tree`, `read_repo_file`, `search_code`
-- **Write** (operator-gated): `write_repo_file`, `create_branch`, `open_pr`, `delete_repo_file`, `manage_pr`. `write_repo_file` defaults to `mode: "pr"` (commit to a new branch and open a pull request); `mode: "direct"` commits straight to the default branch. `manage_pr` merges (squash by default) or closes a pull request.
+- **Read** (open to admitted clients): `list_repo_tree`, `read_repo_file`, `search_code`, `repo_refs`, `repo_history`, `ci_status`
+- **Write** (operator-gated): `write_repo_file`, `create_branch`, `delete_branch`, `open_pr`, `delete_repo_file`, `manage_pr`, `ci_dispatch`. `write_repo_file` defaults to `mode: "pr"` (commit to a new branch and open a pull request); `mode: "direct"` commits straight to the default branch. `manage_pr` merges (squash by default) or closes a pull request.
+
+Every tool's description states what it refuses. The two destructive or spending ones are worth stating here as well:
+
+- `delete_branch` refuses the repo's default branch **always**, and `force: true` does not lift that. It also refuses a branch under the improve loop's branch prefix, and a branch with an open pull request; `force: true` lifts those two. A branch that does not exist is a refusal, not a silent no-op.
+- `ci_dispatch` refuses a workflow with no `workflow_dispatch` trigger, naming that as the reason. It polls for up to 30 seconds for the run it started and returns that run's id, or `run_id: null` with a note, because the dispatch endpoint answers `204` with no body and names nothing.
+
+`read_repo_file` takes either `path` for one file or `paths` for up to 20. In the batch form each file succeeds or fails independently, so one moved path returns its own error beside the others instead of failing the call, and each file is capped at 200KB with `truncated: true` when it is cut.
+
+`ci_status` narrows with `ref` (a branch or a head sha, distinguished by shape) or `run_id`. For a failed run, a write-grant key gets the **failing step's** log, up to 64KB from its end, with `log_region` naming which region was returned; a read-only key gets metadata and a note that the log was withheld. That replaced a 2000-character tail of the whole job, which on these repos reliably returned post-run `git config` cleanup rather than the failure.
 
 `search_code` is a server-side tree walk (recursive Git Trees listing, then bounded content scans), not GitHub's code search API, because that API returns empty results for private repositories under a GitHub App installation token. Use `path_prefix` to narrow large repos.
 

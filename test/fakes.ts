@@ -570,6 +570,10 @@ export interface FetchCall {
   method: string;
   path: string;
   body: unknown;
+  // The QUERY STRING, recorded because routing ignores it. ci_status picks between
+  // GitHub's `branch=` and `head_sha=` parameters from the shape of one `ref`
+  // argument, and that choice is invisible to a harness that only keeps pathnames.
+  search: string;
 }
 
 // Route GitHub calls by "METHOD pathname" (query ignored) to a canned response,
@@ -587,7 +591,7 @@ export async function withFetch(
     const method = (init?.method ?? "GET").toUpperCase();
     const parsed = new URL(url);
     const body = init?.body ? JSON.parse(init.body as string) : undefined;
-    calls.push({ method, path: parsed.pathname, body });
+    calls.push({ method, path: parsed.pathname, body, search: parsed.search });
     const route = routes[`${method} ${parsed.pathname}`];
     if (!route) return new Response(`no route for ${method} ${parsed.pathname}`, { status: 500 });
     const spec = typeof route === "function" ? route(body) : route;
@@ -601,7 +605,13 @@ export async function withFetch(
       : spec.text !== undefined || spec.body === undefined
         ? undefined
         : { "Content-Type": "application/json" };
-    return new Response(payload, { status: spec.status ?? 200, headers });
+    // A 204/205/304 MUST have a null body or the Response constructor throws, and
+// GitHub really does answer 204 to a ref delete and a workflow dispatch. A harness
+    // that could not express the status its own subject returns pushed every such
+    // fixture to a status the code does not actually see.
+    const status = spec.status ?? 200;
+    const bodyless = status === 204 || status === 205 || status === 304;
+    return new Response(bodyless ? null : payload, { status, headers });
   }) as typeof fetch;
   try {
     await fn(calls);

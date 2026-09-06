@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { docPath, MAX_PATH, pathProblem } from "../src/limits.ts";
+import {
+  CI_DISPATCH_POLL_INTERVAL_MS,
+  CI_DISPATCH_POLL_MS,
+  CI_LOG_BUDGET,
+  REPO_BATCH_MAX_FILES,
+  REPO_FILE_BUDGET,
+  REPO_HISTORY_DEFAULT_LIMIT,
+  REPO_HISTORY_MAX_LIMIT,
+  REPO_PATCH_BUDGET,
+} from "../src/github.ts";
 import { sourceFiles } from "./source-files.ts";
 
 // src/limits.ts: the document path grammar and the input bounds.
@@ -117,4 +127,42 @@ test("every tool argument is bounded: no bare z.string() anywhere in src/", () =
   const all = sourceFiles().map((f) => f.text).join("\n");
   assert.ok(all.includes("bounded(MAX_BODY)"), "the scan matched nothing, so it proves nothing");
   assert.ok(all.split("docPath").length - 1 >= 8, "docPath is barely used, so the grammar is probably not wired up");
+});
+
+// ---- the repo fallthrough's new bounds, PINNED --------------------------------
+//
+// Every bound the 2026-09-06 widening introduced is pinned here, for the reason the
+// file already pins the bounding primitives: a budget that can be edited without a
+// test going red is a budget that drifts until it is not one. Each value carries the
+// reason it is that number, because "why 64KB" is the question a later reader has.
+
+test("the repo batch bounds are 20 files at 200KB each", () => {
+  // 20 because a triage read of a subsystem is a handful of files, not a tree walk;
+  // list_repo_tree and search_code exist for the wide cases.
+  assert.equal(REPO_BATCH_MAX_FILES, 20);
+  assert.equal(REPO_FILE_BUDGET, 200 * 1024);
+  // The batch total is the product, stated so a caller can reason about worst case.
+  assert.equal(REPO_BATCH_MAX_FILES * REPO_FILE_BUDGET, 4_096_000);
+});
+
+test("the CI log budget is 64KB, and larger than the tail it replaced", () => {
+  assert.equal(CI_LOG_BUDGET, 64 * 1024);
+  // It replaced a 2000-character job tail. Smaller than that would be a regression
+  // dressed as a ruling, so the relationship is asserted rather than assumed.
+  assert.ok(CI_LOG_BUDGET > 2000, "the new budget is smaller than the tail it replaced");
+});
+
+test("the patch budget is 200KB and the history limits are 20 and 100", () => {
+  assert.equal(REPO_PATCH_BUDGET, 200 * 1024);
+  assert.equal(REPO_HISTORY_DEFAULT_LIMIT, 20);
+  assert.equal(REPO_HISTORY_MAX_LIMIT, 100);
+  assert.ok(REPO_HISTORY_DEFAULT_LIMIT < REPO_HISTORY_MAX_LIMIT, "the default is not below the maximum");
+});
+
+test("the ci_dispatch poll fits inside its own timeout with room for several polls", () => {
+  assert.equal(CI_DISPATCH_POLL_MS, 30_000);
+  assert.equal(CI_DISPATCH_POLL_INTERVAL_MS, 3_000);
+  // At least a few polls must fit, or the timeout is one attempt wearing a loop's
+  // clothing. Ten here, which is also the subrequest cost to keep in mind.
+  assert.ok(CI_DISPATCH_POLL_MS / CI_DISPATCH_POLL_INTERVAL_MS >= 5, "too few polls fit in the timeout");
 });

@@ -273,8 +273,22 @@ export function attemptId(runIdValue: string, index: number): string {
   return `${runIdValue}-a${String(index).padStart(2, "0")}`;
 }
 
+// ONE CONSTANT, TWO READERS, and that is the whole point of it existing.
+//
+// `branchName()` builds attempt branches from this, and `delete_branch` refuses a
+// branch under it unless forced. Those two must agree by construction: a literal
+// "improve/" in the guard would keep matching only until this prefix changed, and
+// the failure would be silent in the worst direction, a guard that stops guarding
+// while still looking like one. Same reasoning as HOLDOUT_PREFIX above.
+export const IMPROVE_BRANCH_PREFIX = "improve/";
+
 export function branchName(attemptIdValue: string): string {
-  return `improve/${attemptIdValue}`;
+  return `${IMPROVE_BRANCH_PREFIX}${attemptIdValue}`;
+}
+
+/** True for a branch the improve loop owns. The refusal in delete_branch uses this. */
+export function isImproveBranch(branch: string): boolean {
+  return branch.startsWith(IMPROVE_BRANCH_PREFIX);
 }
 
 // The America/Chicago day, which is what a run doc is dated by. Computed through

@@ -6,7 +6,8 @@
 // over the live GitHub REST API. No PAT, no clone.
 
 import { b64urlFromBytes, b64urlEncode, base64Decode, base64Encode } from "./encoding";
-import { DEFAULT_SCAN_FILES, DEFAULT_SCAN_RESULTS, MAX_SCAN_CAP } from "./limits";
+import { IMPROVE_BRANCH_PREFIX, isImproveBranch } from "./improve-schema";
+import { DEFAULT_SCAN_FILES, DEFAULT_SCAN_RESULTS, MAX_SCAN_CAP, pathProblem } from "./limits";
 // AttemptEnv, not Env, and the narrowing is deliberate rather than cosmetic.
 //
 // Nothing in this module needs the holdout bucket, and saying so in the type is
@@ -844,34 +845,103 @@ export async function managePr(
 // deploy logs of every repo in the portfolio is a wider grant than that. The
 // runs list stays open to ro: keys, because the green-or-not verdict is the part
 // they need.
+// A ref that looks like a hex object name is filtered as a head sha, anything else
+// as a branch. GitHub has two different query parameters for these and no single one
+// that accepts either, so the tool takes one `ref` and decides here rather than
+// making the caller know which kind of thing they are holding.
+const SHA_SHAPE = /^[0-9a-f]{7,40}$/i;
+
 export async function ciStatus(
   env: Env,
   namespace: string,
   repoSelector?: string,
-  opts: { limit?: number; logTail?: boolean } = {}
+  opts: { limit?: number; logTail?: boolean; ref?: string; runId?: number } = {}
 ) {
   const { owner, repo, full } = await resolveRepo(env, namespace, repoSelector);
   const limit = opts.limit && opts.limit > 0 ? Math.min(opts.limit, 20) : 10;
-  const resp = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/actions/runs?per_page=${limit}`);
+  let query = `/repos/${owner}/${repo}/actions/runs?per_page=${limit}`;
+  if (opts.runId) {
+    // One run, by id. Wrapped back into the same shape as the list so everything
+    // downstream, including the failed-run drill-in, has one code path.
+    const one = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/actions/runs/${opts.runId}`);
+    if (one.status === 404) throw new Error(`ci_status: run ${opts.runId} does not exist on ${full}`);
+    if (!one.ok) throw new Error(`ci_status run lookup failed (${one.status}): ${(await one.text()).slice(0, 200)}`);
+    const run = await one.json();
+    return ciStatusFromRuns(env, owner, repo, full, [run as CiRun], opts.logTail === true, { run_id: opts.runId });
+  }
+  if (opts.ref) {
+    query += SHA_SHAPE.test(opts.ref)
+      ? `&head_sha=${encodeURIComponent(opts.ref)}`
+      : `&branch=${encodeURIComponent(opts.ref)}`;
+  }
+  const resp = await ghFetch(env, owner, repo, query);
   if (resp.status === 403) {
     throw new Error(
       "ci_status: the capsid-repo-access GitHub App lacks Actions: Read. Add that permission in the App settings and accept the installation prompt, then retry."
     );
   }
   if (!resp.ok) throw new Error(`ci_status failed (${resp.status}): ${await resp.text()}`);
-  const data = (await resp.json()) as {
-    workflow_runs: Array<{
-      id: number;
-      name: string;
-      head_sha: string;
-      status: string;
-      conclusion: string | null;
-      event: string;
-      created_at: string;
-      html_url: string;
-    }>;
+  const data = (await resp.json()) as { workflow_runs: CiRun[] };
+  return ciStatusFromRuns(env, owner, repo, full, data.workflow_runs, opts.logTail === true, opts.ref ? { ref: opts.ref } : {});
+}
+
+interface CiRun {
+  id: number;
+  name: string;
+  head_sha: string;
+  status: string;
+  conclusion: string | null;
+  event: string;
+  created_at: string;
+  html_url: string;
+}
+
+// THE FAILING STEP'S LOG, 64KB FROM ITS END, for write-grant keys.
+//
+// This REVERSES the earlier 2000-character job tail for the write tier only, and the
+// reason is measured rather than stylistic: a job log ends with post-run cleanup, so
+// the last 2000 characters of a failed run on these repos were `git config
+// --unset-all` lines and the actual failure was thousands of lines earlier. A tail
+// that reliably returns the wrong region is worse than no tail, because it reads as
+// an answer. So the region is found by the failing STEP's group marker and then
+// tailed, which puts the diagnosis in view. The ro: tier is unchanged; see
+// capsid/decisions.md, 2026-09-06.
+export const CI_LOG_BUDGET = 64 * 1024;
+
+function failingStepLog(log: string, stepName: string | undefined): { text: string; how: string } {
+  if (stepName) {
+    // Actions writes one `##[group]` per step, titled with the step's name.
+    const marker = log.lastIndexOf(`##[group]${stepName}`);
+    const at = marker === -1 ? log.lastIndexOf(stepName) : marker;
+    if (at !== -1) {
+      const region = log.slice(at);
+      return {
+        text: region.length > CI_LOG_BUDGET ? region.slice(-CI_LOG_BUDGET) : region,
+        how: region.length > CI_LOG_BUDGET ? `failing step "${stepName}", last ${CI_LOG_BUDGET} bytes of it` : `failing step "${stepName}", whole`,
+      };
+    }
+  }
+  // NAMED FALLBACK, not a silent one. If the step could not be located the caller is
+  // told that, because "the end of the job log" and "the failing step" are different
+  // claims and only one of them is being made.
+  return {
+    text: log.slice(-CI_LOG_BUDGET),
+    how: stepName
+      ? `step "${stepName}" was not locatable in the log, so this is the last ${CI_LOG_BUDGET} bytes of the whole job`
+      : `no failing step was named, so this is the last ${CI_LOG_BUDGET} bytes of the whole job`,
   };
-  const runs = data.workflow_runs.map((r) => ({
+}
+
+async function ciStatusFromRuns(
+  env: Env,
+  owner: string,
+  repo: string,
+  full: string,
+  workflowRuns: CiRun[],
+  logTail: boolean,
+  filter: { ref?: string; run_id?: number }
+) {
+  const runs = workflowRuns.map((r) => ({
     name: r.name,
     head_sha: r.head_sha?.slice(0, 7),
     status: r.status,
@@ -883,9 +953,11 @@ export async function ciStatus(
 
   const result: {
     repo: string;
+    filter?: { ref?: string; run_id?: number };
     runs: typeof runs;
     failed_run?: unknown;
   } = { repo: full, runs };
+  if (filter.ref || filter.run_id) result.filter = filter;
 
   // Drill into the most recent failed run so the caller sees why, not just that.
   //
@@ -895,7 +967,7 @@ export async function ciStatus(
   // returned neither log_tail nor log_tail_withheld, so a caller with a write grant
   // could not tell "no log" from "the log was refused for you". A tool reporting on
   // whether CI is healthy is the last place to answer by omission.
-  const failed = data.workflow_runs.find((r) => r.conclusion === "failure");
+  const failed = workflowRuns.find((r) => r.conclusion === "failure");
   if (failed) {
     const failedRun: Record<string, unknown> = {
       name: failed.name,
@@ -916,16 +988,24 @@ export async function ciStatus(
           failed_steps: (j.steps ?? []).filter((s) => s.conclusion === "failure").map((s) => s.name),
         }));
       const firstFailedJob = jobsData.jobs.find((j) => j.conclusion === "failure");
-      if (!opts.logTail) {
+      if (!logTail) {
         // Unchanged: this is the read-only tier's boundary, not a degraded path.
         failedRun.log_tail_withheld =
-          "read-only key: run metadata only. A write-grant key returns the failing job's log tail.";
+          "read-only key: run metadata only. A write-grant key returns the failing step's log.";
       } else if (!firstFailedJob) {
-        failedRun.log_tail_unavailable = "the run is marked failed but no job in it is, so there is no job log to tail";
+        failedRun.log_tail_unavailable = "the run is marked failed but no job in it is, so there is no job log to read";
       } else {
         const logResp = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/actions/jobs/${firstFailedJob.id}/logs`);
-        if (logResp.ok) failedRun.log_tail = (await logResp.text()).slice(-2000);
-        else failedRun.log_tail_unavailable = `${logResp.status}: ${(await logResp.text()).slice(0, 200) || "no response body"}`;
+        if (logResp.ok) {
+          const stepName = (firstFailedJob.steps ?? []).find((s) => s.conclusion === "failure")?.name;
+          const picked = failingStepLog(await logResp.text(), stepName);
+          failedRun.failing_job = firstFailedJob.name;
+          failedRun.failing_step = stepName ?? null;
+          failedRun.log_region = picked.how;
+          failedRun.log = picked.text;
+        } else {
+          failedRun.log_tail_unavailable = `${logResp.status}: ${(await logResp.text()).slice(0, 200) || "no response body"}`;
+        }
       }
     }
     result.failed_run = failedRun;
@@ -953,15 +1033,22 @@ export async function ciStatus(
 // The deterministic monitor also refuses any diff touching .github/, so this is
 // belt and braces. Both are kept: the monitor is a policy that could be relaxed,
 // this is a mechanism that cannot be argued with.
+// THE REF ARGUMENT IS OPTIONAL AND DEFAULTS TO THE DEFAULT BRANCH, which is what
+// the paragraph above is about. It was added for ci_dispatch, where a human asking
+// to run a workflow on a branch means that branch. The improve loop passes no ref
+// and therefore still dispatches against the default branch, unchanged, so the
+// property above is intact for the caller it was written for. Do not give this
+// parameter a value at the improve loop's call site.
 export async function dispatchWorkflow(
   env: Env,
   namespace: string,
   workflowFile: string,
   inputs: Record<string, string>,
-  repoSelector?: string
+  repoSelector?: string,
+  refOverride?: string
 ): Promise<{ repo: string; workflow: string; ref: string; inputs: Record<string, string> }> {
   const { owner, repo, full } = await resolveRepo(env, namespace, repoSelector);
-  const ref = await getDefaultBranch(env, owner, repo);
+  const ref = refOverride ?? (await getDefaultBranch(env, owner, repo));
   const resp = await ghFetch(
     env,
     owner,
@@ -986,12 +1073,27 @@ export async function dispatchWorkflow(
 // failure it was: the workflow never started, the workflow is still running, or
 // the workflow finished and the report never arrived. Those three have different
 // fixes and a bare "timed out" distinguishes none of them.
+// `id` and `head_sha` are returned ADDITIVELY, for ci_dispatch. workflow_dispatch
+// replies 204 with no body, so the only way to name the run it started is to look
+// for a run that did not exist before; that needs the id, which this used to drop.
+// The tick reads status, conclusion and the timestamps and is unaffected.
 export async function workflowRunsForBranch(
   env: Env,
   namespace: string,
   branch: string,
   repoSelector?: string
-): Promise<Array<{ status: string; conclusion: string | null; created_at: string; updated_at: string; url: string }>> {
+): Promise<
+  Array<{
+    id: number;
+    head_sha: string;
+    name: string;
+    status: string;
+    conclusion: string | null;
+    created_at: string;
+    updated_at: string;
+    url: string;
+  }>
+> {
   const { owner, repo } = await resolveRepo(env, namespace, repoSelector);
   const resp = await ghFetch(
     env,
@@ -1001,13 +1103,447 @@ export async function workflowRunsForBranch(
   );
   if (!resp.ok) throw new Error(`workflow run lookup failed (${resp.status}): ${(await resp.text()).slice(0, 200)}`);
   const data = (await resp.json()) as {
-    workflow_runs: Array<{ status: string; conclusion: string | null; created_at: string; updated_at: string; html_url: string }>;
+    workflow_runs: Array<{
+      id: number;
+      head_sha: string;
+      name: string;
+      status: string;
+      conclusion: string | null;
+      created_at: string;
+      updated_at: string;
+      html_url: string;
+    }>;
   };
   return data.workflow_runs.map((r) => ({
+    id: r.id,
+    head_sha: r.head_sha,
+    name: r.name,
     status: r.status,
     conclusion: r.conclusion,
     created_at: r.created_at,
     updated_at: r.updated_at,
     url: r.html_url,
   }));
+}
+
+// ---- the repo fallthrough widening, 2026-09-06 --------------------------------
+//
+// WHY THESE FOUR EXIST. The claude.ai GitHub connector authenticates and then 404s
+// on every private repo in the portfolio (open Anthropic issues #68517, #71542,
+// #72032, #79083 since June). This module's App installation token already reaches
+// every mapped repo. So these are not new capability, they are existing reach made
+// callable, which is the whole of the argument recorded in capsid/decisions.md
+// under the second lean-surface exception of 2026-09-06.
+//
+// Every one of them goes through resolveRepo, ghFetch and cachedGet like the tools
+// above. Nothing here opens its own path to api.github.com; that is the rule the
+// comment over dispatchWorkflow states, and it applies to reads too.
+
+/** Branches, tags and open PRs in one call. The triage question is almost always
+ *  "what is in flight here", which is three GETs the caller should not have to make
+ *  separately. Ahead/behind is per branch against the default branch. */
+export async function repoRefs(env: Env, namespace: string, repoSelector?: string) {
+  const { owner, repo, full } = await resolveRepo(env, namespace, repoSelector);
+  const base = `/repos/${owner}/${repo}`;
+  const defaultBranch = await getDefaultBranch(env, owner, repo);
+
+  const [branchResp, tagResp, prResp] = await Promise.all([
+    cachedGet(env, owner, repo, `${base}/branches?per_page=100`),
+    cachedGet(env, owner, repo, `${base}/tags?per_page=100`),
+    cachedGet(env, owner, repo, `${base}/pulls?state=open&per_page=100`),
+  ]);
+  if (!branchResp.ok) throw new Error(`repo_refs branches failed (${branchResp.status}): ${(await branchResp.text()).slice(0, 200)}`);
+  if (!tagResp.ok) throw new Error(`repo_refs tags failed (${tagResp.status}): ${(await tagResp.text()).slice(0, 200)}`);
+  if (!prResp.ok) throw new Error(`repo_refs pulls failed (${prResp.status}): ${(await prResp.text()).slice(0, 200)}`);
+
+  const branchRows = (await branchResp.json()) as Array<{ name: string; commit: { sha: string } }>;
+  const tagRows = (await tagResp.json()) as Array<{ name: string; commit: { sha: string } }>;
+  const prRows = (await prResp.json()) as Array<{
+    number: number;
+    title: string;
+    head: { ref: string };
+    base: { ref: string };
+    updated_at: string;
+    html_url: string;
+  }>;
+
+  const prByHead = new Map(prRows.map((p) => [p.head.ref, p.number]));
+
+  // Ahead/behind comes from the compare endpoint, one call per branch, and the
+  // default branch is skipped because comparing it with itself is always 0/0. The
+  // fan-out is bounded by the 100-branch page above; a repo with more branches than
+  // that reports its first hundred and sets truncated.
+  const branches = await Promise.all(
+    branchRows.map(async (b) => {
+      const row: {
+        name: string;
+        sha: string;
+        committed_date: string | null;
+        ahead_by: number | null;
+        behind_by: number | null;
+        open_pr: number | null;
+        is_default: boolean;
+      } = {
+        name: b.name,
+        sha: b.commit.sha,
+        committed_date: null,
+        ahead_by: null,
+        behind_by: null,
+        open_pr: prByHead.get(b.name) ?? null,
+        is_default: b.name === defaultBranch,
+      };
+      if (b.name === defaultBranch) {
+        row.ahead_by = 0;
+        row.behind_by = 0;
+        return row;
+      }
+      const cmp = await cachedGet(
+        env,
+        owner,
+        repo,
+        `${base}/compare/${encodeURIComponent(defaultBranch)}...${encodeURIComponent(b.name)}`
+      );
+      if (cmp.ok) {
+        const c = (await cmp.json()) as {
+          ahead_by: number;
+          behind_by: number;
+          commits?: Array<{ commit: { committer: { date: string } } }>;
+        };
+        row.ahead_by = c.ahead_by;
+        row.behind_by = c.behind_by;
+        const last = c.commits?.[c.commits.length - 1];
+        if (last) row.committed_date = last.commit.committer.date;
+      }
+      return row;
+    })
+  );
+
+  return {
+    repo: full,
+    default_branch: defaultBranch,
+    truncated: branchRows.length === 100 || tagRows.length === 100 || prRows.length === 100,
+    branches,
+    tags: tagRows.map((t) => ({ name: t.name, sha: t.commit.sha })),
+    pull_requests: prRows.map((p) => ({
+      number: p.number,
+      title: p.title,
+      head: p.head.ref,
+      base: p.base.ref,
+      updated_at: p.updated_at,
+      url: p.html_url,
+    })),
+  };
+}
+
+export const REPO_HISTORY_DEFAULT_LIMIT = 20;
+export const REPO_HISTORY_MAX_LIMIT = 100;
+export const REPO_PATCH_BUDGET = 200 * 1024;
+
+function summariseCommit(c: { sha: string; commit: { message: string; author: { name: string; date: string } } }) {
+  return {
+    sha: c.sha,
+    date: c.commit.author.date,
+    author: c.commit.author.name,
+    // FIRST LINE ONLY. A commit body in this repo family runs to paragraphs, and a
+    // history listing that inlined them would bury the shape of the history in the
+    // prose of it. Read one commit by sha for the full message.
+    subject: c.commit.message.split("\n")[0],
+  };
+}
+
+// Patch bodies are OFF by default and budgeted when on. The file list is always
+// returned: names, status and line counts answer most questions and cost nothing.
+function filesWithBudget(
+  files: Array<{ filename: string; status: string; additions: number; deletions: number; patch?: string }>,
+  wantPatch: boolean
+) {
+  let spent = 0;
+  let truncated = false;
+  const out = files.map((f) => {
+    const row: { path: string; status: string; additions: number; deletions: number; patch?: string } = {
+      path: f.filename,
+      status: f.status,
+      additions: f.additions,
+      deletions: f.deletions,
+    };
+    if (wantPatch && f.patch) {
+      if (spent + f.patch.length <= REPO_PATCH_BUDGET) {
+        row.patch = f.patch;
+        spent += f.patch.length;
+      } else {
+        truncated = true;
+      }
+    }
+    return row;
+  });
+  return { count: out.length, patch_truncated: truncated, patch_bytes: spent, entries: out };
+}
+
+/** Commits, a comparison, or one commit. THE MODE IS CHOSEN BY WHICH ARGS ARE
+ *  PRESENT, and an ambiguous combination is refused rather than resolved by
+ *  precedence: a caller who passes both sha and base has two questions and should
+ *  ask them separately, rather than silently getting the answer to one. */
+export async function repoHistory(
+  env: Env,
+  namespace: string,
+  args: { ref?: string; base?: string; head?: string; sha?: string; limit?: number; patch?: boolean },
+  repoSelector?: string
+) {
+  const { owner, repo, full } = await resolveRepo(env, namespace, repoSelector);
+  const apiBase = `/repos/${owner}/${repo}`;
+
+  if (args.base && !args.head) throw new Error("repo_history: base was given without head; a comparison needs both");
+  if (args.head && !args.base) throw new Error("repo_history: head was given without base; a comparison needs both");
+  const hasCompare = Boolean(args.base && args.head);
+  const asked = [args.sha ? "sha" : null, hasCompare ? "base+head" : null, args.ref ? "ref" : null].filter(Boolean);
+  if (asked.length > 1) {
+    throw new Error(`repo_history: ${asked.join(" and ")} are different questions; pass exactly one of sha, base+head, or ref`);
+  }
+  if (asked.length === 0) {
+    throw new Error("repo_history: pass ref for commits on a ref, base and head to compare, or sha for one commit");
+  }
+
+  const limit = Math.min(Math.max(args.limit ?? REPO_HISTORY_DEFAULT_LIMIT, 1), REPO_HISTORY_MAX_LIMIT);
+
+  if (args.sha) {
+    const resp = await cachedGet(env, owner, repo, `${apiBase}/commits/${encodeURIComponent(args.sha)}`);
+    if (!resp.ok) throw new Error(`repo_history commit failed (${resp.status}): ${(await resp.text()).slice(0, 200)}`);
+    const c = (await resp.json()) as {
+      sha: string;
+      commit: { message: string; author: { name: string; date: string } };
+      parents: Array<{ sha: string }>;
+      files?: Array<{ filename: string; status: string; additions: number; deletions: number; patch?: string }>;
+    };
+    return {
+      repo: full,
+      mode: "commit" as const,
+      commit: {
+        sha: c.sha,
+        date: c.commit.author.date,
+        author: c.commit.author.name,
+        message: c.commit.message,
+        parents: c.parents.map((p) => p.sha),
+      },
+      files: filesWithBudget(c.files ?? [], args.patch === true),
+    };
+  }
+
+  if (hasCompare) {
+    const resp = await cachedGet(
+      env,
+      owner,
+      repo,
+      `${apiBase}/compare/${encodeURIComponent(args.base as string)}...${encodeURIComponent(args.head as string)}`
+    );
+    if (!resp.ok) throw new Error(`repo_history compare failed (${resp.status}): ${(await resp.text()).slice(0, 200)}`);
+    const c = (await resp.json()) as {
+      status: string;
+      ahead_by: number;
+      behind_by: number;
+      total_commits: number;
+      commits: Array<{ sha: string; commit: { message: string; author: { name: string; date: string } } }>;
+      files?: Array<{ filename: string; status: string; additions: number; deletions: number; patch?: string }>;
+    };
+    return {
+      repo: full,
+      mode: "compare" as const,
+      base: args.base,
+      head: args.head,
+      status: c.status,
+      ahead_by: c.ahead_by,
+      behind_by: c.behind_by,
+      total_commits: c.total_commits,
+      commits: c.commits.slice(0, limit).map(summariseCommit),
+      files: filesWithBudget(c.files ?? [], args.patch === true),
+    };
+  }
+
+  const resp = await cachedGet(env, owner, repo, `${apiBase}/commits?sha=${encodeURIComponent(args.ref as string)}&per_page=${limit}`);
+  if (!resp.ok) throw new Error(`repo_history commits failed (${resp.status}): ${(await resp.text()).slice(0, 200)}`);
+  const rows = (await resp.json()) as Array<{ sha: string; commit: { message: string; author: { name: string; date: string } } }>;
+  return { repo: full, mode: "commits" as const, ref: args.ref, limit, commits: rows.map(summariseCommit) };
+}
+
+/** Delete a branch. THREE REFUSALS, each naming itself, and force lifts only two of
+ *  them: the default branch is never deletable through this tool at all. */
+export async function deleteBranch(
+  env: Env,
+  namespace: string,
+  branch: string,
+  opts: { force?: boolean } = {},
+  repoSelector?: string
+) {
+  const { owner, repo, full } = await resolveRepo(env, namespace, repoSelector);
+  const base = `/repos/${owner}/${repo}`;
+  const defaultBranch = await getDefaultBranch(env, owner, repo);
+
+  // NOT LIFTABLE BY force. Deleting a repo's default branch is never something a
+  // triage seat meant to do, and a flag that could do it is a flag that eventually
+  // will. This refusal is checked before force is even read.
+  if (branch === defaultBranch) {
+    throw new Error(`delete_branch refuses: ${branch} is the default branch of ${full}. force does not lift this refusal.`);
+  }
+
+  if (!opts.force) {
+    if (isImproveBranch(branch)) {
+      throw new Error(
+        `delete_branch refuses: ${branch} is under the improve loop's branch prefix (${IMPROVE_BRANCH_PREFIX}), so it may be an attempt the loop still needs. Pass force: true to delete it anyway.`
+      );
+    }
+    const prResp = await cachedGet(env, owner, repo, `${base}/pulls?state=open&head=${encodeURIComponent(`${owner}:${branch}`)}`);
+    if (prResp.ok) {
+      const prs = (await prResp.json()) as Array<{ number: number; html_url: string }>;
+      if (prs.length > 0) {
+        throw new Error(
+          `delete_branch refuses: ${branch} has open pull request #${prs[0].number} (${prs[0].html_url}). Pass force: true to delete it anyway.`
+        );
+      }
+    }
+  }
+
+  const resp = await ghFetch(env, owner, repo, `${base}/git/refs/heads/${encodePath(branch)}`, { method: "DELETE" });
+  if (resp.status === 422 || resp.status === 404) {
+    throw new Error(`delete_branch failed: ${branch} does not exist on ${full} (${resp.status})`);
+  }
+  if (!resp.ok) throw new Error(`delete_branch failed (${resp.status}): ${(await resp.text()).slice(0, 200)}`);
+  await invalidateRepoReads(env, owner, repo);
+  return { repo: full, branch, deleted: true, forced: opts.force === true };
+}
+
+export const CI_DISPATCH_POLL_MS = 30_000;
+export const CI_DISPATCH_POLL_INTERVAL_MS = 3_000;
+
+/** Trigger a workflow_dispatch, or rerun a run's failed jobs. Reuses
+ *  dispatchWorkflow and workflowRunsForBranch; there is no second dispatch path in
+ *  this codebase and there must not become one. */
+export async function ciDispatch(
+  env: Env,
+  namespace: string,
+  args: { workflow?: string; ref?: string; run_id?: number; inputs?: Record<string, string> },
+  repoSelector?: string,
+  // THE POLL TIMING IS INJECTABLE FOR TESTS ONLY, and it is a seam rather than a
+  // setting: the tool never passes it, so production always uses the constants
+  // above. Without this the timeout case costs 30 seconds of real waiting in the
+  // suite, and a test nobody will run is a test that stops being true.
+  poll: { timeoutMs?: number; intervalMs?: number } = {}
+) {
+  const timeoutMs = poll.timeoutMs ?? CI_DISPATCH_POLL_MS;
+  const intervalMs = poll.intervalMs ?? CI_DISPATCH_POLL_INTERVAL_MS;
+  const { owner, repo, full } = await resolveRepo(env, namespace, repoSelector);
+
+  if (args.run_id) {
+    if (args.workflow) throw new Error("ci_dispatch: pass workflow and ref to start a run, or run_id to rerun one, not both");
+    const resp = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/actions/runs/${args.run_id}/rerun-failed-jobs`, {
+      method: "POST",
+    });
+    if (!resp.ok) {
+      throw new Error(
+        `ci_dispatch rerun failed for run ${args.run_id} (${resp.status}): ${(await resp.text()).slice(0, 300) || "no response body"}`
+      );
+    }
+    return { repo: full, mode: "rerun" as const, run_id: args.run_id, rerun_requested: true };
+  }
+
+  if (!args.workflow || !args.ref) throw new Error("ci_dispatch: workflow and ref are both required to start a run");
+
+  // The runs that already exist for this ref, so the new one can be told apart. The
+  // dispatch endpoint answers 204 with no body and names nothing it started.
+  const before = new Set((await workflowRunsForBranch(env, namespace, args.ref, repoSelector)).map((r) => r.id));
+
+  try {
+    await dispatchWorkflow(env, namespace, args.workflow, args.inputs ?? {}, repoSelector, args.ref);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    // GitHub answers 422 naming workflow_dispatch when the workflow file has no
+    // such trigger. Saying so is the difference between "this workflow cannot be
+    // started by hand" and an opaque 422 the caller has to go and read the YAML for.
+    if (/workflow_dispatch/i.test(message)) {
+      throw new Error(
+        `ci_dispatch refuses: ${args.workflow} has no workflow_dispatch trigger on ${full}, so it cannot be started by hand. Add "on: workflow_dispatch:" to that workflow, or trigger it the way it is configured. GitHub said: ${message.slice(0, 200)}`
+      );
+    }
+    throw err;
+  }
+
+  // POLL, because 204 means accepted, not started. A caller with no run id has
+  // nothing to watch, which is the whole reason this tool returns one.
+  const deadline = Date.now() + timeoutMs;
+  let appeared: Awaited<ReturnType<typeof workflowRunsForBranch>>[number] | undefined;
+  let polls = 0;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    polls += 1;
+    appeared = (await workflowRunsForBranch(env, namespace, args.ref, repoSelector)).find((r) => !before.has(r.id));
+    if (appeared) break;
+  }
+
+  if (!appeared) {
+    return {
+      repo: full,
+      mode: "dispatch" as const,
+      workflow: args.workflow,
+      ref: args.ref,
+      dispatched: true,
+      run_id: null,
+      polls,
+      note: `dispatch was accepted, but no new run appeared for ${args.ref} within ${timeoutMs / 1000}s. It may still start; check ci_status with this ref. A dispatch that is accepted and never runs usually means the workflow's own conditions excluded it.`,
+    };
+  }
+  return {
+    repo: full,
+    mode: "dispatch" as const,
+    workflow: args.workflow,
+    ref: args.ref,
+    dispatched: true,
+    run_id: appeared.id,
+    status: appeared.status,
+    url: appeared.url,
+    polls,
+  };
+}
+
+export const REPO_BATCH_MAX_FILES = 20;
+export const REPO_FILE_BUDGET = 200 * 1024;
+
+/** Read up to REPO_BATCH_MAX_FILES files, each independently. ONE MISSING PATH DOES
+ *  NOT FAIL THE BATCH: the point of a batch is triage, and a triage call that throws
+ *  because one of twenty paths moved is a call the caller has to retry by bisection.
+ *
+ *  THE PER-FILE BUDGET APPLIES HERE AND NOT TO THE SINGLE-PATH READ. There was no
+ *  repo read budget before this, so applying one to readRepoFile would have made an
+ *  existing call start truncating silently. New surface takes the new bound. */
+export async function readRepoFiles(env: Env, namespace: string, paths: string[], ref?: string, repoSelector?: string) {
+  if (paths.length === 0) throw new Error("read_repo_file: paths was empty");
+  if (paths.length > REPO_BATCH_MAX_FILES) {
+    throw new Error(`read_repo_file: ${paths.length} paths exceeds the batch maximum of ${REPO_BATCH_MAX_FILES}`);
+  }
+  const { full } = await resolveRepo(env, namespace, repoSelector);
+  const files = await Promise.all(
+    paths.map(async (path) => {
+      const problem = pathProblem(path);
+      if (problem) return { path, error: problem };
+      try {
+        const one = await readRepoFile(env, namespace, path, ref, repoSelector);
+        const truncated = one.content.length > REPO_FILE_BUDGET;
+        return {
+          path,
+          size: one.size,
+          sha: one.sha,
+          truncated,
+          content: truncated ? one.content.slice(0, REPO_FILE_BUDGET) : one.content,
+        };
+      } catch (err) {
+        return { path, error: err instanceof Error ? err.message : String(err) };
+      }
+    })
+  );
+  const failed = files.filter((f) => "error" in f).length;
+  return {
+    repo: full,
+    requested: paths.length,
+    ok: files.length - failed,
+    failed,
+    bytes: files.reduce((n, f) => n + ("content" in f && f.content ? f.content.length : 0), 0),
+    files,
+  };
 }

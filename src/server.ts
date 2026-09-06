@@ -9,15 +9,27 @@ import {
 import { z } from "zod";
 import type { Env, Props } from "./env";
 import {
+  CI_DISPATCH_POLL_MS,
+  CI_LOG_BUDGET,
+  ciDispatch,
   ciStatus,
   createBranch,
+  deleteBranch,
   deleteRepoFile,
   listRepoTree,
   managePr,
   openPr,
   parseReposList,
   readRepoFile,
+  readRepoFiles,
+  REPO_BATCH_MAX_FILES,
+  REPO_FILE_BUDGET,
+  REPO_HISTORY_DEFAULT_LIMIT,
+  REPO_HISTORY_MAX_LIMIT,
+  REPO_PATCH_BUDGET,
   REPO_SHAPE,
+  repoHistory,
+  repoRefs,
   requireSinglePrimary,
   searchCode,
   writeRepoFile,
@@ -1737,10 +1749,28 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "read_repo_file",
     {
-      description: "Read a file from a namespace's GitHub repo, decoded to text. Optional ref (branch, tag, or sha). Live GitHub, briefly cached.",
-      inputSchema: { namespace: nsName, path: bounded(MAX_PATH), ref: bounded(MAX_REF).optional(), repo: bounded(MAX_REPO_SELECTOR).optional().describe(REPO_ARG) },
+      description: `Read a file from a namespace's GitHub repo, decoded to text. Optional ref (branch, tag, or sha). Live GitHub, briefly cached. Pass EITHER path for one file, or paths for up to ${REPO_BATCH_MAX_FILES} in one call; in the batch form each file succeeds or fails independently, so one missing path returns its error beside the others instead of failing the call, and each file is capped at ${REPO_FILE_BUDGET} bytes with truncated:true when it is cut. REFUSES: both path and paths together, neither of them, an empty paths array, more than ${REPO_BATCH_MAX_FILES} paths, and a directory (use list_repo_tree).`,
+      inputSchema: {
+        namespace: nsName,
+        path: bounded(MAX_PATH).optional(),
+        paths: z
+          .array(bounded(MAX_PATH))
+          .max(REPO_BATCH_MAX_FILES)
+          .optional()
+          .describe(`Up to ${REPO_BATCH_MAX_FILES} paths, read independently. Alternative to path, not combinable with it.`),
+        ref: bounded(MAX_REF).optional(),
+        repo: bounded(MAX_REPO_SELECTOR).optional().describe(REPO_ARG),
+      },
     },
-    ({ namespace, path, ref, repo }) => guarded(() => readRepoFile(env, namespace, path, ref, repo))
+    ({ namespace, path, paths, ref, repo }) =>
+      guarded(() => {
+        // EXACTLY ONE OF THE TWO. Accepting both and preferring one would make the
+        // ignored argument invisible, which is the shape that gets shipped and then
+        // debugged later as "the tool ignored my paths".
+        if (path && paths) throw new Error("read_repo_file: pass path for one file or paths for several, not both");
+        if (!path && !paths) throw new Error("read_repo_file: pass path for one file, or paths for several");
+        return paths ? readRepoFiles(env, namespace, paths, ref, repo) : readRepoFile(env, namespace, path as string, ref, repo);
+      })
   );
 
   server.registerTool(
@@ -1858,15 +1888,99 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "ci_status",
     {
-      description:
-        "Recent CI workflow runs for a namespace's repo (name, head sha, status, conclusion, timestamps). For the most recent failed run it also returns the failing jobs and steps, plus a bounded log tail for write-grant keys only (a read-only key gets the metadata and a note saying the tail was withheld, because job logs can echo ids and variables). Read-only; use it to verify a deploy is green after a merge instead of guessing. Needs the GitHub App's Actions: Read permission.",
+      description: `Recent CI workflow runs for a namespace's repo (name, head sha, status, conclusion, timestamps). Optional ref narrows to one branch or head sha; optional run_id returns just that run. For the most recent failed run it also returns the failing jobs and steps, and for write-grant keys the FAILING STEP's log, up to ${CI_LOG_BUDGET} bytes from its end, with log_region naming which region was returned. A read-only key gets the metadata and a note saying the log was withheld, because job logs can echo ids and variables. REFUSES: a run_id that does not exist on the repo. Read-only; use it to verify a deploy is green after a merge instead of guessing. Needs the GitHub App's Actions: Read permission.`,
       inputSchema: {
         namespace: nsName,
         repo: bounded(MAX_REPO_SELECTOR).optional().describe(REPO_ARG),
         limit: z.number().int().positive().optional().describe("How many recent runs to return (default 10, max 20)."),
+        ref: bounded(MAX_REF)
+          .optional()
+          .describe("Narrow to one branch or head sha. A hex object name is filtered as a sha, anything else as a branch."),
+        run_id: z.number().int().positive().optional().describe("Return only this run, by its GitHub run id."),
       },
     },
-    ({ namespace, repo, limit }) => guarded(() => ciStatus(env, namespace, repo, { limit, logTail: mayWrite }))
+    ({ namespace, repo, limit, ref, run_id }) =>
+      guarded(() => ciStatus(env, namespace, repo, { limit, logTail: mayWrite, ref, runId: run_id }))
+  );
+
+// THE REPO FALLTHROUGH WIDENING, and it is the SECOND ruled exception to hard rule 1
+  // in one day (capsid/decisions.md, 2026-09-06). The justification is not that these
+  // are useful: it is that the claude.ai GitHub connector authenticates and then 404s
+  // on every private repo in the portfolio, while Capsid's App token has reached them
+  // all since 2026-07-06. These four make existing reach callable.
+  //
+  // repo_refs and repo_history are READS and stay open to ro: keys, like every other
+  // read tool. delete_branch and ci_dispatch are write-gated: one destroys refs, the
+  // other spends CI minutes and can start a deploy.
+
+  server.registerTool(
+    "repo_refs",
+    {
+      description:
+        "What is in flight in a namespace's repo, in one call: branches (name, head sha, last commit date, ahead/behind the default branch, and the open PR number if the branch has one), tags, and open pull requests. Answers the triage question that otherwise costs three separate calls. Sets truncated:true when any of the three lists hit its 100-item page. Read-only, live GitHub, briefly cached.",
+      inputSchema: { namespace: nsName, repo: bounded(MAX_REPO_SELECTOR).optional().describe(REPO_ARG) },
+    },
+    ({ namespace, repo }) => guarded(() => repoRefs(env, namespace, repo))
+  );
+
+  server.registerTool(
+    "repo_history",
+    {
+      description: `Commits, a comparison, or one commit, chosen by which argument is present: ref for the commits on a ref (default ${REPO_HISTORY_DEFAULT_LIMIT}, max ${REPO_HISTORY_MAX_LIMIT}); base and head together for a comparison (ahead/behind, the commit list, and changed files with status and line counts); sha for one commit (full message, parents, changed files). Patch bodies are omitted unless patch:true, and are then budgeted to ${REPO_PATCH_BUDGET} bytes across the whole response with patch_truncated:true when the budget runs out. Commit subjects are the first line only; read one commit by sha for its whole message. REFUSES: more than one of sha / base+head / ref, since those are different questions; base without head or head without base; and none of them. Read-only.`,
+      inputSchema: {
+        namespace: nsName,
+        ref: bounded(MAX_REF).optional().describe("Commits on this branch, tag or sha."),
+        base: bounded(MAX_REF).optional().describe("Comparison base. Requires head."),
+        head: bounded(MAX_REF).optional().describe("Comparison head. Requires base."),
+        sha: bounded(MAX_SHA).optional().describe("One commit, in full."),
+        limit: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe(`How many commits (default ${REPO_HISTORY_DEFAULT_LIMIT}, max ${REPO_HISTORY_MAX_LIMIT}).`),
+        patch: z.boolean().optional().describe("Include patch bodies, budgeted. Off by default."),
+        repo: bounded(MAX_REPO_SELECTOR).optional().describe(REPO_ARG),
+      },
+    },
+    ({ namespace, ref, base, head, sha, limit, patch, repo }) =>
+      guarded(() => repoHistory(env, namespace, { ref, base, head, sha, limit, patch }, repo))
+  );
+
+  server.registerTool(
+    "delete_branch",
+    {
+      description:
+        "Delete a branch in a namespace's GitHub repo. REFUSES, naming which refusal it is: the repo's default branch, ALWAYS, and force does not lift that one; a branch under the improve loop's branch prefix, because it may be an attempt the loop still needs; and a branch with an open pull request. The last two are lifted by force:true. Also refuses a branch that does not exist rather than reporting a no-op as success. Requires an operator key with the write grant; audit-logged.",
+      inputSchema: {
+        namespace: nsName,
+        branch: bounded(MAX_REF),
+        force: z
+          .boolean()
+          .optional()
+          .describe("Lift the improve-prefix and open-PR refusals. Does NOT lift the default-branch refusal."),
+        repo: bounded(MAX_REPO_SELECTOR).optional().describe(REPO_ARG),
+      },
+    },
+    ({ namespace, branch, force, repo }) =>
+      guardedWrite("delete_branch", namespace, null, () => deleteBranch(env, namespace, branch, { force }, repo))
+  );
+
+  server.registerTool(
+    "ci_dispatch",
+    {
+      description: `Start a workflow, or rerun one's failed jobs. Pass workflow (the file name, e.g. ci.yml) and ref to trigger a workflow_dispatch: the dispatch endpoint answers 204 with no body, so this then polls for up to ${CI_DISPATCH_POLL_MS / 1000}s and returns the run_id of the run that appeared, or run_id null with a note saying the dispatch was accepted but nothing started. Pass run_id alone to rerun that run's failed jobs. REFUSES, naming it: a workflow with no workflow_dispatch trigger, which cannot be started by hand at all; and workflow together with run_id, which are two different requests. Requires an operator key with the write grant; audit-logged. Spends CI minutes and can start a deploy.`,
+      inputSchema: {
+        namespace: nsName,
+        workflow: bounded(MAX_PATH).optional().describe("Workflow file name, e.g. ci.yml. Requires ref."),
+        ref: bounded(MAX_REF).optional().describe("The branch or sha to run the workflow on. Requires workflow."),
+        run_id: z.number().int().positive().optional().describe("Rerun this run's failed jobs. Not combinable with workflow."),
+        inputs: z.record(bounded(MAX_REF), bounded(MAX_REF)).optional().describe("workflow_dispatch inputs, as a flat string map."),
+        repo: bounded(MAX_REPO_SELECTOR).optional().describe(REPO_ARG),
+      },
+    },
+    ({ namespace, workflow, ref, run_id, inputs, repo }) =>
+      guardedWrite("ci_dispatch", namespace, null, () => ciDispatch(env, namespace, { workflow, ref, run_id, inputs }, repo))
   );
 
   // THE IMPROVE LOOP'S TWO TOOLS, and they are a ruled exception to hard rule 1
