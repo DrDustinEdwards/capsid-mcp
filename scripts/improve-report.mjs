@@ -21,6 +21,7 @@ import { randomUUID } from "node:crypto";
 // Count the TOP-LEVEL TAP results. A top-level pass is `ok N` at column 0; a
 // top-level failure is `not ok N` at column 0. Indented lines (subtests), the plan
 // (`1..N`), diagnostics (`#`) and YAML blocks (`  ---`) are all ignored.
+/** @param {string} text */
 export function parseTestReport(text) {
   let pass = 0;
   let fail = 0;
@@ -33,6 +34,7 @@ export function parseTestReport(text) {
 
 // A pass rate in [0, 1], or null when nothing ran (which the Worker treats as
 // "not reported" rather than as a catastrophic zero).
+/** @param {string} text */
 export function testPassRate(text) {
   const { pass, fail } = parseTestReport(text);
   const total = pass + fail;
@@ -42,6 +44,7 @@ export function testPassRate(text) {
 // One holdout case file passes iff its report has at least one top-level ok and no
 // top-level not-ok. Zero results (the process.exit(0) case, or a load error) is
 // NOT a pass, which is the whole point: silence cannot score.
+/** @param {string} text */
 export function holdoutFilePassed(text) {
   const { pass, fail } = parseTestReport(text);
   return pass > 0 && fail === 0;
@@ -50,6 +53,7 @@ export function holdoutFilePassed(text) {
 // A metric read from Job A's metrics.json: a finite number, or null for anything
 // else (missing, "", non-finite). Coercion is refused so a stray value cannot read
 // as a real measurement.
+/** @param {unknown} value */
 function metric(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
@@ -63,6 +67,7 @@ function metric(value) {
 //                            emit the score-report body (Job A's numbers from
 //                            metrics.json, plus the holdout counts and a fresh
 //                            jti) to stdout. The signing key never touches this.
+/** @param {string[]} argv */
 function main(argv) {
   if (argv[0] === "--holdout") {
     let passed = false;
@@ -84,12 +89,14 @@ function main(argv) {
     return;
   }
   const [metricsPath, holdoutTotal, holdoutPassed] = argv;
+  /** @type {{ build_passes?: unknown, test_pass_rate?: unknown, lint_count?: unknown, bundle_size_bytes?: unknown }} */
   let m = {};
   try {
     m = JSON.parse(readFileSync(metricsPath, "utf8"));
   } catch {
     m = {};
   }
+  /** @param {unknown} v */
   const numOrNull = (v) => (v === undefined || v === "" || v === "null" ? null : Number(v));
   const body = {
     namespace: process.env.IMPROVE_NAMESPACE,
