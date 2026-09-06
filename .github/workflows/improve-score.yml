@@ -9,7 +9,7 @@ name: improve-score
 #          code/. It never sees a credential and persist-credentials is false.
 #   score  (BYTE-IDENTICAL across all five roster repos) checks out the DEFAULT
 #          branch only, downloads build's artifact, overlays the attempt source,
-#          pulls the holdout, runs it counting passes from node --test's JSON
+#          pulls the holdout, runs it counting passes from node --test's TAP
 #          reporter via scripts/improve-report.mjs (never an exit code), then reads
 #          metrics.json, signs and posts.
 #
@@ -25,7 +25,7 @@ name: improve-score
 #
 # RESIDUAL: the holdout tests import the attempt source, so attempt code still runs
 # in the score job. Credentials are step-scoped away from it and pass counting is
-# by trusted JSON parsing; full isolation would need a sandbox, not a workflow.
+# by trusted TAP parsing; full isolation would need a sandbox, not a workflow.
 
 on:
   workflow_dispatch:
@@ -83,7 +83,7 @@ jobs:
       - name: Test
         id: test
         continue-on-error: true
-        run: npm test -- --test-reporter=json --test-reporter-destination=test-report.json
+        run: npm test -- --test-reporter=tap --test-reporter-destination=test-report.json
 
       - name: Measure
         id: measure
@@ -180,7 +180,7 @@ jobs:
             .improve-holdout/ \
             --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
 
-      # Count passes from the JSON reporter via the trusted script, never exit codes.
+      # Count passes from the TAP reporter via the trusted script, never exit codes.
       - name: Run the holdout suite
         id: holdout_run
         continue-on-error: true
@@ -194,7 +194,7 @@ jobs:
             [ -e "$f" ] || continue
             REPORT=".improve-holdout/.report-$(node -e 'process.stdout.write(require("crypto").randomUUID())').json"
             # shellcheck disable=SC2086
-            node --test --test-reporter=json --test-reporter-destination="$REPORT" $LOADER "$f" > /dev/null 2>&1 || true
+            node --test --test-reporter=tap --test-reporter-destination="$REPORT" $LOADER "$f" > /dev/null 2>&1 || true
             if node scripts/improve-report.mjs --holdout "$REPORT"; then
               PASSED=$((PASSED+1))
             fi

@@ -1,10 +1,15 @@
 // Trusted scoring glue for improve-score.yml, run from the DEFAULT branch in the
-// scorer's second job. It never runs attempt-controlled code: it reads the JSON
-// reporter output node --test wrote and counts results from EVENTS, not from a
-// process exit code. That is the fix for the 2026-09-06 CRITICAL where an attempt
-// forced holdout_pass_rate to 1.0 by calling process.exit(0) before assertions
-// ran: an early exit truncates the event stream, so the pass it never earned is
-// simply absent rather than assumed.
+// scorer's second job. It never runs attempt-controlled code: it reads the TAP
+// output node --test wrote to a file and counts results from the TOP-LEVEL ok /
+// not ok lines, not from a process exit code. That is the fix for the 2026-09-06
+// CRITICAL where an attempt forced holdout_pass_rate to 1.0 by calling
+// process.exit(0) before assertions ran: an early exit means the file's ok line is
+// never written, so the pass it never earned is simply absent rather than assumed.
+//
+// TAP, not "json": node --test has no builtin json reporter (its builtins are tap,
+// spec, dot, junit, lcov). TAP is the line-oriented one, and a top-level result is
+// an `ok N` or `not ok N` at column 0; subtests are indented under `# Subtest:` and
+// are deliberately not counted, so a suite that uses subtests is not double-weighted.
 //
 // THIS FILE IS BYTE-IDENTICAL ACROSS ALL FIVE ROSTER REPOS, like the score job that
 // calls it. Only Job A (per repo) differs. Pure functions are exported for
@@ -13,25 +18,15 @@
 import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 
-// node --test --test-reporter=json emits newline-delimited JSON events. Count the
-// top-level (nesting 0) test:pass and test:fail events; nested subtests are part of
-// their parent's result and counting them too would double-weight a suite that uses
-// subtests. A line that does not parse is ignored rather than fatal.
+// Count the TOP-LEVEL TAP results. A top-level pass is `ok N` at column 0; a
+// top-level failure is `not ok N` at column 0. Indented lines (subtests), the plan
+// (`1..N`), diagnostics (`#`) and YAML blocks (`  ---`) are all ignored.
 export function parseTestReport(text) {
   let pass = 0;
   let fail = 0;
   for (const line of text.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    let event;
-    try {
-      event = JSON.parse(trimmed);
-    } catch {
-      continue;
-    }
-    if (event?.data?.nesting !== 0) continue;
-    if (event.type === "test:pass") pass += 1;
-    else if (event.type === "test:fail") fail += 1;
+    if (/^not ok \d+/.test(line)) fail += 1;
+    else if (/^ok \d+/.test(line)) pass += 1;
   }
   return { pass, fail };
 }
@@ -44,9 +39,9 @@ export function testPassRate(text) {
   return total > 0 ? pass / total : null;
 }
 
-// One holdout case file passes iff its report has at least one top-level pass and
-// no top-level failure. Zero events (the process.exit(0) case, or a load error)
-// is NOT a pass, which is the whole point: silence cannot score.
+// One holdout case file passes iff its report has at least one top-level ok and no
+// top-level not-ok. Zero results (the process.exit(0) case, or a load error) is
+// NOT a pass, which is the whole point: silence cannot score.
 export function holdoutFilePassed(text) {
   const { pass, fail } = parseTestReport(text);
   return pass > 0 && fail === 0;
