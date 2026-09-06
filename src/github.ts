@@ -870,9 +870,26 @@ export async function ciStatus(
     return ciStatusFromRuns(env, owner, repo, full, [run as CiRun], opts.logTail === true, { run_id: opts.runId });
   }
   if (opts.ref) {
-    query += SHA_SHAPE.test(opts.ref)
-      ? `&head_sha=${encodeURIComponent(opts.ref)}`
-      : `&branch=${encodeURIComponent(opts.ref)}`;
+    if (SHA_SHAPE.test(opts.ref)) {
+      // AN ABBREVIATED SHA MUST BE EXPANDED FIRST. Measured 2026-09-06 against
+      // dustinedwards-info: `head_sha=3bcf858` returns total_count 0 while the full
+      // 40-character sha returns the run. GitHub matches this parameter exactly and
+      // says nothing about it, so the failure is an empty run list for precisely the
+      // input a human types. One extra GET, only when the ref is short.
+      let full40 = opts.ref;
+      if (opts.ref.length < 40) {
+        const commit = await cachedGet(env, owner, repo, `/repos/${owner}/${repo}/commits/${encodeURIComponent(opts.ref)}`);
+        if (!commit.ok) {
+          throw new Error(
+            `ci_status: ${opts.ref} does not resolve to a commit on ${full} (${commit.status}), so runs cannot be filtered by it`
+          );
+        }
+        full40 = ((await commit.json()) as { sha: string }).sha;
+      }
+      query += `&head_sha=${encodeURIComponent(full40)}`;
+    } else {
+      query += `&branch=${encodeURIComponent(opts.ref)}`;
+    }
   }
   const resp = await ghFetch(env, owner, repo, query);
   if (resp.status === 403) {

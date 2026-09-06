@@ -453,17 +453,55 @@ const RUN_ROW = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
+const FULL_SHA = "3bcf8583a59659c255843ab5b8cecd2f56761da6";
+
 test("ci_status filters by branch or by sha, choosing the right query parameter", async () => {
-  await withFetch({ "GET /repos/o/r/actions/runs": { body: { workflow_runs: [] } } }, async (calls) => {
-    await ciStatus(makeEnv(), "ns", undefined, { ref: "review/blog-convergence" });
-    await ciStatus(makeEnv(), "ns", undefined, { ref: "3bcf858" });
-    const [byBranch, bySha] = calls.filter((c) => c.path === "/repos/o/r/actions/runs").map((c) => c.search);
+  await withFetch(
+    {
+      "GET /repos/o/r/actions/runs": { body: { workflow_runs: [] } },
+      "GET /repos/o/r/commits/3bcf858": { body: { sha: FULL_SHA } },
+    },
+    async (calls) => {
+      await ciStatus(makeEnv(), "ns", undefined, { ref: "review/blog-convergence" });
+      await ciStatus(makeEnv(), "ns", undefined, { ref: "3bcf858" });
+      const [byBranch, bySha] = calls.filter((c) => c.path === "/repos/o/r/actions/runs").map((c) => c.search);
     // GitHub has two different parameters and no single one accepting either, so the
     // tool decides from the shape of the ref. Getting this backwards would silently
     // return an empty run list for a valid sha.
-    assert.match(byBranch, /branch=review%2Fblog-convergence/, `branch query missing: ${byBranch}`);
-    assert.match(bySha, /head_sha=3bcf858/, `sha query missing: ${bySha}`);
-    assert.equal(/[?&]branch=3bcf858/.test(bySha), false, "a sha was filtered as a branch");
+      assert.match(byBranch, /branch=review%2Fblog-convergence/, `branch query missing: ${byBranch}`);
+      assert.match(bySha, /head_sha=3bcf858/, `sha query missing: ${bySha}`);
+      assert.equal(/[?&]branch=3bcf858/.test(bySha), false, "a sha was filtered as a branch");
+    }
+  );
+});
+
+test("ci_status EXPANDS an abbreviated sha before filtering, because GitHub matches exactly", async () => {
+  // Measured against dustinedwards-info: head_sha=3bcf858 returns total_count 0 and
+  // the full 40-character sha returns the run. GitHub says nothing about it, so an
+  // unexpanded abbreviation is an empty answer to a valid question.
+  await withFetch(
+    {
+      "GET /repos/o/r/commits/3bcf858": { body: { sha: FULL_SHA } },
+      "GET /repos/o/r/actions/runs": { body: { workflow_runs: [] } },
+    },
+    async (calls) => {
+      await ciStatus(makeEnv(), "ns", undefined, { ref: "3bcf858" });
+      const runsCall = calls.find((c) => c.path === "/repos/o/r/actions/runs");
+      assert.match(runsCall?.search ?? "", new RegExp(`head_sha=${FULL_SHA}`), `not expanded: ${runsCall?.search}`);
+      assert.ok(
+        calls.some((c) => c.path === "/repos/o/r/commits/3bcf858"),
+        "it did not resolve the abbreviation"
+      );
+    }
+  );
+  // A full sha costs no extra call.
+  await withFetch({ "GET /repos/o/r/actions/runs": { body: { workflow_runs: [] } } }, async (calls) => {
+    await ciStatus(makeEnv(), "ns", undefined, { ref: FULL_SHA });
+    assert.equal(calls.some((c) => c.path.startsWith("/repos/o/r/commits/")), false, "a full sha was resolved anyway");
+  });
+  // A ref that resolves to nothing is a named refusal, not an empty run list.
+  await withFetch({ "GET /repos/o/r/commits/deadbee": { status: 404, text: "Not Found" } }, async () => {
+    await assert.rejects(() => ciStatus(makeEnv(), "ns", undefined, { ref: "deadbee" }), /does not resolve to a commit/);
   });
 });
 
