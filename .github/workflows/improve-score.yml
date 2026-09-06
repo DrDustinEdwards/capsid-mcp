@@ -157,13 +157,13 @@ jobs:
       - name: Overlay the attempt source
         run: |
           set -euo pipefail
+          # Path-preserving: Job A stages each scored tree under code/ keeping its
+          # full path (e.g. code/src, code/packages/core), so copying code/. back to
+          # the repo root lands each tree where the holdout imports it, nested dirs
+          # included. Byte-identical across all five repos; only what Job A stages
+          # differs.
           if [ -d attempt/code ]; then
-            for d in attempt/code/*; do
-              [ -e "$d" ] || continue
-              t="$(basename "$d")"
-              rm -rf "./$t"
-              cp -r "$d" "./$t"
-            done
+            cp -r attempt/code/. .
           fi
 
       # R2 holdout secrets are env ON THIS STEP ONLY; no attempt code runs here.
