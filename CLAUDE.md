@@ -18,7 +18,7 @@ Capsid: a single-user, Cloudflare-native MCP server serving a consolidated knowl
 ## Session ritual
 
 Start: read `capsid/conventions.md`, then `capsid/core.md`.
-End: write a `session-YYYY-MM-DD.md` episodic (type `episodic`, under ~2KB) to the capsid namespace.
+End: write NOTHING by default. The end-of-session episodic was withdrawn portfolio-wide 2026-08-21 (`capsid/conventions.md`); a session records a REVERSAL or a BINDING to `capsid/decisions.md`, or nothing.
 
 ## Reaching it
 
@@ -29,7 +29,8 @@ End: write a `session-YYYY-MM-DD.md` episodic (type `episodic`, under ~2KB) to t
 ## Commands
 
 - `npm test` node --test. Not vitest.
-- `npm run check` tsc --noEmit. Run before every push.
+- `npm run check` tsc --noEmit (src only). Run before every push.
+- `npm run check:test` tsc over the test suite (`tsconfig.test.json`). ALSO run before pushing any change under `test/`: `check` does not see test files, so a test that stops compiling still passes `npm test` (node strips types without checking them).
 - `npm run dev` wrangler dev.
 - `npm run deploy` wrangler deploy, stamping the git sha as a deploy-time var.
 - `npm run verify:live` the live gate family against the deployed Worker. `EXPECT_SHA` asserts which commit is live.
@@ -38,7 +39,7 @@ End: write a `session-YYYY-MM-DD.md` episodic (type `episodic`, under ~2KB) to t
 
 ## Hard rules, this repo only
 
-1. **Keep the worker lean.** Few tools, no dead code, no speculative abstractions. The surface is 26 tools and stays small; the four most recent additions were two ruled exceptions, both recorded in `capsid/decisions.md` (history and restore, 2026-08-13; improve_run and improve_status, 2026-09-04).
+1. **Keep the worker lean.** Few tools, no dead code, no speculative abstractions. The surface is 30 tools and stays small (`src/counts.ts` pins it, `test/counts.test.ts` asserts it against the registrations); each recent addition is a ruled exception recorded in `capsid/decisions.md`: history and restore (2026-08-13), improve_run and improve_status (2026-09-04), and repo_refs, repo_history, delete_branch and ci_dispatch (2026-09-06).
 2. **Never commit wrangler.jsonc, .dev.vars, or .env.** The operator key exists only as a sha256 hash in a Worker secret. This is a public MIT repo.
 3. **No real vault content in any seed or fixture.** Sample data is obviously fake (example.com, lorem bodies, namespace "sample").
 4. **The lint loop never calls an LLM from the Worker.** The driving client does all reasoning with ordinary read and write tools. Gather is read-only; finalize archives, never deletes.
