@@ -268,6 +268,32 @@ test("the container mounts the trusted checkout read-only and the attempt separa
   );
 });
 
+test("PLANT: the container script carries no apostrophe, comments included", () => {
+  // Run 34168919050 died at `cd: /repo: No such file or directory` because a
+  // comment inside the container script said "a test file's REAL path". The whole
+  // script is ONE single-quoted shell argument: one apostrophe ends it and every
+  // line after it runs on the runner, outside the container, with the workspace
+  // writable and the step still reporting a container. A quoting slip in this one
+  // string is an isolation failure, so it gets an assertion rather than care.
+  const open = WORKFLOW.indexOf("--entrypoint /bin/sh");
+  assert.ok(open > 0, "the container invocation moved; this scan is reading nothing");
+  const scriptStart = WORKFLOW.indexOf("-c '", open);
+  const scriptEnd = WORKFLOW.indexOf("\n            ' >", scriptStart);
+  assert.ok(scriptStart > 0 && scriptEnd > scriptStart, "could not bound the container script");
+  const script = WORKFLOW.slice(scriptStart + 4, scriptEnd);
+  assert.ok(script.includes("docker") === false, "the slice is the script body, not the docker line");
+  assert.ok(script.length > 500, `the container script sliced to ${script.length} characters; the bounds are wrong`);
+  const offenders = script
+    .split("\n")
+    .map((line, i) => ({ line, i }))
+    .filter(({ line }) => line.includes("'"));
+  assert.deepEqual(
+    offenders.map((o) => o.line.trim()),
+    [],
+    "an apostrophe anywhere in this script closes the shell argument early"
+  );
+});
+
 test("PLANT: the trusted tree is COPIED into the sandbox, not symlinked", () => {
   // Run 34168480470 is the plant that found this. The sandbox symlinked /work/test
   // at /repo/test, which made a test file's REAL path /repo/test/x.test.ts, so node

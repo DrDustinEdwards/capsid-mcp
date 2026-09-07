@@ -336,12 +336,19 @@ jobs:
               M="##CAPSID-${CAPSID_NONCE}"
               unset CAPSID_NONCE
               # THE TRUSTED TREE IS COPIED, NOT SYMLINKED, AND THE FIRST CI PLANT
-              # IS WHY. Symlinking /work/test at /repo/test made a test file's
-              # REAL path /repo/test/x.test.ts, so node resolved its `../src`
-              # import against /repo and the sandbox measured the default branch
-              # against itself: run 34168480470 reported test_pass_rate 1 for an
-              # attempt that genuinely broke two tests. Only node_modules stays a
-              # symlink, where resolving through the real path is correct.
+              # IS WHY. Symlinking /work/test at /repo/test made the REAL path of a
+              # test file /repo/test/x.test.ts, so node resolved its ../src import
+              # against /repo and the sandbox measured the default branch against
+              # itself: run 34168480470 reported test_pass_rate 1 for an attempt
+              # that genuinely broke two tests. Only node_modules stays a symlink,
+              # where resolving through the real path is correct.
+              #
+              # NO APOSTROPHE ANYWHERE IN THIS SCRIPT, comments included. The whole
+              # thing is one single-quoted shell argument, so one apostrophe ends it
+              # and the rest runs on the RUNNER instead of in the container. That is
+              # not hypothetical: run 34168919050 died at `cd: /repo: No such file
+              # or directory` because the paragraph above once wrote the possessive
+              # of "a test file". test/secondary-recompute.test.ts asserts it now.
               cd /repo || exit 1
               find . -path ./.git -prune -o -name node_modules -prune -o -type d -print | while read -r d; do
                 mkdir -p "/work/$d"
