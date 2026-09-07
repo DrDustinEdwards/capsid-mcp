@@ -59,7 +59,12 @@ import {
   RUN_PROMPT_PATH,
   SCORES_PATH,
   SCORE_TIMEOUT_MS,
+  BUDGET_KEY,
+  IMPROVE_MODES,
+  MODE_KEY,
+  pausedKey,
   type BestRecord,
+  type BudgetCaps,
   type ImproveMode,
   type RunCondition,
   type RunStatus,
@@ -1394,6 +1399,70 @@ export async function improveRunManual(
   // creating a row and waiting five minutes for the cron.
   const advanced = await tickRuns(env, now);
   return { mode: summary.mode, mode_note: summary.modeNote, condition, dry_run: false, opened: summary.outcomes, advanced };
+}
+
+// THE CONTROL ACTIONS. improve_run's non-run verbs: set the mode, pause or unpause
+// namespaces, set the budget caps. Each is a KV write, audited, and READ BACK from
+// KV so the caller sees the value that actually landed rather than the one it asked
+// for. improve_status reads the same keys, so it reflects the change on its next
+// call. All of it is write-gated at the tool boundary.
+export type ImproveControlResult =
+  | { action: "mode"; requested: string; mode: ImproveMode; mode_note: string | null }
+  | { action: "pause" | "unpause"; namespaces: string[]; paused: Record<string, string | null> }
+  | { action: "budget"; caps: BudgetCaps };
+
+export async function improveControl(
+  env: Env,
+  action: "mode" | "pause" | "unpause" | "budget",
+  opts: { value?: string; namespace?: string; reason?: string; actions_minutes_month?: number; model_usd_month?: number }
+): Promise<ImproveControlResult> {
+  if (action === "mode") {
+    const value = (opts.value ?? "").trim().toLowerCase();
+    if (!(IMPROVE_MODES as readonly string[]).includes(value)) {
+      throw new Error(`mode must be one of ${IMPROVE_MODES.join(", ")}; got '${opts.value ?? ""}'. Nothing was changed.`);
+    }
+    await env.APP_KV.put(MODE_KEY, value);
+    await env.DB.batch([improveAudit(env.DB, "improve-mode-set", null, { mode: value })]);
+    // Read back through the same resolver the loop uses, so an unexpected stored
+    // value would surface here rather than at 3am.
+    const read = await readMode(env.APP_KV);
+    return { action: "mode", requested: value, mode: read.mode, mode_note: read.reason };
+  }
+
+  if (action === "pause" || action === "unpause") {
+    const target = (opts.namespace ?? "").trim();
+    if (!target) throw new Error(`${action} needs a namespace, or "all". Nothing was changed.`);
+    if (target !== "all" && !(ROSTER as readonly string[]).includes(target)) {
+      throw new Error(`'${target}' is not on the improve roster (${ROSTER.join(", ")}) and is not "all". Nothing was changed.`);
+    }
+    const namespaces = target === "all" ? [...ROSTER] : [target];
+    const reason = opts.reason?.trim() || "paused via improve_run";
+    const audits = [];
+    for (const ns of namespaces) {
+      if (action === "pause") await pauseNamespace(env.APP_KV, ns, reason);
+      else await env.APP_KV.delete(pausedKey(ns));
+      audits.push(improveAudit(env.DB, action === "pause" ? "improve-paused" : "improve-unpaused", ns, action === "pause" ? { reason } : {}));
+    }
+    await env.DB.batch(audits);
+    // Read each pause key back: pause returns the reason, unpause returns null.
+    const paused: Record<string, string | null> = {};
+    for (const ns of namespaces) paused[ns] = await pausedReason(env.APP_KV, ns);
+    return { action, namespaces, paused };
+  }
+
+  // budget
+  const { actions_minutes_month, model_usd_month } = opts;
+  for (const [label, n] of [["actions_minutes_month", actions_minutes_month], ["model_usd_month", model_usd_month]] as const) {
+    if (typeof n !== "number" || !Number.isFinite(n) || n <= 0) {
+      throw new Error(`budget needs a positive number for ${label}; got ${JSON.stringify(n)}. Nothing was changed.`);
+    }
+  }
+  await env.APP_KV.put(BUDGET_KEY, JSON.stringify({ actions_minutes_month, model_usd_month }));
+  await env.DB.batch([improveAudit(env.DB, "improve-budget-set", null, { actions_minutes_month, model_usd_month })]);
+  // Read back through readBudget, which applies the same per-field defaulting the
+  // loop sees, so the caps returned are the caps the kill switch will enforce.
+  const caps = await readBudget(env.APP_KV);
+  return { action: "budget", caps };
 }
 
 // READ ONLY. Every branch in here is a read: the scores document, the anchor pin,

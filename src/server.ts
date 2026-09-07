@@ -44,7 +44,7 @@ import { b64urlDecode, b64urlEncode } from "./encoding";
 import { bounded, BRIEF_BUDGET, CI_DISPATCH_MAX_INPUTS, DEFAULT_SCAN_FILES, DEFAULT_SCAN_RESULTS, docPath, GATHER_BUDGET, HISTORY_ROWS, LINT_CONSUMED_MAX, MAX_BODY, MAX_DOC_STATUS, MAX_COMMIT_MESSAGE, MAX_DOC_TYPE, MAX_GLOB, MAX_LINKS_JSON, MAX_PATH, MAX_PR_BODY, MAX_PR_TITLE, MAX_QUERY, MAX_REF, MAX_REPO_SELECTOR, MAX_REPOS_JSON, MAX_ROWS, MAX_SCAN_CAP, MAX_SHA, MAX_TAGS, MAX_TITLE, nsName, SEARCH_ROWS } from "./limits";
 import { assembleBody } from "./write-modes";
 import { ROSTER as IMPROVE_ROSTER, onRoster, RUN_CONDITIONS } from "./improve-schema";
-import { improveRunManual, improveStatus } from "./improve-run";
+import { improveControl, improveRunManual, improveStatus } from "./improve-run";
 import { improveWriteRefusal } from "./improve-scores";
 
 const SERVER_INFO = { name: "capsid", version: "1.0.0" };
@@ -1879,25 +1879,36 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
     "improve_run",
     {
       description:
-        `Open improve runs for the roster namespaces, or one named namespace, and advance them one step. Respects APP_KV improve_mode ("api" | "subscription" | "off", default off) and skips any namespace with an improve:paused:<ns> key. Refuses a namespace whose improve/scores.md anchor block does not match its pinned sha256. dry_run reports exactly what a real run would do and writes NOTHING: no branch, no CI dispatch, no row, no document. Requires an operator key with the write grant. The nightly cron calls the same code path, so this is for starting one early or for reading the plan.`,
+        `Open improve runs, or control the loop. action defaults to "run": open runs for the roster (or one namespace) and advance them one step, respecting APP_KV improve_mode and skipping paused namespaces; dry_run reports the plan and writes NOTHING. The control actions each write one KV value, audit it, and read it back so the response is the value that actually landed: action "mode" sets improve_mode to value ("off" | "subscription" | "api"); action "pause"/"unpause" sets or clears improve:paused for one namespace or "all" (pause takes an optional reason); action "budget" sets the monthly caps actions_minutes_month and model_usd_month. improve_status reflects any of these on its next call. Requires an operator key with the write grant.`,
       inputSchema: {
-        namespace: nsName.optional().describe("Limit to one namespace. Omit for the whole roster."),
-        dry_run: z.boolean().optional().describe("Report the plan and change nothing. Defaults to false."),
+        action: z
+          .enum(["run", "mode", "pause", "unpause", "budget"])
+          .optional()
+          .describe('What to do. Defaults to "run". The others control the loop: mode, pause, unpause, budget.'),
+        namespace: nsName.optional().describe('For "run", limit to one namespace (omit for the whole roster). For pause/unpause, the target namespace, or "all".'),
+        value: z.enum(["off", "subscription", "api"]).optional().describe('For action "mode": the mode to set.'),
+        reason: bounded(MAX_DOC_STATUS).optional().describe('For action "pause": the reason recorded on the pause key. Defaults to a generic note.'),
+        actions_minutes_month: z.number().positive().optional().describe('For action "budget": the monthly Actions-minutes cap.'),
+        model_usd_month: z.number().positive().optional().describe('For action "budget": the monthly model-spend cap in USD.'),
+        dry_run: z.boolean().optional().describe('For action "run": report the plan and change nothing. Defaults to false.'),
         condition: bounded(MAX_DOC_STATUS)
           .optional()
           .describe(
-            `The experimental condition to run under: ${RUN_CONDITIONS.join(" | ")}. Defaults to full. "no-memory" withholds lineage history from base selection; "no-transfer" offers no cross-project skill. Recorded on the run row and in its audit rows, so an ablation is a query. An unrecognised value is refused rather than defaulted.`
+            `For action "run", the experimental condition: ${RUN_CONDITIONS.join(" | ")}. Defaults to full. "no-memory" withholds lineage history from base selection; "no-transfer" offers no cross-project skill. Recorded on the run row and in its audit rows, so an ablation is a query. An unrecognised value is refused rather than defaulted.`
           ),
       },
     },
-    async ({ namespace, dry_run, condition }) => {
+    async ({ action, namespace, value, reason, actions_minutes_month, model_usd_month, dry_run, condition }) => {
       if (!mayWrite) return fail(DENIED);
-      if (namespace && !onRoster(namespace)) {
-        return fail(
-          `namespace '${namespace}' is not on the improve roster (${IMPROVE_ROSTER.join(", ")}). A namespace joins by being added to ROSTER in src/improve-schema.ts and by having its anchor block pinned.`
-        );
-      }
       try {
+        if (action && action !== "run") {
+          return ok(await improveControl(env, action, { value, namespace, reason, actions_minutes_month, model_usd_month }));
+        }
+        if (namespace && !onRoster(namespace)) {
+          return fail(
+            `namespace '${namespace}' is not on the improve roster (${IMPROVE_ROSTER.join(", ")}). A namespace joins by being added to ROSTER in src/improve-schema.ts and by having its anchor block pinned.`
+          );
+        }
         return ok(await improveRunManual(env, new Date(), { namespace, dryRun: dry_run === true, condition }));
       } catch (err) {
         return fail(err instanceof Error ? err.message : String(err));

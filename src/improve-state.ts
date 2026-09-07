@@ -369,7 +369,7 @@ export async function priorDoc(
 export function improveAudit(
   db: D1Database,
   action: string,
-  namespace: string,
+  namespace: string | null,
   params: unknown
 ): D1PreparedStatement {
   return db
