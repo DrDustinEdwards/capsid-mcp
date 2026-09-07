@@ -105,8 +105,23 @@ jobs:
       - name: Typecheck tests
         run: npm run check:test
 
+      # The integration suite has its own config too, because it needs the
+      # workers-types experimental surface and the pool's `cloudflare:test`
+      # ambient module, and the shipping config must keep rejecting both in src/.
+      - name: Typecheck integration tests
+        run: npm run check:integration
+
       - name: Tests
         run: npm test
+
+      # THE INTEGRATION LAYER (audit 2026-09-07). The whole Worker inside workerd,
+      # with a real D1 the migrations are applied to, real KV and real R2. It is a
+      # SEPARATE step rather than folded into `npm test` because the two suites
+      # fail differently and a reader of a red run needs to know which one went:
+      # a unit failure is a handler issuing the wrong statement, an integration
+      # failure is SQLite, the OAuth provider or the runtime refusing it.
+      - name: Integration tests
+        run: npm run test:integration
 
   # Ordered after checks, exactly the foxhound shape that has proved itself
   # twice: a failing typecheck or test never reaches production. No

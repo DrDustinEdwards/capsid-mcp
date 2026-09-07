@@ -11,12 +11,16 @@
     "check": "tsc --noEmit",
     "check:test": "tsc --noEmit -p tsconfig.test.json",
     "test": "node --import ./test/resolve-ts.mjs --test \"test/*.test.ts\"",
-    "verify:live": "node scripts/verify-live.mjs"
+    "verify:live": "node scripts/verify-live.mjs",
+    "test:integration": "vitest run",
+    "check:integration": "tsc --noEmit -p test-integration/tsconfig.json"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
     "@cloudflare/workers-types": "^4.20260702.1",
     "@types/node": "24.13.3",
     "typescript": "^6.0.3",
+    "vitest": "^4.1.11",
     "wrangler": "4.107.0"
   },
   "dependencies": {
