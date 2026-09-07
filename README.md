@@ -5,6 +5,7 @@ Capsid is a single-user, Cloudflare-native MCP server that serves a consolidated
 - **Documents:** list, read, write, delete, move, find, search (FTS5, with a plain-text fallback when a query is not valid FTS5 syntax), namespaces, backlinks (typed edges), brief (one-call session start), history and restore (read a retained version back, and write one back through a guarded path)
 - **Repo access:** list_repo_tree, read_repo_file (one path or a batch of up to 20), search_code, repo_refs (branches, tags and open PRs in one call), repo_history (commits, a comparison, or one commit), write_repo_file, create_branch, delete_branch, open_pr, delete_repo_file, manage_pr, ci_status (CI runs, and the failing step's log), ci_dispatch (start a workflow or rerun failed jobs)
 - **Maintenance:** lint (the consolidation loop), register_namespace (create), update_namespace (remap)
+- **Self-improvement:** improve_run (start or resume a run by hand), improve_status (the loop's mode, budget and per-namespace state). See Self-improvement loop below
 
 The `namespaces` tool reports each namespace's count of unconsolidated episodic/source docs, so any session can see where a lint run is due.
 
@@ -19,7 +20,7 @@ All access is gated. Human clients (claude.ai, MCP Inspector) authenticate via G
 - GitHub OAuth App as the identity provider for login, locked to a single admin account
 - A separate GitHub App for repo access, minting short-lived installation tokens
 - D1 for documents, versions, namespaces, and audit log, with FTS5 full text search
-- R2 (`MEDIA` binding) for media
+- R2 (`MEDIA` binding) for media, backups and the report sink; a second bucket (`HOLDOUT` binding) holds the self-improvement loop's hidden test suites, bound separately so attempt code cannot reach it
 - KV, TWO SEPARATE namespaces: `APP_KV` for the Worker's own caches, and `OAUTH_KV` for the OAuth provider's clients, grants and tokens. They must not be the same namespace (see Clone setup)
 
 ## Knowledge model
@@ -64,6 +65,18 @@ The `lint` tool runs the wiki maintenance loop. The Worker never calls an LLM; t
 - `lint(namespace, mode: "gather")` returns a read-only packet: the namespace `core.md`, the compiled `concept` and `decision` docs, every un-archived `episodic` and `source` doc, and the schema and conventions. The driving LLM synthesizes an updated `core.md` and any new concept docs from this.
 - `lint(namespace, mode: "finalize", consumed: [paths])` archives the consumed raw entries under an `archive/` path prefix and writes one audit row. It only moves and never deletes, so nothing is lost, and `gather` excludes `archive/`, so the loop is idempotent.
 
+## Self-improvement loop
+
+An optional nightly loop that proposes one scoped code change at a time to a small roster of repos, has each repo's own CI score it, and keeps only what improved a repo without regressing it. It is **off by default**, and every machine-authored change arrives as a pull request that a human merges: nothing auto-merges.
+
+- **Modes.** `subscription` has the Worker write a task document for a session to run and then stop, so it calls no model itself; `api` calls the model directly. `off` is the default, and any unreadable or unexpected setting falls back to it.
+- **Cadence.** A nightly opener (a Cron Trigger at 03:00 America/Chicago) starts a run for each eligible namespace, and a five-minute tick advances any run in flight.
+- **Scoring.** Each roster repo carries an `improve-score.yml` workflow that runs that repo's own build, tests and lint plus a hidden holdout suite kept in the separate `HOLDOUT` R2 bucket, and reports a signed score back to the Worker.
+- **Keep or revert.** A change that regresses a pinned anchor metric, or fails to improve the weighted score, is reverted; a change that improves it opens a PR.
+- **Budget and pause.** Monthly caps on estimated model spend and CI minutes stop the loop when exceeded. A per-namespace pause key holds that namespace until a human clears it, and a paused namespace never resumes on its own.
+
+`improve_status` reports the mode, the budget and each namespace's state; `improve_run` starts or resumes a run by hand.
+
 ## Endpoints
 
 - `POST /mcp` MCP over Streamable HTTP, requires an OAuth access token (admin only)
@@ -102,6 +115,8 @@ A daily Cron Trigger (09:00 UTC) exports the whole database to the `MEDIA` R2 bu
 
 After each export the history tables are pruned in D1: `document_versions` rows older than 90 days and `audit_log` rows older than 180 days. Pruning runs after the export, so every pruned row exists in at least one retained JSON dump.
 
+An off-account copy exists too: a private `capsid-backups` repository pulls the latest JSON dump daily, so the dumps survive loss of the whole Cloudflare account, not only loss of the database.
+
 Run one on demand with a write-grant operator key (read-only keys are refused):
 
 ```
@@ -124,7 +139,7 @@ Three paths, in the order to try them. Path 2 has been executed end to end again
 
    Create the new database, apply **every** migration in `migrations/` in order (`0001_init.sql`, then `0002_document_links.sql`, then `0003_improve.sql`; stopping early leaves later tables missing for the import to land in), then execute the nine exports with `documents` first. Importing `documents` fires the FTS sync triggers, so `documents_fts` rebuilds itself and needs no separate step. The other eight tables have no triggers and no foreign keys, so their import order does not matter. Verify with count queries against both databases and one MATCH query on the new one, then point `wrangler.jsonc` at the new `database_id` and deploy.
 
-3. **The R2 JSON dump**, for anything beyond the 30-day Time Travel window. Wrangler cannot list R2 objects, so get the exact keys from the Cloudflare dashboard or from the `json_keys` field of a `/ops/backup` response, then fetch each table's object: `wrangler r2 object get capsid-media/backups/json/<timestamp>/<table>.json --file <table>.json`. Convert each object's `rows` to INSERT statements and follow path 2 from the create step, `documents` first. The `backups/markdown/` mirror is the last-resort human-readable copy: bodies only, no metadata.
+3. **The R2 JSON dump**, for anything beyond the 30-day Time Travel window. Wrangler cannot list R2 objects, so get the exact keys from the Cloudflare dashboard or from the `json_keys` field of a `/ops/backup` response, then fetch each table's object: `wrangler r2 object get capsid-media/backups/json/<timestamp>/<table>.json --file <table>.json`. Convert each object's `rows` to INSERT statements and follow path 2 from the create step, `documents` first. The same dumps are mirrored off-account in the private `capsid-backups` repository, so this path still works if the Cloudflare account is gone. The `backups/markdown/` mirror is the last-resort human-readable copy: bodies only, no metadata.
 
 Single-document recovery rarely needs any of this. Every overwrite and delete snapshots the prior row into `document_versions` first, so recovering one document is usually just reading its latest snapshot back.
 
@@ -154,6 +169,7 @@ npx wrangler rollback [<version-id>]
    npx wrangler kv namespace create APP_KV
    npx wrangler kv namespace create OAUTH_KV
    npx wrangler r2 bucket create capsid-media
+   npx wrangler r2 bucket create capsid-improve-holdout   # only if you run the self-improvement loop
    ```
 
 3. Copy the config template and fill in your IDs from step 2. **`APP_KV` and `OAUTH_KV` must be two different KV namespaces.** They were one for a while here, on the reasoning that the OAuth library prefixes its keys, and that is exactly why it is worth stating: sharing one namespace puts the Worker's own cache entries and every OAuth client, grant and token in a single blast radius, so any sweep, reaper or bulk delete written against one set can reach the other. Nothing in the code enforces the split, so the config is the only place it exists:
@@ -201,6 +217,13 @@ npx wrangler rollback [<version-id>]
 
    Only the private key is used to mint installation tokens; the App client secret is not needed. The installation id is not configured: it is resolved from GitHub per owner and repo and cached for a day, because one pinned id cannot be correct for two owners.
 
+   Optional, only to run the self-improvement loop: set `IMPROVE_SCORE_SECRET` (the root of the per-repo score-report keys) and, for `api` mode, `ANTHROPIC_API_KEY`. The loop stays off until `improve_mode` is set, so this can be skipped.
+
+   ```
+   npx wrangler secret put IMPROVE_SCORE_SECRET
+   npx wrangler secret put ANTHROPIC_API_KEY        # api mode only
+   ```
+
 8. Type check and deploy:
 
    ```
@@ -227,6 +250,7 @@ Note: MCP clients cache the tool list at connect time. After deploying new tools
 - Phase 3 (partial): multiple operator keys with a read-only tier, individually revocable by editing the secret. Still deferred: per-client issued tokens with names and per-key audit, and an autonomous, scheduled lint run once agents exist to drive it.
 - Phase 4 (done, 2026-07): multi-repo namespaces with a repo selector on every repo tool; update_namespace; delete_repo_file; manage_pr (merge/close); search_code reimplemented as a tree walk.
 - Phase 5 (done, 2026-07): typed document links (`document_links`) with a `backlinks` query; `brief` for one-call session start; `ci_status` for CI visibility via the GitHub App; truth lints documented as lint-loop steps (cross-doc contradiction, doc-vs-artifact binding, and doc-vs-live-Cloudflare infra binding via the Cloudflare MCP tools, since the Worker holds no Cloudflare API token).
+- Phase 6 (done, 2026-09): the self-improvement loop (`improve_run`, `improve_status`), off by default, scored through each repo's `improve-score.yml` with hidden holdout suites in a separate R2 bucket, keep/revert with human-gated pull requests, monthly budget caps and per-namespace pause keys; plus an off-account backup mirror (`capsid-backups`) and a weekly restore rehearsal (`restore-rehearsal.yml`).
 - Later: alignment with the 2026-07-28 MCP spec revision (readiness audited; waiting on the SDK release); adopting fiberplane/drift for doc-code drift on repos where docs and code are co-located (foxhound keeps its canon in Capsid, so it does not fit); per-client issued operator tokens.
 
 ## License
