@@ -43,6 +43,12 @@ export const SCORE_PATH = "/improve/score";
 // prefix and nothing else, and no long-lived S3 secret sits in any repo.
 export const CREDENTIAL_PATH = "/improve/holdout-credential";
 
+// The backup-credential endpoint (session 3, off-account backup). Same envelope,
+// but signed with a BACKUP-SPECIFIC key derived under its own context, so the
+// mirror job's key opens read access to backups/json/ on the media bucket and
+// nothing on the improve side, and no roster repo's score key opens this.
+export const BACKUP_CREDENTIAL_PATH = "/backup/credential";
+
 // A signature older than this is refused. Bounds replay to the window in which a
 // report is still plausibly in flight; a CI job that takes longer than half an
 // hour to POST its own result has a different problem.
@@ -131,6 +137,14 @@ export async function claimJti(
 // secret and five re-pastes.
 export async function deriveScoreKey(rootSecret: string, namespace: string): Promise<string> {
   return hmacHex(rootSecret, `capsid-improve-score:v1:${namespace}`);
+}
+
+// The backup mirror's key, from the same root under a DIFFERENT context string,
+// so it is unequal to every namespace score key by construction and rotates with
+// the same one-character version bump. scripts/improve-derive-key.mjs
+// --backup-credential performs the identical computation to set the repo secret.
+export async function deriveBackupCredentialKey(rootSecret: string): Promise<string> {
+  return hmacHex(rootSecret, "capsid-backup-credential:v1");
 }
 
 // ---- the report -------------------------------------------------------------
@@ -390,35 +404,25 @@ export interface HoldoutCredential {
   expires_in: number;
 }
 
-// Mint a one-hour, object-read-only credential scoped to ONE namespace's
-// holdout prefix, via Cloudflare's temp-access-credentials API. The credential
-// derives from a parent R2 token (object-read-only, scoped to the holdout
-// bucket) whose secret never leaves the dashboard; the Worker holds only the
-// parent's ACCESS KEY ID plus the API token that authorizes the mint. Both
-// live outside AttemptEnv, the same structural withholding as the HOLDOUT
-// binding itself: attempt code cannot mint its way to the suite.
-export async function mintHoldoutCredential(
+// The ONE call to the temp-access-credentials API, shared by the holdout and
+// backup mints: object-read-only, one hour, one bucket, one prefix, derived from
+// the named parent token. Both parents' secrets never leave the dashboard; the
+// Worker holds only their ACCESS KEY IDS plus the API token that authorizes the
+// mint, and those live outside AttemptEnv, the same structural withholding as
+// the HOLDOUT binding itself: attempt code cannot mint its way to anything.
+async function mintScopedCredential(
   env: Env,
-  namespace: string
+  scope: { bucket: string; prefix: string; parentAccessKeyId: string }
 ): Promise<{ ok: true; credential: HoldoutCredential } | { ok: false; status: number; refusal: string }> {
-  if (!env.R2_TEMP_CRED_TOKEN || !env.R2_TEMP_CRED_PARENT_ACCESS_KEY_ID || !env.R2_ACCOUNT_ID) {
-    return {
-      ok: false,
-      status: 503,
-      refusal:
-        "holdout credential minting is not configured. Set R2_TEMP_CRED_TOKEN, R2_TEMP_CRED_PARENT_ACCESS_KEY_ID and R2_ACCOUNT_ID with wrangler secret put.",
-    };
-  }
-  const prefix = `${HOLDOUT_PREFIX}${namespace}/`;
   const resp = await fetch(`https://api.cloudflare.com/client/v4/accounts/${env.R2_ACCOUNT_ID}/r2/temp-access-credentials`, {
     method: "POST",
     headers: { Authorization: `Bearer ${env.R2_TEMP_CRED_TOKEN}`, "Content-Type": "application/json" },
     body: JSON.stringify({
-      bucket: HOLDOUT_BUCKET_NAME,
-      parentAccessKeyId: env.R2_TEMP_CRED_PARENT_ACCESS_KEY_ID,
+      bucket: scope.bucket,
+      parentAccessKeyId: scope.parentAccessKeyId,
       permission: "object-read-only",
       ttlSeconds: HOLDOUT_CREDENTIAL_TTL_SECONDS,
-      prefixes: [prefix],
+      prefixes: [scope.prefix],
     }),
   });
   if (!resp.ok) {
@@ -436,11 +440,102 @@ export async function mintHoldoutCredential(
       secret_access_key: minted.secretAccessKey,
       session_token: minted.sessionToken,
       endpoint: `https://${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-      bucket: HOLDOUT_BUCKET_NAME,
-      prefix,
+      bucket: scope.bucket,
+      prefix: scope.prefix,
       expires_in: HOLDOUT_CREDENTIAL_TTL_SECONDS,
     },
   };
+}
+
+// Mint a one-hour, object-read-only credential scoped to ONE namespace's
+// holdout prefix.
+export async function mintHoldoutCredential(
+  env: Env,
+  namespace: string
+): Promise<{ ok: true; credential: HoldoutCredential } | { ok: false; status: number; refusal: string }> {
+  if (!env.R2_TEMP_CRED_TOKEN || !env.R2_TEMP_CRED_PARENT_ACCESS_KEY_ID || !env.R2_ACCOUNT_ID) {
+    return {
+      ok: false,
+      status: 503,
+      refusal:
+        "holdout credential minting is not configured. Set R2_TEMP_CRED_TOKEN, R2_TEMP_CRED_PARENT_ACCESS_KEY_ID and R2_ACCOUNT_ID with wrangler secret put.",
+    };
+  }
+  return mintScopedCredential(env, {
+    bucket: HOLDOUT_BUCKET_NAME,
+    prefix: `${HOLDOUT_PREFIX}${namespace}/`,
+    parentAccessKeyId: env.R2_TEMP_CRED_PARENT_ACCESS_KEY_ID,
+  });
+}
+
+// The backup dumps bucket, named here for the same reason as the holdout bucket
+// name above: the temp-credential API scopes by name. It is bindings.mjs's R2
+// pin; the two cannot drift without the off-account mirror going dark loudly.
+export const BACKUP_BUCKET_NAME = "capsid-media";
+export const BACKUP_DUMP_PREFIX = "backups/json/";
+
+// Mint a one-hour, object-read-only credential scoped to the JSON dump prefix,
+// derived from ITS OWN parent token (object-read-only on capsid-media): the
+// holdout parent must not be able to read backups and vice versa.
+export async function mintBackupCredential(
+  env: Env
+): Promise<{ ok: true; credential: HoldoutCredential } | { ok: false; status: number; refusal: string }> {
+  if (!env.R2_TEMP_CRED_TOKEN || !env.R2_BACKUP_PARENT_ACCESS_KEY_ID || !env.R2_ACCOUNT_ID) {
+    return {
+      ok: false,
+      status: 503,
+      refusal:
+        "backup credential minting is not configured. Set R2_TEMP_CRED_TOKEN, R2_BACKUP_PARENT_ACCESS_KEY_ID and R2_ACCOUNT_ID with wrangler secret put.",
+    };
+  }
+  return mintScopedCredential(env, {
+    bucket: BACKUP_BUCKET_NAME,
+    prefix: BACKUP_DUMP_PREFIX,
+    parentAccessKeyId: env.R2_BACKUP_PARENT_ACCESS_KEY_ID,
+  });
+}
+
+// What the backup mirror's request body must say: a jti so a captured request
+// cannot be replayed inside the signature window. No namespace: the scope is
+// fixed by the endpoint.
+export function parseBackupCredentialRequest(body: string): { ok: true; jti: string } | { ok: false; refusal: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return { ok: false, refusal: "the credential request body is not JSON" };
+  }
+  const record = parsed as { jti?: unknown };
+  if (typeof record?.jti !== "string" || record.jti.length < 8 || record.jti.length > 128) {
+    return { ok: false, refusal: "the credential request body must carry a jti of 8 to 128 characters" };
+  }
+  return { ok: true, jti: record.jti };
+}
+
+// The backup mirror's request, verified under the SAME rules as a score report
+// (window both directions, timing-safe compare, refuse on anything missing) but
+// against the backup-specific derived key, so no roster repo's score key opens
+// this and this key opens nothing on the improve side.
+export async function verifyBackupCredentialRequest(
+  env: Pick<Env, "IMPROVE_SCORE_SECRET">,
+  signed: { timestamp: string; signature: string; body: string },
+  now: Date
+): Promise<{ ok: true } | { ok: false; status: number; refusal: string }> {
+  if (!env.IMPROVE_SCORE_SECRET) {
+    return { ok: false, status: 503, refusal: "backup credentials are not configured: IMPROVE_SCORE_SECRET is unset" };
+  }
+  const at = Date.parse(signed.timestamp);
+  if (Number.isNaN(at)) return { ok: false, status: 400, refusal: "missing or unparseable timestamp header" };
+  const age = now.getTime() - at;
+  if (age > SIGNATURE_MAX_AGE_MS || age < -SIGNATURE_MAX_AGE_MS) {
+    return { ok: false, status: 401, refusal: `request timestamp is ${Math.round(age / 1000)}s from now, outside the accepted window` };
+  }
+  const key = await deriveBackupCredentialKey(env.IMPROVE_SCORE_SECRET);
+  const expected = await hmacHex(key, signaturePayload(signed.timestamp, signed.body));
+  if (!timingSafeEqual(signed.signature.trim().toLowerCase(), expected)) {
+    return { ok: false, status: 401, refusal: "backup credential signature does not verify" };
+  }
+  return { ok: true };
 }
 
 // ---- dispatch ---------------------------------------------------------------

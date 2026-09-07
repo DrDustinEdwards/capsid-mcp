@@ -21,14 +21,18 @@ import type { Env } from "./env";
 import { buildServer } from "./server";
 import { ingestScore } from "./improve-run";
 import {
+  BACKUP_CREDENTIAL_PATH,
   claimJti,
   CREDENTIAL_PATH,
   MAX_REPORT_BYTES,
+  mintBackupCredential,
   mintHoldoutCredential,
+  parseBackupCredentialRequest,
   parseCredentialRequest,
   parseScoreReport,
   readBoundedText,
   SCORE_PATH,
+  verifyBackupCredentialRequest,
   verifySignedReport,
 } from "./improve-scorer";
 import { probeFts } from "./store-probe";
@@ -556,6 +560,40 @@ async function handleCspReport(request: Request, env: Env): Promise<Response> {
 // all until a signature over the body verifies against a secret only the target
 // repo holds. An unsigned flood costs two HMAC computations per request and
 // reaches no storage.
+// The backup-credential mint (session 3, off-account backup). Same shape as the
+// holdout mint below, but with the backup-specific derived key and no namespace:
+// the scope is one hour of object-read-only on backups/json/, always. The jti
+// replay cache runs under the literal namespace "backup", which the roster can
+// never hold (ROSTER is a fixed list without it).
+async function handleBackupCredential(request: Request, env: Env): Promise<Response> {
+  const timestamp = request.headers.get("X-Backup-Timestamp") ?? "";
+  const signature = request.headers.get("X-Backup-Signature") ?? "";
+
+  const bounded = await readBoundedText(request, MAX_REPORT_BYTES);
+  if (!bounded.ok) return textResponse(`request too large: exceeds ${MAX_REPORT_BYTES} bytes`, 413);
+  const body = bounded.text;
+
+  const verdict = await verifyBackupCredentialRequest(env, { timestamp, signature, body }, new Date());
+  if (!verdict.ok) {
+    console.error(`BACKUP_CREDENTIAL_REJECTED ${verdict.refusal}`);
+    return textResponse(verdict.refusal, verdict.status);
+  }
+
+  const parsed = parseBackupCredentialRequest(body);
+  if (!parsed.ok) return textResponse(parsed.refusal, 400);
+
+  const claim = await claimJti(env.APP_KV, "backup", parsed.jti);
+  if (!claim.ok) return textResponse(claim.refusal, claim.status);
+
+  const minted = await mintBackupCredential(env);
+  if (!minted.ok) {
+    console.error(`BACKUP_CREDENTIAL_FAILED ${minted.refusal}`);
+    return textResponse(minted.refusal, minted.status);
+  }
+  console.log(`BACKUP_CREDENTIAL_MINTED ttl=${minted.credential.expires_in}s`);
+  return new Response(JSON.stringify(minted.credential), { status: 200, headers: { "Content-Type": "application/json" } });
+}
+
 // The holdout-credential mint (platform arc 2026-09-06). Same envelope as the
 // score report: per-namespace HMAC over timestamp.body, bounded body, jti
 // replay cache. The signed namespace is the authority, so a repo can mint read
@@ -688,6 +726,7 @@ export const defaultHandler = {
     if (url.pathname === "/ops/backup" && request.method === "POST") return handleBackup(request, env);
     if (url.pathname === SCORE_PATH && request.method === "POST") return handleImproveScore(request, env);
     if (url.pathname === CREDENTIAL_PATH && request.method === "POST") return handleHoldoutCredential(request, env);
+    if (url.pathname === BACKUP_CREDENTIAL_PATH && request.method === "POST") return handleBackupCredential(request, env);
     if (url.pathname === "/authorize" && request.method === "GET") return handleAuthorizeGet(request, env);
     if (url.pathname === "/authorize" && request.method === "POST") return handleAuthorizePost(request, env);
     if (url.pathname === "/callback") return handleCallback(request, env);

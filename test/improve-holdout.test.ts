@@ -29,7 +29,7 @@ const BUCKET_NAME = "capsid-improve-holdout";
 // the bounding-primitive pin in test/limits.test.ts.
 const ENV_PERMITTED = [
   "  HOLDOUT: R2Bucket;",
-  'export type AttemptEnv = Omit<Env, "HOLDOUT" | "R2_TEMP_CRED_TOKEN" | "R2_TEMP_CRED_PARENT_ACCESS_KEY_ID">;',
+  'export type AttemptEnv = Omit<Env, "HOLDOUT" | "R2_TEMP_CRED_TOKEN" | "R2_TEMP_CRED_PARENT_ACCESS_KEY_ID" | "R2_BACKUP_PARENT_ACCESS_KEY_ID">;',
 ];
 
 // A COMMENT IS NOT A USE. Several modules explain this isolation at length, and
@@ -98,7 +98,7 @@ test("no source file hardcodes the bucket NAME either, except the scorer", () =>
 
 test("the attempt module takes AttemptEnv, and AttemptEnv omits the binding", () => {
   const env = sourceFile("env.ts");
-  assert.match(env, /export type AttemptEnv = Omit<Env, "HOLDOUT" \| "R2_TEMP_CRED_TOKEN" \| "R2_TEMP_CRED_PARENT_ACCESS_KEY_ID">;/);
+  assert.match(env, /export type AttemptEnv = Omit<Env, "HOLDOUT" \| "R2_TEMP_CRED_TOKEN" \| "R2_TEMP_CRED_PARENT_ACCESS_KEY_ID" \| "R2_BACKUP_PARENT_ACCESS_KEY_ID">;/);
   const attempt = sourceFile("improve-attempt.ts");
   assert.match(attempt, /import type \{ AttemptEnv \} from "\.\/env";/);
   // Both exported entry points take it. A helper that took Env would hand the

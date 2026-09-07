@@ -69,6 +69,12 @@ export interface Env {
   R2_TEMP_CRED_TOKEN?: string;
   R2_TEMP_CRED_PARENT_ACCESS_KEY_ID?: string;
   R2_ACCOUNT_ID?: string;
+  // The off-account backup mirror's parent (session 3): ACCESS KEY ID of an R2
+  // token that is object-read-only on capsid-media, from which /backup/credential
+  // mints one-hour reads of backups/json/. Separate from the holdout parent so
+  // neither credential family can read the other bucket. Omitted from AttemptEnv
+  // with the rest.
+  R2_BACKUP_PARENT_ACCESS_KEY_ID?: string;
 }
 
 // THE ATTEMPT-SIDE ENVIRONMENT: everything except the holdout bucket and the
@@ -82,7 +88,7 @@ export interface Env {
 // separate bucket (infrastructure) and the source guard (a scan), and all three
 // are needed: a type can be cast away, a scan can be evaded by an alias, and a
 // shared bucket defeats both.
-export type AttemptEnv = Omit<Env, "HOLDOUT" | "R2_TEMP_CRED_TOKEN" | "R2_TEMP_CRED_PARENT_ACCESS_KEY_ID">;
+export type AttemptEnv = Omit<Env, "HOLDOUT" | "R2_TEMP_CRED_TOKEN" | "R2_TEMP_CRED_PARENT_ACCESS_KEY_ID" | "R2_BACKUP_PARENT_ACCESS_KEY_ID">;
 
 export interface Props extends Record<string, unknown> {
   id: number;

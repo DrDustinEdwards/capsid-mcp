@@ -46,7 +46,11 @@ function die(message) {
 }
 
 if (!namespace) {
-  die(`no namespace given. Usage: IMPROVE_SCORE_SECRET=... node scripts/improve-derive-key.mjs <namespace>\n  namespaces: ${ROSTER.join(", ")}`);
+  die(
+    `no namespace given. Usage: IMPROVE_SCORE_SECRET=... node scripts/improve-derive-key.mjs <namespace>\n` +
+      `  namespaces: ${ROSTER.join(", ")}\n` +
+      `  or: IMPROVE_SCORE_SECRET=... node scripts/improve-derive-key.mjs --backup-credential`
+  );
 }
 if (!root) {
   die(
@@ -56,6 +60,19 @@ if (!root) {
       "  set it with `npx wrangler secret put IMPROVE_SCORE_SECRET`, and re-derive EVERY repo key from it."
   );
 }
+
+// The off-account backup mirror's key (session 3): the same root, a different
+// context string. Must match deriveBackupCredentialKey in src/improve-scorer.ts
+// exactly, version segment included; test/backup-credential.test.ts pins the
+// context string in both places.
+if (namespace === "--backup-credential") {
+  const backupKey = createHmac("sha256", root).update("capsid-backup-credential:v1").digest("hex");
+  console.error("improve-derive-key: derived the backup credential key. Set it as the repo secret BACKUP_CREDENTIAL_KEY");
+  console.error("improve-derive-key: on DrDustinEdwards/capsid-backups (the mirror) and DrDustinEdwards/capsid-mcp (the restore rehearsal).");
+  process.stdout.write(`${backupKey}\n`);
+  process.exit(0);
+}
+
 if (!ROSTER.includes(namespace)) {
   die(`'${namespace}' is not on the improve roster (${ROSTER.join(", ")}). Add it to ROSTER in src/improve-schema.ts first.`);
 }
