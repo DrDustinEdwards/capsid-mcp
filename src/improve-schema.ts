@@ -119,8 +119,14 @@ export interface HoldoutManifest {
 // ---- document paths ---------------------------------------------------------
 
 export const SCORES_PATH = "improve/scores.md";
+// THE NIGHTLY TASK DOCUMENT'S PREFIX, guarded by the ordinary write tool as of
+// 2026-09-07 (Opus 3.1 / 22.1, Grok MAJOR 8). `improve/run-<day>.md` is what the
+// `/improve` driver is told to execute, from a machine holding five repo clones
+// and local credentials, so a write-grant key that can rewrite it can steer that
+// session. runTaskPath() builds from it so the guard and the writer cannot drift.
+export const RUN_TASK_PREFIX = "improve/run-";
 export const RUN_PROMPT_PATH = "improve/prompts/run.md";
-export const runTaskPath = (day: string) => `improve/run-${day}.md`;
+export const runTaskPath = (day: string) => `${RUN_TASK_PREFIX}${day}.md`;
 export const archivePath = (runIdValue: string, attemptIdValue: string) =>
   `improve/archive/${runIdValue}/${attemptIdValue}.md`;
 export const skillPath = (skillId: string) => `improve/skills/${skillId}.md`;
@@ -140,6 +146,7 @@ export const PROPOSAL_PREFIX = "improve/proposals/";
 // are namespace-relative, matching a document's `path` in any namespace.
 export const PROMPTS_PREFIX = "improve/prompts/";
 export const SKILLS_PREFIX = "improve/skills/";
+
 
 // The workflow file every roster repo carries. One spelling, HERE rather than in
 // improve-scorer.ts where it used to live, because github.ts's ci_dispatch now

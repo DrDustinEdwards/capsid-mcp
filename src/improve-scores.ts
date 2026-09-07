@@ -24,7 +24,7 @@
 // this is that, scoped to the part the guarantee is about.
 
 import { sha256Hex } from "./auth";
-import { anchorKey } from "./improve-schema";
+import { anchorKey, PROMPTS_PREFIX, RUN_TASK_PREFIX, SCORES_PATH, SKILLS_PREFIX } from "./improve-schema";
 
 // ---- the shapes -------------------------------------------------------------
 
@@ -179,9 +179,22 @@ export async function improveWriteRefusal(
   allow: boolean
 ): Promise<string | null> {
   if (allow) return null;
-  const promptsPrefix = "improve/prompts/";
-  const skillsPrefix = "improve/skills/";
-  const scoresPath = "improve/scores.md";
+  // IMPORTED, NOT RE-DECLARED. These were four local literals until 2026-09-07,
+  // under a schema header stating that a string two modules must agree on is
+  // declared once. Both audits flagged the copy; the guard and the paths the
+  // loop actually writes now cannot drift apart.
+  const promptsPrefix = PROMPTS_PREFIX;
+  const skillsPrefix = SKILLS_PREFIX;
+  const scoresPath = SCORES_PATH;
+  // THE NIGHTLY TASK DOCUMENT (audit 2026-09-07). `improve/run-<day>.md` is read
+  // by the `/improve` driver and executed as its instruction list on a machine
+  // holding five repo clones, local git and a Capsid write grant. It was the one
+  // improve-steering path the ordinary write tool did not guard, which made it
+  // the cheapest way to steer that session: a plain write, no flag, an audit row
+  // indistinguishable from any other edit.
+  if (path.startsWith(RUN_TASK_PREFIX)) {
+    return `${namespace}/${path} is an improve loop task document. The /improve driver executes it, so a write here steers a session with local shell and repo access. Pass allow_improve_paths: true to write it anyway; the flag is audit-logged. The loop writes and signs these itself.`;
+  }
   if (path.startsWith(promptsPrefix)) {
     return `${namespace}/${path} is the improve loop's run-prompt surface and the ordinary write tool refuses it. It steers the nightly attempt generator, so a write here is only accepted with allow_improve_paths: true, which is audit-logged.`;
   }

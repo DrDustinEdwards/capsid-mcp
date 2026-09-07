@@ -70,6 +70,7 @@ import {
   type RunStatus,
 } from "./improve-schema";
 import { selectBase } from "./improve-select";
+import { signTaskBody, verifyTaskDoc } from "./improve-task";
 import { abstractSkill, candidateSkills, readSkillBody, recordSkill, recordSkillOutcome } from "./improve-skills";
 import {
   activeRun,
@@ -79,6 +80,7 @@ import {
   attemptsForRun,
   improveAudit,
   improveDocStatements,
+  IMPROVE_ACTOR,
   monthSpend,
   pauseNamespace,
   pausedReason,
@@ -1203,9 +1205,21 @@ function renderPauseTask(namespace: string, reason: string, drift: { attempts: n
   ].join("\n");
 }
 
+// EVERY TASK DOCUMENT THE OPENER WRITES IS SIGNED (audit 2026-09-07). The
+// `/improve` driver executes this document as its instruction list, so it has to
+// be able to tell a plan the Worker authored from one something else wrote. The
+// signature covers the rendered body; the frontmatter block carrying it is added
+// on top and is not itself signed. Signing happens BEFORE improveDocStatements,
+// which normalizes wide dashes: the rendered bodies contain none, and
+// normalization is idempotent, so the stored bytes still verify.
+//
+// An unconfigured Worker writes the document UNSIGNED rather than not at all, and
+// the driver then refuses it by name. That is the fail-closed direction: a
+// missing secret must not silently produce a plan that looks executable.
 async function writeTaskDoc(env: Env, namespace: string, now: Date, body: string): Promise<void> {
   const path = runTaskPath(chicagoDay(now));
   const prior = await priorDoc(env.DB, namespace, path);
+  const signed = env.IMPROVE_SCORE_SECRET ? await signTaskBody(env.IMPROVE_SCORE_SECRET, body) : body;
   await env.DB.batch(
     await improveDocStatements(env.DB, {
       namespace,
@@ -1215,9 +1229,33 @@ async function writeTaskDoc(env: Env, namespace: string, now: Date, body: string
       status: "ready",
       action: "improve-task",
       prior,
-      body,
+      body: signed,
     })
   );
+}
+
+// WHAT THE DRIVER ASKS BEFORE IT EXECUTES A PLAN. Returns the verification of one
+// task document: its signature against the Worker's derived key, and its last
+// audit actor against the loop's own actor. Both must hold. Read-only.
+export async function verifyTaskDocument(
+  env: Env,
+  namespace: string,
+  path: string
+): Promise<{ path: string; namespace: string; ok: boolean; actor: string | null; reason: string | null }> {
+  const row = await env.DB
+    .prepare("SELECT body FROM documents WHERE namespace = ?1 AND path = ?2")
+    .bind(namespace, path)
+    .first<{ body: string | null }>();
+  if (!row) {
+    return { path, namespace, ok: false, actor: null, reason: `no document at ${namespace}/${path}` };
+  }
+  const actorRow = await env.DB
+    .prepare("SELECT actor FROM audit_log WHERE namespace = ?1 AND path = ?2 ORDER BY id DESC LIMIT 1")
+    .bind(namespace, path)
+    .first<{ actor: string | null }>();
+  const actor = actorRow?.actor ?? null;
+  const verdict = await verifyTaskDoc(env.IMPROVE_SCORE_SECRET, row.body ?? "", actor, IMPROVE_ACTOR);
+  return { path, namespace, ok: verdict.ok, actor, reason: verdict.ok ? null : verdict.reason };
 }
 
 function renderSubscriptionTask(
@@ -1307,6 +1345,9 @@ export interface NamespaceStatus {
 export interface StatusReport {
   mode: ImproveMode;
   mode_note: string | null;
+  // Present only when the caller asked about one task document. The /improve
+  // driver passes the path it is about to execute and refuses on ok:false.
+  task_verification?: { path: string; namespace: string; ok: boolean; actor: string | null; reason: string | null };
   // Named as an estimate everywhere it appears. See the RATES comment in
   // src/improve-anthropic.ts for why a number here is not a bill.
   cost_note: string;
@@ -1315,7 +1356,7 @@ export interface StatusReport {
   namespaces: NamespaceStatus[];
 }
 
-export async function improveStatus(env: Env, only?: string): Promise<StatusReport> {
+export async function improveStatus(env: Env, only?: string, taskPath?: string): Promise<StatusReport> {
   const { mode, reason } = await readMode(env.APP_KV);
   const budget = await checkBudget(env, new Date());
   const namespaces = only ? [only] : [...ROSTER];
@@ -1353,9 +1394,15 @@ export async function improveStatus(env: Env, only?: string): Promise<StatusRepo
     });
   }
 
+  // The driver's gate. Verified against the namespace it was asked about, so a
+  // caller cannot ask about one namespace's doc while naming another.
+  const task_verification =
+    taskPath && only ? await verifyTaskDocument(env, only, taskPath) : undefined;
+
   return {
     mode,
     mode_note: reason,
+    ...(task_verification ? { task_verification } : {}),
     cost_note:
       "cost_usd is an ESTIMATE computed from token counts and published rates, including cache read and write multipliers. It is for sanity-checking, not accounting.",
     budget,

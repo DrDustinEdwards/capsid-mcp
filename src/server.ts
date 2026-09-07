@@ -1921,11 +1921,18 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
     {
       description:
         "The improve loop's current state: the mode, and per namespace the pause reason if any, whether its anchor block is pinned, the best known commit and score, the last run, and lifetime totals for attempts, keeps, reverts, estimated model cost and CI minutes. Read-only. cost_usd is an estimate computed from token counts and published rates, not a bill.",
-      inputSchema: { namespace: nsName.optional().describe("Limit to one namespace. Omit for the whole roster.") },
+      inputSchema: {
+        namespace: nsName.optional().describe("Limit to one namespace. Omit for the whole roster."),
+        task_path: docPath
+          .optional()
+          .describe(
+            "Verify one task document before executing it: pass its path (for example improve/run-2026-09-07.md) together with its namespace. The response gains task_verification { ok, actor, reason }, which checks the HMAC signature against the key this Worker derives AND that the last audit actor is the loop itself. The /improve driver must refuse a doc that does not verify."
+          ),
+      },
     },
-    async ({ namespace }) => {
+    async ({ namespace, task_path }) => {
       try {
-        return ok(await improveStatus(env, namespace));
+        return ok(await improveStatus(env, namespace, task_path));
       } catch (err) {
         return fail(err instanceof Error ? err.message : String(err));
       }
