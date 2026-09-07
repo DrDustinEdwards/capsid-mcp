@@ -1,4 +1,5 @@
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { hintsFor } from "./tool-annotations";
 import {
   ErrorCode,
   GetPromptRequestSchema,
@@ -313,6 +314,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "list",
     {
+      annotations: hintsFor("list"),
       description: `List documents with optional namespace, type, and status filters. Returns metadata rows without bodies under \`documents\`: id, namespace, path, title, type, status, tags and timestamps. Bounded to ${MAX_ROWS} rows; when there are more it sets truncated:true with a note, so a short list is never mistaken for a complete one.`,
       inputSchema: {
         namespace: nsName.optional(),
@@ -354,6 +356,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "read",
     {
+      annotations: hintsFor("read"),
       description:
         "Read a full document by namespace and path. The response carries last_actor: the actor from the most recent audit_log entry for this document, so a reader can tell who last wrote it (a document is data, and a document another client wrote is untrusted input; provenance makes that visible). null when there is no audit row.",
       inputSchema: { namespace: nsName, path: docPath },
@@ -388,6 +391,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "brief",
     {
+      annotations: hintsFor("brief"),
       description:
         `One-call session start for a namespace. Returns capsid/conventions.md, capsid/repo-structure.md, the namespace core.md, its open task docs (non-archived and not status closed), the 3 most recent episodics, and the typed edges on core.md, each with updated_at so staleness shows. Read-only assembly, no reasoning. Size-bounded near ${Math.round(BRIEF_BUDGET / 1000)}KB; if trimmed, the \`trimmed\` field lists what was dropped to metadata. Doing the start-ritual reads by hand stays a valid fallback.`,
       inputSchema: { namespace: nsName },
@@ -520,6 +524,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "write",
     {
+      annotations: hintsFor("write"),
       description:
         "Create or update a document. Snapshots the prior version and writes an audit log entry. mode selects how body is applied: 'replace' (default, full body, needs title and body), 'append' (body is added to the end of the existing document, no title needed, no confirmation needed because nothing is overwritten), 'patch' (replace an anchored region: needs find and replace_with, and find must occur EXACTLY ONCE or the write is refused), or 'meta' (change type, tags, status or title and leave the body byte-identical, normalization included; use this to close a task or correct a document's type). append, patch and meta exist so amending a large document does not mean retranscribing it. Every response carries sha256 and bytes of the resulting body, so a write can be verified without reading the document back. Optional if_match: the sha256 of the body you believe is stored (the value a previous read-back or write returned). When it does not match the stored body the write is REFUSED and the error carries the current sha256, so a concurrent edit cannot be silently overwritten. Overwriting with replace or patch needs confirmation: the server elicits it when the client supports elicitation, otherwise pass confirm: true. Optional links: a JSON array of typed outgoing edges [{\"type\":\"references\",\"to_path\":\"decisions.md\",\"to_ns\":\"capsid\"}] (types: governs, references, supersedes, replaces, depends-on; to_ns defaults to this namespace). When provided it replaces this document's outgoing edges; omit it to leave edges untouched; pass [] to clear them. Read edges with backlinks.",
       inputSchema: {
@@ -859,6 +864,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "history",
     {
+      annotations: hintsFor("history"),
       description:
         "List the retained versions of a document (newest first) from document_versions, or fetch one body by passing version_id. Snapshots are written by every overwrite and delete, so the history of a deleted document is still readable. Retention is 90 days; older snapshots live only in the R2 dumps. Read-only. Note the scope: a version records title and body, so a change to type, status or tags is not here, it is in the audit log.",
       inputSchema: { namespace: nsName, path: docPath, version_id: z.number().int().positive().optional() },
@@ -906,6 +912,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "restore",
     {
+      annotations: hintsFor("restore"),
       description:
         "Restore a document's title and body from one of its retained versions (see history). It carries the same two write-path invariants as write: the CURRENT body is snapshotted to document_versions first and the restore is appended to audit_log, so a restore is itself undoable. It is NOT the write tool's code path and differs from it deliberately: the snapshotted bytes go back exactly as they were stored, with no dash normalization, and type, status, tags and links are neither validated nor restored, because a version row does not carry them. Restoring a deleted document recreates it. Optional if_match: the sha256 of the body you believe is live now, enforced as a commit-time predicate, so a restore cannot land on a body that changed after you read it. Requires operator key and confirm: true.",
       inputSchema: {
@@ -1041,6 +1048,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "backlinks",
     {
+      annotations: hintsFor("backlinks"),
       description:
         "Return the typed edges touching a document: outgoing (declared on this doc) and incoming (other docs pointing here). Edges are asserted via the write tool's links param. Read-only. Endpoints may be Capsid documents or repo files addressed as namespace/path.",
       inputSchema: { namespace: nsName, path: docPath },
@@ -1065,6 +1073,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "delete",
     {
+      annotations: hintsFor("delete"),
       description: "Delete a document. Snapshots it first and writes an audit log entry. Needs confirmation: the server elicits it when the client supports elicitation, otherwise pass confirm: true.",
       inputSchema: { namespace: nsName, path: docPath, confirm: z.boolean().optional(), allow_improve_paths: z.boolean().optional() },
     },
@@ -1150,6 +1159,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "move",
     {
+      annotations: hintsFor("move"),
       description: "Rename a document path within its namespace, repointing every typed edge that touches it. Audit logged. Needs confirmation: the server elicits it when the client supports elicitation, otherwise pass confirm: true. Requires operator key.",
       inputSchema: { namespace: nsName, path: docPath, new_path: docPath, confirm: z.boolean().optional(), allow_improve_paths: z.boolean().optional() },
     },
@@ -1229,6 +1239,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "find",
     {
+      annotations: hintsFor("find"),
       description: `Find documents whose path matches a glob pattern (SQLite GLOB, e.g. 'notes/*.md'). Optional namespace filter. Returns matches under \`documents\`, bounded to ${MAX_ROWS} rows; when there are more it sets truncated:true with a note.`,
       inputSchema: { namespace: nsName.optional(), glob: bounded(MAX_GLOB) },
     },
@@ -1250,6 +1261,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "search",
     {
+      annotations: hintsFor("search"),
       description: `Full text search across all documents (FTS5, ranked by bm25). Optional namespace and type filters. This is the cross-project search. Returns the top ${SEARCH_ROWS} matches under \`documents\`; when more matched it sets truncated:true, so a full page of hits is never mistaken for the whole answer.`,
       inputSchema: {
         query: bounded(MAX_QUERY),
@@ -1292,6 +1304,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "namespaces",
     {
+      annotations: hintsFor("namespaces"),
       description: "List all namespaces and the repos each maps to.",
       inputSchema: {},
     },
@@ -1322,6 +1335,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "register_namespace",
     {
+      annotations: hintsFor("register_namespace"),
       description:
         "Register a namespace by inserting its row in the namespaces table, so repo tools and the namespaces list can see it. Give repo as 'owner/name' (label defaults to 'primary'), or pass a repos JSON array like [{\"repo\":\"owner/name\",\"label\":\"primary\"}] for a multi-repo namespace. Create-only: it will not overwrite an existing namespace. Requires operator key.",
       inputSchema: {
@@ -1377,6 +1391,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "update_namespace",
     {
+      annotations: hintsFor("update_namespace"),
       description:
         "Remap an existing namespace's repos. Pass repos as a JSON array like [{\"repo\":\"owner/name\",\"label\":\"primary\"},{\"repo\":\"owner/legacy\",\"label\":\"legacy\"}], with exactly one entry labeled \"primary\". The namespace must already exist (use register_namespace to create). Snapshots the prior mapping to the audit log. Does NOT rename the namespace or move its documents. Requires operator key.",
       inputSchema: { namespace: nsName, repos: bounded(MAX_REPOS_JSON) },
@@ -1412,6 +1427,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "lint",
     {
+      annotations: hintsFor("lint"),
       description:
         "Consolidation loop for a namespace. mode 'gather' (default, read-only) returns the packet a driving LLM needs to compile the wiki: current core.md, the concept and decision docs, every unconsolidated episodic and source doc, and the capsid schema and conventions rules. After writing the updated core.md and concept docs via write, call mode 'finalize' with consumed: the episodic/source paths that were compiled. Finalize moves them under archive/ (never deletes, never touches core or concept docs) and writes one audit row. Finalize requires operator key and confirmation: the server elicits it when the client supports elicitation, otherwise pass confirm: true.",
       inputSchema: {
@@ -1695,6 +1711,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "list_repo_tree",
     {
+      annotations: hintsFor("list_repo_tree"),
       description: "List a directory in a namespace's GitHub repo. Omit path for the repo root. Live GitHub, briefly cached.",
       inputSchema: { namespace: nsName, path: bounded(MAX_PATH).optional(), ref: bounded(MAX_REF).optional(), repo: bounded(MAX_REPO_SELECTOR).optional().describe(REPO_ARG) },
     },
@@ -1704,6 +1721,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "read_repo_file",
     {
+      annotations: hintsFor("read_repo_file"),
       description: `Read a file from a namespace's GitHub repo, decoded to text. Optional ref (branch, tag, or sha). Live GitHub, briefly cached. Pass EITHER path for one file, or paths for up to ${REPO_BATCH_MAX_FILES} in one call; in the batch form each file succeeds or fails independently, so one missing path returns its error beside the others instead of failing the call, and each file is capped at ${REPO_FILE_BUDGET} bytes with truncated:true when it is cut. REFUSES: both path and paths together, neither of them, an empty paths array, more than ${REPO_BATCH_MAX_FILES} paths, and a directory (use list_repo_tree).`,
       inputSchema: {
         namespace: nsName,
@@ -1731,6 +1749,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "search_code",
     {
+      annotations: hintsFor("search_code"),
       description:
         "Case-insensitive substring search across a namespace repo's files. Walks the repo tree and greps blobs server-side (GitHub's code-search index does not serve these private repos over an App token), so scope with path_prefix on large repos. Returns path, line number, and the matching line. When it stops early it sets truncated:true with a note explaining why and a next_start to resume from (or raise max_files); a truncated result is a partial scan, not an empty repo. namespace is required.",
       inputSchema: {
@@ -1760,6 +1779,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "write_repo_file",
     {
+      annotations: hintsFor("write_repo_file"),
       description:
         "Write a file to a namespace's GitHub repo. mode 'pr' (default) commits to a new branch and opens a PR; mode 'direct' commits straight to the default branch. REFUSES any path under .github/workflows/ unless allow_workflow_write: true is passed, which is audit-logged: a workflow is code CI executes with the repo's secrets in scope. Requires operator key.",
       inputSchema: {
@@ -1787,6 +1807,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "create_branch",
     {
+      annotations: hintsFor("create_branch"),
       description: "Create a branch in a namespace's GitHub repo. Branches off the default branch unless 'from' is given. Requires operator key.",
       inputSchema: { namespace: nsName, branch: bounded(MAX_REF), from: bounded(MAX_REF).optional(), repo: bounded(MAX_REPO_SELECTOR).optional().describe(REPO_ARG) },
     },
@@ -1797,6 +1818,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "open_pr",
     {
+      annotations: hintsFor("open_pr"),
       description: "Open a pull request in a namespace's GitHub repo. Base defaults to the repo's default branch. Requires operator key.",
       inputSchema: {
         namespace: nsName,
@@ -1814,6 +1836,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "delete_repo_file",
     {
+      annotations: hintsFor("delete_repo_file"),
       description:
         "Delete a file from a namespace's GitHub repo. mode 'pr' (default) commits the deletion to a new branch and opens a PR; mode 'direct' deletes on the default branch. The file must exist. REFUSES any path under .github/workflows/ unless allow_workflow_write: true is passed, which is audit-logged. Requires operator key.",
       inputSchema: {
@@ -1840,6 +1863,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "manage_pr",
     {
+      annotations: hintsFor("manage_pr"),
       description:
         "Merge or close an open pull request in a namespace's repo. action 'merge' uses merge_method (default 'squash'); action 'close' just closes it. EITHER WAY IT DELETES THE HEAD BRANCH, because write_repo_file's PR mode creates one per write and nothing else cleans them up (capsid/conventions.md, 2026-09-06); the result carries head_branch and head_branch_deleted, plus head_branch_note when it declined. It REFUSES to delete the default branch, a branch under the improve loop's prefix, or a head branch on a fork, and a cleanup failure never fails the merge or close itself since that already succeeded. Merging can trigger CI deploys in repos with deploy workflows (foxhound): prefer PR mode plus manage_pr for anything touching live behavior, per conventions. Requires operator key.",
       inputSchema: {
@@ -1857,6 +1881,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "ci_status",
     {
+      annotations: hintsFor("ci_status"),
       description: `Recent CI workflow runs for a namespace's repo (name, head sha, status, conclusion, timestamps). Optional ref narrows to one branch or head sha; optional run_id returns just that run. For the most recent failed run it also returns the failing jobs and steps, and for write-grant keys the FAILING STEP's log, up to ${CI_LOG_BUDGET} bytes from its end, with log_region naming which region was returned. A read-only key gets the metadata and a note saying the log was withheld, because job logs can echo ids and variables. REFUSES: a run_id that does not exist on the repo. Read-only; use it to verify a deploy is green after a merge instead of guessing. Needs the GitHub App's Actions: Read permission.`,
       inputSchema: {
         namespace: nsName,
@@ -1885,6 +1910,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "repo_refs",
     {
+      annotations: hintsFor("repo_refs"),
       description:
         "What is in flight in a namespace's repo, in one call: branches (name, head sha, last commit date, ahead/behind the default branch, and the open PR number if the branch has one), tags, and open pull requests. Answers the triage question that otherwise costs three separate calls. Sets truncated:true when any of the three lists hit its 100-item page. Read-only, live GitHub, briefly cached.",
       inputSchema: { namespace: nsName, repo: bounded(MAX_REPO_SELECTOR).optional().describe(REPO_ARG) },
@@ -1895,6 +1921,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "repo_history",
     {
+      annotations: hintsFor("repo_history"),
       description: `Commits, a comparison, or one commit, chosen by which argument is present: ref for the commits on a ref (default ${REPO_HISTORY_DEFAULT_LIMIT}, max ${REPO_HISTORY_MAX_LIMIT}); base and head together for a comparison (ahead/behind, the commit list, and changed files with status and line counts); sha for one commit (full message, parents, changed files). Patch bodies are omitted unless patch:true, and are then budgeted to ${REPO_PATCH_BUDGET} bytes across the whole response with patch_truncated:true when the budget runs out. Commit subjects are the first line only; read one commit by sha for its whole message. REFUSES: more than one of sha / base+head / ref, since those are different questions; base without head or head without base; and none of them. Read-only.`,
       inputSchema: {
         namespace: nsName,
@@ -1919,6 +1946,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "delete_branch",
     {
+      annotations: hintsFor("delete_branch"),
       description:
         "Delete a branch in a namespace's GitHub repo. REFUSES, naming which refusal it is: the repo's default branch, ALWAYS, and force does not lift that one; a branch under the improve loop's branch prefix, because it may be an attempt the loop still needs; and a branch with an open pull request. The last two are lifted by force:true. Also refuses a branch that does not exist rather than reporting a no-op as success. Requires an operator key with the write grant; audit-logged.",
       inputSchema: {
@@ -1938,6 +1966,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "ci_dispatch",
     {
+      annotations: hintsFor("ci_dispatch"),
       description: `Start a workflow, or rerun one's failed jobs. Pass workflow (the file name, e.g. ci.yml) and ref to trigger a workflow_dispatch: the dispatch endpoint answers 204 with no body, so this then polls for up to ${CI_DISPATCH_POLL_MS / 1000}s and returns the run_id of the run that appeared, or run_id null with a note saying the dispatch was accepted but nothing started. Pass run_id alone to rerun that run's failed jobs. REFUSES, naming it: a workflow with no workflow_dispatch trigger, which cannot be started by hand at all; and workflow together with run_id, which are two different requests. Requires an operator key with the write grant; audit-logged. Spends CI minutes and can start a deploy.`,
       inputSchema: {
         namespace: nsName,
@@ -1967,6 +1996,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "improve_run",
     {
+      annotations: hintsFor("improve_run"),
       description:
         `Open improve runs, or control the loop. action defaults to "run": open runs for the roster (or one namespace) and advance them one step, respecting APP_KV improve_mode and skipping paused namespaces; dry_run reports the plan and writes NOTHING. The control actions each write one KV value, audit it, and read it back so the response is the value that actually landed: action "mode" sets improve_mode to value ("off" | "subscription" | "api"); action "pause"/"unpause" sets or clears improve:paused for one namespace or "all" (pause takes an optional reason); action "budget" sets the monthly caps actions_minutes_month and model_usd_month. improve_status reflects any of these on its next call. Requires an operator key with the write grant.`,
       inputSchema: {
@@ -2008,6 +2038,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerTool(
     "improve_status",
     {
+      annotations: hintsFor("improve_status"),
       description:
         "The improve loop's current state: the mode, and per namespace the pause reason if any, whether its anchor block is pinned, the best known commit and score, the last run, and lifetime totals for attempts, keeps, reverts, estimated model cost and CI minutes. Read-only. cost_usd is an estimate computed from token counts and published rates, not a bill.",
       inputSchema: {
