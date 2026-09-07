@@ -9,7 +9,7 @@
 // sections and they are governed differently:
 //
 //   ## Anchors    the loop may never edit these and may never regress them.
-//                 Checksummed. sha256 pinned in KV improve:anchor:<namespace>.
+//                 Checksummed. sha256 pinned in KV under anchorKey(namespace).
 //                 Verified before every run; a mismatch REFUSES the run.
 //   ## Secondary  what the loop optimises. A human may add or reweight a metric
 //                 here freely, and doing so does NOT break the anchor pin.
@@ -24,6 +24,7 @@
 // this is that, scoped to the part the guarantee is about.
 
 import { sha256Hex } from "./auth";
+import { anchorKey } from "./improve-schema";
 
 // ---- the shapes -------------------------------------------------------------
 
@@ -222,7 +223,7 @@ export async function verifyAnchors(
   const current = await anchorChecksum(doc);
   let pinned: string | null = null;
   try {
-    pinned = await kv.get(`improve:anchor:${namespace}`);
+    pinned = await kv.get(anchorKey(namespace));
   } catch (err) {
     return {
       ok: false,
@@ -244,7 +245,7 @@ export async function verifyAnchors(
       ok: false,
       refusal:
         `no anchor pin for ${namespace}. A namespace joins the loop when a human pins its anchor block, never by the loop pinning what it happens to find. ` +
-        `Set KV improve:anchor:${namespace} to ${current} once the Anchors section of ${namespace}/improve/scores.md reads the way you want it to.`,
+        `Set KV ${anchorKey(namespace)} to ${current} once the Anchors section of ${namespace}/improve/scores.md reads the way you want it to.`,
       current,
       pinned: null,
     };
@@ -456,7 +457,7 @@ export function seedScoresDoc(namespace: string): string {
     "## Anchors",
     "",
     "The floor. The loop may not edit this section and may not regress these values.",
-    "Its sha256 is pinned in KV improve:anchor:" + namespace + " and checked before every",
+    "Its sha256 is pinned in KV " + anchorKey(namespace) + " and checked before every",
     "run; a mismatch refuses the run and writes a task doc. An anchor CI did not",
     "report counts as failed, never as skipped.",
     "",

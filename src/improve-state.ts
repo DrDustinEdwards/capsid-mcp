@@ -363,16 +363,6 @@ export async function priorDoc(
     .first<{ id: number; title: string | null; body: string | null }>();
 }
 
-// Write one improve document on its own. The batched form above is for the cases
-// where the document and a row change must land together.
-export async function writeImproveDoc(
-  env: Pick<Env, "DB">,
-  doc: { namespace: string; path: string; title: string; body: string; type: string; status?: string; action: string }
-): Promise<void> {
-  const prior = await priorDoc(env.DB, doc.namespace, doc.path);
-  await env.DB.batch(await improveDocStatements(env.DB, { ...doc, prior }));
-}
-
 // An audit row for something that is not a document write: a run opening, a
 // namespace pausing, a scorer dispatch. Same actor, same table, so one query
 // answers "what did the loop do last night".

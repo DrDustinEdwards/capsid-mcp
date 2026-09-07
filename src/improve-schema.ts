@@ -119,7 +119,6 @@ export interface HoldoutManifest {
 // ---- document paths ---------------------------------------------------------
 
 export const SCORES_PATH = "improve/scores.md";
-export const README_PATH = "improve/README.md";
 export const RUN_PROMPT_PATH = "improve/prompts/run.md";
 export const runTaskPath = (day: string) => `improve/run-${day}.md`;
 export const archivePath = (runIdValue: string, attemptIdValue: string) =>

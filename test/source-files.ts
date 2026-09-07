@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 
 // THE SOURCE WALK, ONCE (quality audit 1.1).
 //
@@ -34,11 +34,30 @@ export interface SourceFile {
 // edit; it only catches a walk that broke.
 const MIN_SOURCE_FILES = 10;
 
+// RECURSIVE, so a tool moved into a subdirectory cannot hide from the guards
+// that read through here (audit MAJOR 18: the walk that only read the top level
+// would have passed over src/tools/documents.ts, blinding the operator-gate, tool
+// count and bounded-argument checks). The name is the path relative to the root
+// with forward slashes, so a top-level file keeps its basename (env.ts) and a
+// nested one is addressable (tools/documents.ts). Exported so the recursion
+// itself is testable against a fixture tree without touching src/.
+export function collectSourceFiles(root: string): SourceFile[] {
+  const out: SourceFile[] = [];
+  const walk = (dir: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.name.endsWith(".ts")) {
+        out.push({ name: full.slice(root.length + 1).split(sep).join("/"), text: readFileSync(full, "utf8") });
+      }
+    }
+  };
+  walk(root);
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 export function sourceFiles(): SourceFile[] {
-  const files = readdirSync(SRC_DIR)
-    .filter((f) => f.endsWith(".ts"))
-    .sort()
-    .map((name) => ({ name, text: readFileSync(join(SRC_DIR, name), "utf8") }));
+  const files = collectSourceFiles(SRC_DIR);
   if (files.length < MIN_SOURCE_FILES) {
     throw new Error(
       `the src/ walk found ${files.length} files, fewer than the ${MIN_SOURCE_FILES} floor. ` +
