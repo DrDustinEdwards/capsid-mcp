@@ -18,6 +18,7 @@
 import type { AttemptEnv } from "./env";
 import { callModelStreaming } from "./improve-anthropic";
 import { createBranchAt, writeRepoFile } from "./github";
+import { isImproveBranch } from "./improve-schema";
 
 // The change the model is constrained to produce. Whole files rather than a
 // patch format, deliberately: a unified diff has to apply, and a diff that fails
@@ -177,6 +178,23 @@ export async function pushAttempt(
   env: AttemptEnv,
   input: { namespace: string; branch: string; baseSha: string; summary: string; files: Array<{ path: string; content: string }> }
 ): Promise<PushResult> {
+  // EVERY WRITE GOES TO THE ATTEMPT BRANCH, NAMED, ALWAYS (audit 2026-09-07).
+  //
+  // writeRepoFile's "direct" mode falls back to the repo's DEFAULT branch when no
+  // branch is passed, so the loop's safety here rests entirely on the branch
+  // argument being present. That is a property worth asserting rather than
+  // assuming: on the capsid namespace the default branch is this server's own
+  // master, and a dropped branch would be a production deploy rather than a bad
+  // attempt. Checked once, here, before any network call.
+  //
+  // NOT a second write path. capsid/repo-structure.md and this module's own
+  // header both rule that a second way to write a repo is where the invariants
+  // get lost, so the fix is a precondition on the one path, not a new one.
+  if (!input.branch || !isImproveBranch(input.branch)) {
+    throw new Error(
+      `pushAttempt refuses: '${input.branch}' is not an improve-loop branch. An attempt is only ever committed to its own branch, never to a repo's default branch.`
+    );
+  }
   await createBranchAt(env, input.namespace, input.branch, input.baseSha);
 
   let headSha = input.baseSha;

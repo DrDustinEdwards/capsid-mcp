@@ -793,22 +793,37 @@ async function commitOnBranch<R>(
   assertRepoArg("path", path);
   if (branch) assertRepoArg("branch", branch);
   const { owner, repo } = await resolveRepo(env, namespace, repoSelector);
-  // THE SERVER'S OWN REPO CANNOT BE WRITTEN DIRECTLY (audit 2026-09-06, Fable
+  // THE SERVER'S OWN DEFAULT BRANCH CANNOT BE WRITTEN (audit 2026-09-06, Fable
   // MAJOR 8, the self-inflicted rug pull): CI deploys this Worker on every push
-  // to its default branch, so a direct commit here IS a production deploy behind
-  // nothing but a write-grant key. Refused before the default-branch lookup so it
-  // costs no network. PR mode stays open, but a pr-mode call whose explicit work
-  // branch IS the default branch is a direct write with extra steps, and that is
-  // refused below once the default branch is known.
-  if (`${owner}/${repo}` === SELF_REPO && mode === "direct") {
+  // to its default branch, so a commit landing there IS a production deploy
+  // behind nothing but a write-grant key.
+  //
+  // SCOPED TO THE DEFAULT BRANCH, 2026-09-07. It used to refuse mode "direct"
+  // against this repo outright, regardless of which branch was named, and that
+  // was too wide in a way nothing caught: the improve loop pushes every attempt
+  // with writeRepoFile(..., "direct", <attempt branch>), so on the capsid
+  // namespace, which maps to this very repo, EVERY attempt threw on its first
+  // file. capsid sat on the roster with a pinned anchor and a 30-case holdout
+  // while api mode could not complete a single attempt on it (Opus MAJOR 5.3;
+  // Grok records the same collision under its section 5 CLEAN list).
+  //
+  // The deploy is what the refusal is about, and only the default branch
+  // deploys. A commit to `improve/<attempt-id>` is not a deploy and never was.
+  // What is refused is now exactly that: any write whose target branch is this
+  // repo's default branch, in either mode, which also subsumes the old pr-mode
+  // check below it.
+  // The cheap half, kept from the 2026-09-06 fix: direct mode with NO branch
+  // always resolves to the default branch, so it can be refused without knowing
+  // what that branch is called, and the refusal costs no GitHub round trip.
+  if (`${owner}/${repo}` === SELF_REPO && mode === "direct" && !branch) {
     throw new Error(
-      `refuses: ${SELF_REPO} is this server's own repo, and a direct commit to it redeploys the Worker. Use mode "pr" and merge through manage_pr.`
+      `refuses: a direct commit with no branch lands on the default branch of this server's own repo (${SELF_REPO}) and redeploys the Worker. Name a work branch, or use mode "pr" and merge through manage_pr.`
     );
   }
   const defaultBranch = await getDefaultBranch(env, owner, repo);
   if (`${owner}/${repo}` === SELF_REPO && branch === defaultBranch) {
     throw new Error(
-      `refuses: ${branch} is the default branch of this server's own repo (${SELF_REPO}); committing to it redeploys the Worker. Use mode "pr" with a work branch and merge through manage_pr.`
+      `refuses: ${defaultBranch} is the default branch of this server's own repo (${SELF_REPO}), and a commit landing there redeploys the Worker. Use mode "pr" with a work branch and merge through manage_pr, or name a non-default branch.`
     );
   }
   const target =

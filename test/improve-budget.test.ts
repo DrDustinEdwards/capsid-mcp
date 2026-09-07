@@ -27,7 +27,7 @@ async function harness(opts: { runs?: Array<Record<string, unknown>>; budget?: s
   const pin = await anchorChecksum(parseScoresDoc("capsid", SCORES));
   const d1 = fakeD1({
     documents: [{ namespace: "capsid", path: "improve/scores.md", title: "scores", body: SCORES, type: "reference" }],
-    namespaces: [{ namespace: "capsid", repos: JSON.stringify([{ repo: "owner/capsid-mcp", label: "primary" }]) }],
+    namespaces: [{ namespace: "capsid", repos: JSON.stringify([{ repo: "DrDustinEdwards/capsid-mcp", label: "primary" }]) }],
     improveRuns: opts.runs ?? [],
   });
   const kv = fakeKv({

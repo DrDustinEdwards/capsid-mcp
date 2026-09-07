@@ -74,7 +74,7 @@ async function harness(opts: {
       { namespace: "capsid", path: "improve/scores.md", title: "scores", body: SCORES, type: "reference" },
       ...(opts.documents ?? []),
     ],
-    namespaces: [{ namespace: "capsid", repos: JSON.stringify([{ repo: "owner/capsid-mcp", label: "primary" }]) }],
+    namespaces: [{ namespace: "capsid", repos: JSON.stringify([{ repo: "DrDustinEdwards/capsid-mcp", label: "primary" }]) }],
     improveRuns: opts.improveRuns,
     improveAttempts: opts.improveAttempts,
     improveScores: opts.improveScores,
@@ -261,8 +261,8 @@ test("A DRY RUN WRITES NOTHING, though it does READ to resolve the base", async 
   // no MUTATING call of any kind, rather than no call.
   await withFetch(
     {
-      "GET /repos/owner/capsid-mcp": { body: { default_branch: "main" } },
-      "GET /repos/owner/capsid-mcp/git/ref/heads/main": { body: { object: { sha: "d1efa17defau1tbranchsha0000000000000000" } } },
+      "GET /repos/DrDustinEdwards/capsid-mcp": { body: { default_branch: "main" } },
+      "GET /repos/DrDustinEdwards/capsid-mcp/git/ref/heads/main": { body: { object: { sha: "d1efa17defau1tbranchsha0000000000000000" } } },
     },
     async (calls) => {
       const { d1, kv, env } = await harness({ kv: { improve_mode: "api" } });
