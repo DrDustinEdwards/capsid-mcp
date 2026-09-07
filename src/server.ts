@@ -914,9 +914,10 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
         version_id: z.number().int().positive(),
         confirm: z.boolean().optional(),
         if_match: bounded(MAX_SHA).optional(),
+        allow_improve_paths: z.boolean().optional(),
       },
     },
-    async ({ namespace, path, version_id, confirm, if_match }) => {
+    async ({ namespace, path, version_id, confirm, if_match, allow_improve_paths }) => {
       if (!mayWrite) return fail(DENIED);
       const nsError = await requireRegisteredNamespace(db, namespace);
       if (nsError) return fail(nsError);
@@ -929,6 +930,20 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
         .prepare("SELECT id, title, body FROM documents WHERE namespace = ?1 AND path = ?2")
         .bind(namespace, path)
         .first<{ id: number; title: string | null; body: string | null }>();
+      // THE IMPROVE CONTROL-SURFACE GUARD, on restore too (audit 2026-09-07,
+      // Opus MAJOR 5.4). The guard shipped on `write` alone, so restoring
+      // improve/prompts/run.md to an earlier version installed an older system
+      // prompt for the nightly attempt generator with no flag and no marked audit
+      // row. Same call shape as write: what is stored now, against what would be
+      // stored.
+      const restoreImproveRefusal = await improveWriteRefusal(
+        namespace,
+        path,
+        prior?.body ?? null,
+        version.body ?? "",
+        allow_improve_paths === true
+      );
+      if (restoreImproveRefusal) return fail(restoreImproveRefusal);
       // The same protocol the write tool runs, with restore's wordings. On the
       // recreate path the guard is the ABSENCE of a row, because the snapshot
       // statement is only added when the pre-read saw one, so a racing create
@@ -1051,9 +1066,9 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
     "delete",
     {
       description: "Delete a document. Snapshots it first and writes an audit log entry. Needs confirmation: the server elicits it when the client supports elicitation, otherwise pass confirm: true.",
-      inputSchema: { namespace: nsName, path: docPath, confirm: z.boolean().optional() },
+      inputSchema: { namespace: nsName, path: docPath, confirm: z.boolean().optional(), allow_improve_paths: z.boolean().optional() },
     },
-    async ({ namespace, path, confirm }) => {
+    async ({ namespace, path, confirm, allow_improve_paths }) => {
       if (!mayWrite) return fail(DENIED);
       const nsError = await requireRegisteredNamespace(db, namespace);
       if (nsError) return fail(nsError);
@@ -1062,6 +1077,21 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
         .bind(namespace, path)
         .first<{ id: number; title: string | null; body: string | null }>();
       if (!prior) return fail(`not found: ${namespace}/${path}`);
+      // THE IMPROVE CONTROL-SURFACE GUARD, on delete too (audit 2026-09-07, Opus
+      // MAJOR 5.4). Removing improve/prompts/run.md drops the loop back to the
+      // hardcoded default prompt and removing a skill retires it, so a delete is
+      // a steering change even though it installs nothing. The path is being
+      // EMPTIED, which is what the "" passes as the resulting body: for the two
+      // prefixes that is a prefix match, and for scores.md it is an anchor block
+      // going from something to nothing.
+      const deleteImproveRefusal = await improveWriteRefusal(
+        namespace,
+        path,
+        prior.body,
+        "",
+        allow_improve_paths === true
+      );
+      if (deleteImproveRefusal) return fail(deleteImproveRefusal);
       const deleteRefusal = await requireConfirmation(server, confirm, {
         prompt: `Delete ${namespace}/${path}? It will be snapshotted to document_versions first, so it can be recovered.`,
         declined: `delete of ${namespace}/${path} declined`,
@@ -1121,9 +1151,9 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
     "move",
     {
       description: "Rename a document path within its namespace, repointing every typed edge that touches it. Audit logged. Needs confirmation: the server elicits it when the client supports elicitation, otherwise pass confirm: true. Requires operator key.",
-      inputSchema: { namespace: nsName, path: docPath, new_path: docPath, confirm: z.boolean().optional() },
+      inputSchema: { namespace: nsName, path: docPath, new_path: docPath, confirm: z.boolean().optional(), allow_improve_paths: z.boolean().optional() },
     },
-    async ({ namespace, path, new_path, confirm }) => {
+    async ({ namespace, path, new_path, confirm, allow_improve_paths }) => {
       if (!mayWrite) return fail(DENIED);
       const nsError = await requireRegisteredNamespace(db, namespace);
       if (nsError) return fail(nsError);
@@ -1138,6 +1168,25 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
         .bind(namespace, path)
         .first<{ ok: number }>();
       if (!exists) return fail(`not found: ${namespace}/${path}`);
+      // THE IMPROVE CONTROL-SURFACE GUARD, BOTH ENDS (audit 2026-09-07, Opus
+      // MAJOR 5.4). A move touches two paths and either one can steer the loop:
+      // moving a document INTO improve/skills/ installs a skill that other
+      // namespaces' runs re-inject, and moving run.md OUT of improve/prompts/
+      // drops the attempt generator back to its hardcoded default. Checked as
+      // what each path ends up holding: the source is emptied, the destination is
+      // filled with the moved body.
+      const moved = await db
+        .prepare("SELECT body FROM documents WHERE namespace = ?1 AND path = ?2")
+        .bind(namespace, path)
+        .first<{ body: string | null }>();
+      const movedBody = moved?.body ?? "";
+      for (const [checkPath, before, after] of [
+        [path, movedBody, ""],
+        [new_path, null, movedBody],
+      ] as Array<[string, string | null, string]>) {
+        const refusal = await improveWriteRefusal(namespace, checkPath, before, after, allow_improve_paths === true);
+        if (refusal) return fail(refusal);
+      }
       // move JOINS the confirmation as of 2026-08-17 (audit 2, F25 ruling). It is
       // destructive-class and had none at all: it renames a document and repoints
       // every edge that touches it, and unlike delete it leaves no snapshot of the
@@ -1525,6 +1574,20 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
         }
       }
       if (problems.length > 0) return fail(`finalize aborted, nothing archived:\n${problems.join("\n")}`);
+      // THE IMPROVE CONTROL-SURFACE GUARD, on finalize too (audit 2026-09-07,
+      // Opus MAJOR 5.4). finalize is type-gated to episodic and source documents,
+      // and improve documents are task, prompt and reference, so this looks
+      // unreachable. It is not: a document written to an improve path WITH the
+      // opt-in flag can carry type 'source', and finalize would then archive the
+      // run prompt out from under the loop. NO OPT-IN HERE, deliberately:
+      // archiving the loop's control surface is never the right move, and lint
+      // has no business being the tool that does it.
+      const consumedImproveRefusals = (
+        await Promise.all(paths.map((consumedPath) => improveWriteRefusal(namespace, consumedPath, null, "", false)))
+      ).filter((r): r is string => r !== null);
+      if (consumedImproveRefusals.length > 0) {
+        return fail(`finalize aborted, nothing archived:\n${consumedImproveRefusals.join("\n")}`);
+      }
       // finalize JOINS the confirmation too (audit 2, F25 ruling), and it is the
       // widest mutation in this file: one call renames every consumed document.
       const finalizeRefusal = await requireConfirmation(server, confirm, {
@@ -1698,7 +1761,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
     "write_repo_file",
     {
       description:
-        "Write a file to a namespace's GitHub repo. mode 'pr' (default) commits to a new branch and opens a PR; mode 'direct' commits straight to the default branch. Requires operator key.",
+        "Write a file to a namespace's GitHub repo. mode 'pr' (default) commits to a new branch and opens a PR; mode 'direct' commits straight to the default branch. REFUSES any path under .github/workflows/ unless allow_workflow_write: true is passed, which is audit-logged: a workflow is code CI executes with the repo's secrets in scope. Requires operator key.",
       inputSchema: {
         namespace: nsName,
         path: bounded(MAX_PATH),
@@ -1707,11 +1770,17 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
         mode: z.enum(["pr", "direct"]).optional(),
         branch: bounded(MAX_REF).optional(),
         repo: bounded(MAX_REPO_SELECTOR).optional().describe(REPO_ARG),
+        allow_workflow_write: z
+          .boolean()
+          .optional()
+          .describe(
+            "Opt in to writing under .github/workflows/. Refused without it: a workflow is code CI executes with this repo's secrets in scope, not ordinary file content, and this App holds Workflows: write on every mapped repo. Audit-logged when passed."
+          ),
       },
     },
-    ({ namespace, path, content, message, mode, branch, repo }) =>
+    ({ namespace, path, content, message, mode, branch, repo, allow_workflow_write }) =>
       guardedWrite("write_repo_file", namespace, path, () =>
-        writeRepoFile(env, namespace, path, content, message, mode ?? "pr", branch, repo)
+        writeRepoFile(env, namespace, path, content, message, mode ?? "pr", branch, repo, allow_workflow_write)
       )
   );
 
@@ -1746,7 +1815,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
     "delete_repo_file",
     {
       description:
-        "Delete a file from a namespace's GitHub repo. mode 'pr' (default) commits the deletion to a new branch and opens a PR; mode 'direct' deletes on the default branch. The file must exist. Requires operator key.",
+        "Delete a file from a namespace's GitHub repo. mode 'pr' (default) commits the deletion to a new branch and opens a PR; mode 'direct' deletes on the default branch. The file must exist. REFUSES any path under .github/workflows/ unless allow_workflow_write: true is passed, which is audit-logged. Requires operator key.",
       inputSchema: {
         namespace: nsName,
         path: bounded(MAX_PATH),
@@ -1754,10 +1823,18 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
         mode: z.enum(["pr", "direct"]).optional(),
         branch: bounded(MAX_REF).optional(),
         repo: bounded(MAX_REPO_SELECTOR).optional().describe(REPO_ARG),
+        allow_workflow_write: z
+          .boolean()
+          .optional()
+          .describe(
+            "Opt in to writing under .github/workflows/. Refused without it: a workflow is code CI executes with this repo's secrets in scope, not ordinary file content, and this App holds Workflows: write on every mapped repo. Audit-logged when passed."
+          ),
       },
     },
-    ({ namespace, path, message, mode, branch, repo }) =>
-      guardedWrite("delete_repo_file", namespace, path, () => deleteRepoFile(env, namespace, path, message, mode ?? "pr", branch, repo))
+    ({ namespace, path, message, mode, branch, repo, allow_workflow_write }) =>
+      guardedWrite("delete_repo_file", namespace, path, () =>
+        deleteRepoFile(env, namespace, path, message, mode ?? "pr", branch, repo, allow_workflow_write)
+      )
   );
 
   server.registerTool(

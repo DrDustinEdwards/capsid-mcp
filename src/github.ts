@@ -655,8 +655,13 @@ async function putFile(
   path: string,
   content: string,
   message: string,
-  branch: string
+  branch: string,
+  allowWorkflowWrite?: boolean
 ): Promise<{ commitSha: string; fileSha: string }> {
+  // The write primitive's own copy of the workflow refusal, so a caller added
+  // later inherits it without remembering to ask. See workflowWriteRefusal.
+  const workflowRefusal = workflowWriteRefusal(path, allowWorkflowWrite);
+  if (workflowRefusal) throw new Error(workflowRefusal);
   const sha = await getFileSha(env, owner, repo, path, branch);
   const resp = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/contents/${encodePath(path)}`, {
     method: "PUT",
@@ -756,6 +761,39 @@ export const SELF_REPO = "DrDustinEdwards/capsid-mcp";
 // report to this path. Used by ci_dispatch's content check.
 const SCORE_PATH_MARKER = "/improve/score";
 
+// THE WORKFLOW DIRECTORY IS NOT ORDINARY REPO CONTENT (audit 2026-09-07, Opus
+// NOTE 6.1, confirmed by probe on the same day).
+//
+// The Capsid GitHub App holds Workflows: write. That was verified rather than
+// assumed: a probe PR authored .github/workflows/ on germomics and succeeded,
+// which contradicted a standing note claiming the App could not. So a write-grant
+// operator key could author a workflow in any mapped repo, and a workflow is not
+// a file, it is code CI executes with that repo's secrets in scope. Nothing in
+// this module refused it.
+//
+// Refused now unless the caller passes allow_workflow_write, which is
+// audit-logged. Checked in TWO places on purpose: commitOnBranch covers both
+// verbs including delete_repo_file (whose mutate does its own ghFetch and never
+// reaches putFile), and putFile covers the write primitive itself, so a third
+// caller added later inherits the refusal without remembering to ask for it.
+//
+// The improve loop never passes the flag and never can: .github/ is a protected
+// path, so an attempt touching one is reverted before it is pushed.
+export const WORKFLOW_DIR = ".github/workflows/";
+
+export function workflowWriteRefusal(path: string, allow: boolean | undefined): string | null {
+  if (allow === true) return null;
+  // Normalised the way encodePath will see it, so "./.github/workflows/x.yml"
+  // and a leading slash cannot slip past a bare startsWith.
+  const segments = path.split("/").filter((seg) => seg.length > 0 && seg !== ".");
+  const joined = `${segments.join("/")}/`;
+  if (!joined.startsWith(WORKFLOW_DIR)) return null;
+  return (
+    `refuses: ${path} is under ${WORKFLOW_DIR}, and a workflow is code CI executes with this repo's secrets in scope, not ordinary file content. ` +
+    `Pass allow_workflow_write: true to write it anyway; the flag is audit-logged.`
+  );
+}
+
 function branchSlug(path: string): string {
   return path.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "file";
 }
@@ -787,6 +825,7 @@ async function commitOnBranch<R>(
     branchPrefix: string;
     fallbackTitle: string;
     prBody: string;
+    allowWorkflowWrite?: boolean;
     mutate: (owner: string, repo: string, target: string) => Promise<R>;
   }
 ): Promise<{
@@ -796,6 +835,12 @@ async function commitOnBranch<R>(
 }> {
   assertRepoArg("path", path);
   if (branch) assertRepoArg("branch", branch);
+  // BEFORE ANY NETWORK CALL, and before the repo is even resolved: a refusal that
+  // costs a round trip is a refusal an attacker can use to probe. This covers
+  // delete_repo_file too, whose mutate does its own ghFetch and never reaches
+  // putFile.
+  const workflowRefusal = workflowWriteRefusal(path, op.allowWorkflowWrite);
+  if (workflowRefusal) throw new Error(workflowRefusal);
   const { owner, repo } = await resolveRepo(env, namespace, repoSelector);
   // THE SERVER'S OWN DEFAULT BRANCH CANNOT BE WRITTEN (audit 2026-09-06, Fable
   // MAJOR 8, the self-inflicted rug pull): CI deploys this Worker on every push
@@ -864,19 +909,24 @@ export async function writeRepoFile(
   message: string,
   mode: "pr" | "direct" = "pr",
   branch?: string,
-  repoSelector?: string
+  repoSelector?: string,
+  allowWorkflowWrite?: boolean
 ) {
   const { base, result, pr } = await commitOnBranch(env, namespace, path, message, mode, branch, repoSelector, {
     branchPrefix: "capsid/",
     fallbackTitle: `Update ${path}`,
     prBody: `Automated change to \`${path}\` via Capsid.`,
-    mutate: (owner, repo, target) => putFile(env, owner, repo, path, content, message, target),
+    allowWorkflowWrite,
+    mutate: (owner, repo, target) => putFile(env, owner, repo, path, content, message, target, allowWorkflowWrite),
   });
+  // The flag is RETURNED so it lands in audit_log: guardedWrite files the whole
+  // result, so a workflow authored through this tool is greppable afterwards.
+  const flag = allowWorkflowWrite === true ? { allow_workflow_write: true } : {};
   // direct carries the file sha as well as the commit sha; pr mode never has.
   // That asymmetry is preserved rather than tidied, because tidying it would
   // change what a caller receives.
-  if (!pr) return { ...base, ...result };
-  return { ...base, commitSha: result.commitSha, pr };
+  if (!pr) return { ...base, ...result, ...flag };
+  return { ...base, commitSha: result.commitSha, pr, ...flag };
 }
 
 // Delete a file from a namespace's repo. PR mode (default) commits the deletion
@@ -889,12 +939,14 @@ export async function deleteRepoFile(
   message: string,
   mode: "pr" | "direct" = "pr",
   branch?: string,
-  repoSelector?: string
+  repoSelector?: string,
+  allowWorkflowWrite?: boolean
 ) {
   const { base, result, pr } = await commitOnBranch(env, namespace, path, message, mode, branch, repoSelector, {
     branchPrefix: "capsid/rm-",
     fallbackTitle: `Delete ${path}`,
     prBody: `Delete \`${path}\` via Capsid.`,
+    allowWorkflowWrite,
     mutate: async (owner, repo, target) => {
       // GitHub's contents DELETE needs the CURRENT file sha, so a missing file is
       // an error rather than a no-op. Read on the target branch, which in pr mode
@@ -911,8 +963,9 @@ export async function deleteRepoFile(
       return { commitSha: data.commit.sha };
     },
   });
-  if (!pr) return { ...base, commitSha: result.commitSha };
-  return { ...base, commitSha: result.commitSha, pr };
+  const flag = allowWorkflowWrite === true ? { allow_workflow_write: true } : {};
+  if (!pr) return { ...base, commitSha: result.commitSha, ...flag };
+  return { ...base, commitSha: result.commitSha, pr, ...flag };
 }
 
 // Merge or close an open pull request. Merging can trigger CI deploys in repos
