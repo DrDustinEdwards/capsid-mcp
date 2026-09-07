@@ -280,8 +280,30 @@ export const PROTECTED_PATH_PATTERNS: Array<{ pattern: RegExp; why: string }> = 
   { pattern: /(^|\/)improve\//i, why: "the improve loop's own documents" },
   { pattern: /(^|\/)src\/improve-/i, why: "the improve loop's own source" },
   { pattern: /(^|\/)migrations\//i, why: "a database migration" },
-  { pattern: /(^|\/)wrangler\.jsonc?$/i, why: "deployment configuration" },
+  // The example is included: foxing's Job A copies apps/web/wrangler.jsonc.example
+  // into place before running `wrangler types`, so the unprotected .example was a
+  // path into the measured build (audit 2026-09-07, Opus CRITICAL 5.2). .toml is
+  // the older spelling and is equally load-bearing where a repo still uses it.
+  { pattern: /(^|\/)wrangler\.(jsonc?|toml)(\.example)?$/i, why: "deployment configuration" },
   { pattern: /(^|\/)package(-lock)?\.json$/i, why: "the dependency manifest or lockfile" },
+  // EVERY LOCKFILE, NOT JUST NPM'S (audit 2026-09-07, Opus CRITICAL 5.2, Grok
+  // MAJOR 4). The scorer's install step is package-manager agnostic and installs
+  // from whichever lockfile is present, so a lockfile an attempt can edit is
+  // arbitrary code execution in CI through a lifecycle script. foxing is a pnpm
+  // workspace and its Job A runs `pnpm install --frozen-lockfile`; --frozen
+  // compares the lockfile to package.json, not to the registry, so a repointed
+  // resolution installs. npm-shrinkwrap.json matters for a second reason: npm
+  // PREFERS it over package-lock.json, so leaving it out was a bypass of the
+  // pattern above rather than a gap beside it.
+  { pattern: /(^|\/)npm-shrinkwrap\.json$/i, why: "a lockfile npm prefers over package-lock.json" },
+  { pattern: /(^|\/)pnpm-lock\.yaml$/i, why: "the pnpm lockfile the scorer installs from" },
+  { pattern: /(^|\/)pnpm-workspace\.yaml$/i, why: "the pnpm workspace definition" },
+  { pattern: /(^|\/)\.pnpmfile\.cjs$/i, why: "a pnpm hook that runs during install" },
+  { pattern: /(^|\/)yarn\.lock$/i, why: "the yarn lockfile" },
+  { pattern: /(^|\/)\.yarnrc\.yml$/i, why: "yarn registry and install policy" },
+  { pattern: /(^|\/)bun\.lockb$/i, why: "the bun lockfile" },
+  { pattern: /(^|\/)deno\.lock$/i, why: "the deno lockfile" },
+  { pattern: /(^|\/)\.gitmodules$/i, why: "submodules the checkout would fetch and run" },
   { pattern: /(^|\/)tsconfig[^/]*\.json$/i, why: "compiler configuration" },
   { pattern: /\.(config|conf)\.[cm]?[jt]s$/i, why: "a config file" },
   { pattern: /(^|\/)\.?eslint[^/]*$/i, why: "lint configuration" },
