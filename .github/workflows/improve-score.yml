@@ -1,31 +1,49 @@
 name: improve-score
 
-# THE SCORER, SPLIT INTO TWO JOBS (audit 2026-09-06, option a).
+# THE SCORER. TWO JOBS, AND JOB B NEVER PUTS ATTEMPT CODE ON THE RUNNER.
 #
 #   build  (PER REPO, no secrets) checks out the ATTEMPT branch and runs this
 #          repo's own build / test / lint / measure commands, writes a normalized
 #          metrics.json { build_passes, test_pass_rate|null, lint_count|null,
 #          bundle_size_bytes|null }, and uploads it with the attempt source under
 #          code/. It never sees a credential and persist-credentials is false.
+#          It also exports build_passes as a JOB OUTPUT taken from the build
+#          step's own outcome, because the artifact is attacker-writable.
 #   score  (BYTE-IDENTICAL across all five roster repos) checks out the DEFAULT
-#          branch only, downloads build's artifact, overlays the attempt source,
-#          pulls the holdout, runs it counting passes from node --test's TAP
-#          reporter via scripts/improve-report.mjs (never an exit code), then reads
-#          metrics.json, signs and posts.
+#          branch ONLY, never overlays the attempt onto the runner, and runs the
+#          holdout inside a network-less read-only container with the attempt
+#          mounted read-only. It reads results from the container's stdout pipe.
 #
 # ONLY THE build JOB DIFFERS PER REPO. The score job and scripts/improve-report.mjs
 # are copied verbatim; change them here and re-copy, never edit one copy.
 #
-# WHY THE SPLIT. The old single job ran attempt code beside the holdout suite and
-# the signing key. Now the largest attacker-controlled execution (npm ci, build,
-# the repo's own tests, lint) runs in build with no secrets, and score holds the
-# secrets but runs trusted default-branch glue. The Worker also refuses, before it
-# dispatches, any attempt touching a protected path, so nothing that could steer
-# this file or the toolchain reaches a branch.
+# WHY THE CONTAINER (audit 2026-09-07, Opus CRITICAL 5.1 and Grok CRITICAL 1+2).
+# The previous split ran `cp -r attempt/code/. .` over the default-branch checkout
+# and then executed holdout tests that import the attempt source, in the same job
+# that holds IMPROVE_SCORE_KEY. Three things followed, and all three were live:
 #
-# RESIDUAL: the holdout tests import the attempt source, so attempt code still runs
-# in the score job. Credentials are step-scoped away from it and pass counting is
-# by trusted TAP parsing; full isolation would need a sandbox, not a workflow.
+#   1. Job A's staging did not wipe code/ first, so attempt code running during
+#      Job A's own test step could write code/scripts/improve-report.mjs. The
+#      overlay then replaced the TRUSTED signing script and the Post step ran it
+#      with the HMAC key in its environment. Direct key theft.
+#   2. The same overlay could plant extra .improve-holdout/*.test.* files, which
+#      the sync did not delete and the counting glob happily counted.
+#   3. The TAP destination was a seekable file in the attempt's own filesystem,
+#      so attempt code could rewrite it from process.on('exit') after the reporter
+#      flushed, which forges the one anchor the loop rests on.
+#
+# The fix is structural rather than a patch to each: attempt code now executes
+# ONLY inside `docker run --rm --network none --read-only`, with the workspace
+# nowhere in it, results leaving only as a stdout pipe the container cannot seek
+# back into, and the trusted scorer script copied out of the workspace before any
+# untrusted byte exists on disk.
+#
+# WHAT REMAINS ATTEMPT-INFLUENCED, stated rather than glossed: test_pass_rate,
+# lint_count and bundle_size_bytes are measured by Job A, which runs attempt code
+# by design. They are SECONDARY metrics. The two things that decide keep-or-revert
+# against a floor are build_passes (a job output from a step outcome) and
+# holdout_pass_rate (recomputed by the Worker from the container's own output
+# against the R2 manifest). Those are the numbers the isolation protects.
 
 on:
   workflow_dispatch:
@@ -50,6 +68,12 @@ jobs:
     timeout-minutes: 25
     outputs:
       head_sha: ${{ steps.head.outputs.sha }}
+      # THE ANCHOR COMES FROM A STEP OUTCOME, NOT FROM THE ARTIFACT (audit
+      # 2026-09-07, Grok MAJOR 3). metrics.json is written on a runner that has
+      # already executed attempt code, so a detached writer can rewrite it before
+      # the upload. A job output is set by the Actions runner from the step's own
+      # result and attempt code cannot reach it.
+      build_passes: ${{ steps.build.outcome == 'success' && '1' || '0' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -96,7 +120,7 @@ jobs:
           BUILD_PASSES=0; [ "${{ steps.build.outcome }}" = "success" ] && BUILD_PASSES=1
           RATE=$(node scripts/improve-report.mjs --rate test-report.json || echo "")
           LINT_COUNT=$(npm run check:test 2>&1 | grep -c "error TS" || true)
-          BUNDLE_BYTES=$(npx wrangler deploy --dry-run --outdir=.improve-build > /dev/null 2>&1 && du -sb .improve-build 2>/dev/null | cut -f1 || echo "")
+          BUNDLE_BYTES=$(npx wrangler deploy --dry-run --outdir=.improve-build > /dev/null 2>&1 && du -sb .improve-build/index.js 2>/dev/null | cut -f1 || echo "")
           BUILD_PASSES="${BUILD_PASSES}" RATE="${RATE}" LINT_COUNT="${LINT_COUNT}" BUNDLE_BYTES="${BUNDLE_BYTES}" node -e '
             const n=(v)=>(v===undefined||v===""?null:Number(v));
             process.stdout.write(JSON.stringify({
@@ -109,9 +133,15 @@ jobs:
           cat metrics.json
 
       # PER-REPO: the source tree(s) the holdout imports. capsid-mcp: src.
+      #
+      # `rm -rf code` FIRST (audit 2026-09-07, Grok CRITICAL 1). Without it, a
+      # code/ directory written by attempt code during the Test step above
+      # survives into the artifact alongside the trees this step stages, and the
+      # old Job B copied the whole of code/ over its own checkout.
       - name: Stage the scored source
         run: |
           set -euo pipefail
+          rm -rf code
           mkdir -p code
           cp -r src code/
 
@@ -128,14 +158,16 @@ jobs:
 
   # ============================================================================
   # BYTE-IDENTICAL BELOW THIS LINE ACROSS ALL FIVE ROSTER REPOS. Do not edit one
-  # copy; edit capsid-mcp's and re-copy.
+  # copy; edit capsid-mcp's and re-copy. test/workflow-identity.test.ts pins it.
   # ============================================================================
   score:
     name: score (holds secrets)
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
+      # THE DEFAULT BRANCH ONLY. Nothing from the attempt branch is ever checked
+      # out here, and nothing is ever overlaid onto this working tree.
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
@@ -149,8 +181,8 @@ jobs:
 
       # PACKAGE-MANAGER AGNOSTIC so this job stays byte-identical across an npm repo
       # and a pnpm workspace: pnpm-lock.yaml picks pnpm (via corepack, honouring the
-      # repo's packageManager field), otherwise npm ci. No setup-node cache, because
-      # a cache key would have to name one manager.
+      # repo's packageManager field), otherwise npm ci. Both read the DEFAULT
+      # branch's lockfile, which an attempt cannot edit (it is a protected path).
       - name: Install dependencies
         run: |
           set -euo pipefail
@@ -161,33 +193,36 @@ jobs:
             npm ci
           fi
 
+      # THE TRUSTED SCRIPT AND THE NODE BINARY ARE RESOLVED BEFORE ANY UNTRUSTED
+      # BYTE EXISTS ON THIS RUNNER, and only these copies are used afterwards.
+      # Even though nothing untrusted is written to the workspace any more, this
+      # is what makes that property independent of the steps below staying correct.
+      - name: Stash the trusted scorer and resolve absolute binaries
+        id: trusted
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/trusted"
+          cp scripts/improve-report.mjs "${RUNNER_TEMP}/trusted/improve-report.mjs"
+          echo "node=$(command -v node)" >> "$GITHUB_OUTPUT"
+
+      # Into RUNNER_TEMP, never the workspace, so the attempt tree and the
+      # default-branch checkout never share a directory.
       - name: Download the attempt artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: attempt
-          path: attempt
+          path: ${{ runner.temp }}/attempt
 
-      - name: Overlay the attempt source
-        run: |
-          set -euo pipefail
-          # Path-preserving: Job A stages each scored tree under code/ keeping its
-          # full path (e.g. code/src, code/packages/core), so copying code/. back to
-          # the repo root lands each tree where the holdout imports it, nested dirs
-          # included. Byte-identical across all five repos; only what Job A stages
-          # differs.
-          if [ -d attempt/code ]; then
-            cp -r attempt/code/. .
-          fi
-
-      # NO LONG-LIVED R2 SECRET (platform arc 2026-09-06). The holdout is pulled
-      # with a ONE-HOUR object-read-only credential scoped to this namespace's
-      # prefix, minted by the Worker on request. The request is signed with the
-      # same per-namespace key as the score report, so a key leaking from one
-      # repo grants read access to that repo's own hidden suite and nothing
-      # else, for an hour, instead of an account-wide S3 token forever. This
-      # step's env holds only the signing key; no attempt code runs here.
-      # Checksums are when_required because R2 rejects the CRC headers newer aws
-      # CLIs send by default.
+      # NO LONG-LIVED R2 SECRET. The holdout is pulled with a ONE-HOUR
+      # object-read-only credential scoped to this namespace's prefix, minted by
+      # the Worker on request and signed with the same per-namespace key as the
+      # score report. This step's env holds only the signing key; no attempt code
+      # runs on this runner at all. Checksums are when_required because R2
+      # rejects the CRC headers newer aws CLIs send by default.
+      #
+      # WIPED BEFORE THE SYNC (audit 2026-09-07, Grok CRITICAL 1): `aws s3 sync`
+      # has no --delete here, so a pre-existing file under the destination would
+      # survive and be counted as a case.
       - name: Pull the holdout suite
         id: holdout
         continue-on-error: true
@@ -199,11 +234,12 @@ jobs:
           AWS_REQUEST_CHECKSUM_CALCULATION: when_required
           AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
           NODE_OPTIONS: ""
+          NODE_BIN: ${{ steps.trusted.outputs.node }}
         run: |
           set -euo pipefail
           TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          BODY=$(node -e 'process.stdout.write(JSON.stringify({ namespace: process.env.IMPROVE_NAMESPACE, jti: require("crypto").randomUUID() }))')
-          SIG=$(TS="${TS}" BODY="${BODY}" node -e 'const c=require("crypto");const h=c.createHmac("sha256",process.env.IMPROVE_SCORE_KEY);h.update(process.env.TS+"."+process.env.BODY);process.stdout.write(h.digest("hex"))')
+          BODY=$("${NODE_BIN}" -e 'process.stdout.write(JSON.stringify({ namespace: process.env.IMPROVE_NAMESPACE, jti: require("crypto").randomUUID() }))')
+          SIG=$(TS="${TS}" BODY="${BODY}" "${NODE_BIN}" -e 'const c=require("crypto");const h=c.createHmac("sha256",process.env.IMPROVE_SCORE_KEY);h.update(process.env.TS+"."+process.env.BODY);process.stdout.write(h.digest("hex"))')
           CRED_FILE=$(mktemp)
           STATUS=$(/usr/bin/curl --silent --show-error -o "${CRED_FILE}" -w '%{http_code}' \
             -X POST "${CAPSID_URL}/improve/holdout-credential" \
@@ -218,42 +254,91 @@ jobs:
             exit 1
           fi
           # The credential values are exported for the aws CLI and never echoed.
-          eval "$(CRED_FILE="${CRED_FILE}" node -e '
+          eval "$(CRED_FILE="${CRED_FILE}" "${NODE_BIN}" -e '
             const c = JSON.parse(require("fs").readFileSync(process.env.CRED_FILE, "utf8"));
             const fields = [["AWS_ACCESS_KEY_ID", c.access_key_id], ["AWS_SECRET_ACCESS_KEY", c.secret_access_key], ["AWS_SESSION_TOKEN", c.session_token], ["HOLDOUT_ENDPOINT", c.endpoint], ["HOLDOUT_BUCKET", c.bucket], ["HOLDOUT_PREFIX", c.prefix]];
             for (const [name, value] of fields) {
               if (!value) { console.error("missing " + name + " in the credential response"); process.exit(1); }
               process.stdout.write("export " + name + "=" + JSON.stringify(value) + "\n");
             }')"
-          mkdir -p .improve-holdout
-          aws s3 sync "s3://${HOLDOUT_BUCKET}/${HOLDOUT_PREFIX}" .improve-holdout/ --endpoint-url "${HOLDOUT_ENDPOINT}"
+          rm -rf "${RUNNER_TEMP}/holdout"
+          mkdir -p "${RUNNER_TEMP}/holdout"
+          aws s3 sync "s3://${HOLDOUT_BUCKET}/${HOLDOUT_PREFIX}" "${RUNNER_TEMP}/holdout/" --endpoint-url "${HOLDOUT_ENDPOINT}"
 
-      # Count passes from the TAP reporter via the trusted script, never exit codes.
-      - name: Run the holdout suite
+      # THE ONLY PLACE ATTEMPT CODE EVER RUNS IN THIS JOB, and it runs with no
+      # network, a read-only root, no workspace mount, and no secret in scope.
+      #
+      #   --network none    nothing it learns can leave, including the suite.
+      #   --read-only       the image and every bind mount stay immutable.
+      #   -v ...:ro         attempt, holdout and node_modules are read-only.
+      #   --tmpfs /work     the only writable surface, and it dies with the run.
+      #   pinned by digest  so the image cannot be repointed under us.
+      #
+      # RESULTS LEAVE AS A STDOUT PIPE. There is no seekable TAP destination for
+      # the child to rewrite: the reporter writes to the container's stdout, the
+      # runner captures it outside the container, and a test's own stdout is
+      # escaped by node's TAP reporter into `# ` comment lines, so it cannot forge
+      # a result line at column 0. The per-case markers below are emitted by this
+      # trusted shell, never by a test.
+      - name: Run the holdout suite in an isolated container
         id: holdout_run
         continue-on-error: true
         run: |
           set -uo pipefail
-          TOTAL=$(node -e 'try{process.stdout.write(String(require("./.improve-holdout/manifest.json").total))}catch{process.stdout.write("")}')
-          LOADER=""
-          [ -f ./test/resolve-ts.mjs ] && LOADER="--import ./test/resolve-ts.mjs"
-          PASSED=0
-          for f in .improve-holdout/*.test.*; do
-            [ -e "$f" ] || continue
-            REPORT=".improve-holdout/.report-$(node -e 'process.stdout.write(require("crypto").randomUUID())').json"
-            # shellcheck disable=SC2086
-            node --test --test-reporter=tap --test-reporter-destination="$REPORT" $LOADER "$f" > /dev/null 2>&1 || true
-            if node scripts/improve-report.mjs --holdout "$REPORT"; then
-              PASSED=$((PASSED+1))
-            fi
-          done
+          docker run --rm \
+            --network none \
+            --read-only \
+            --tmpfs /work:rw,exec,size=512m \
+            --tmpfs /tmp:rw,size=64m \
+            -v "${RUNNER_TEMP}/attempt/code:/attempt:ro" \
+            -v "${RUNNER_TEMP}/holdout:/holdout:ro" \
+            -v "${GITHUB_WORKSPACE}/node_modules:/nm:ro" \
+            -v "${GITHUB_WORKSPACE}/test:/trusted-test:ro" \
+            -w /work \
+            --entrypoint /bin/sh \
+            node:24.14.1-alpine@sha256:8510330d3eb72c804231a834b1a8ebb55cb3796c3e4431297a24d246b8add4d5 \
+            -c '
+              set -u
+              cp -R /attempt/. /work/ 2>/dev/null || true
+              ln -s /nm /work/node_modules
+              if [ -f /trusted-test/resolve-ts.mjs ]; then
+                mkdir -p /work/test
+                cp /trusted-test/resolve-ts.mjs /work/test/resolve-ts.mjs
+              fi
+              mkdir -p /work/.holdout
+              cp /holdout/*.test.* /work/.holdout/ 2>/dev/null || true
+              LOADER=""
+              [ -f /work/test/resolve-ts.mjs ] && LOADER="--import ./test/resolve-ts.mjs"
+              for f in /work/.holdout/*.test.*; do
+                [ -e "$f" ] || continue
+                echo "##CAPSID-CASE $(basename "$f")"
+                # shellcheck disable=SC2086
+                node --test --test-reporter=tap $LOADER "$f" 2>/dev/null || true
+              done
+              echo "##CAPSID-END"
+            ' > "${RUNNER_TEMP}/holdout.tap" 2>"${RUNNER_TEMP}/holdout.err" || true
+          echo "container exited $?"
+          tail -5 "${RUNNER_TEMP}/holdout.err" || true
+
+      # Counting is done by the trusted copy, from the piped stream, against the
+      # manifest that came out of R2. Both live outside the workspace.
+      - name: Count the holdout result
+        id: holdout_count
+        continue-on-error: true
+        env:
+          NODE_BIN: ${{ steps.trusted.outputs.node }}
+        run: |
+          set -uo pipefail
+          TOTAL=$("${NODE_BIN}" -e 'try{process.stdout.write(String(require(process.env.RUNNER_TEMP + "/holdout/manifest.json").total))}catch{process.stdout.write("")}')
+          PASSED=$("${NODE_BIN}" "${RUNNER_TEMP}/trusted/improve-report.mjs" --holdout-stream "${RUNNER_TEMP}/holdout.tap" || echo "0")
           echo "total=${TOTAL}" >> "$GITHUB_OUTPUT"
           echo "passed=${PASSED}" >> "$GITHUB_OUTPUT"
+          echo "holdout ${PASSED} of ${TOTAL}"
 
-      # RUN_ID, ATTEMPT_ID and the key are in THIS step's own env so a poisoned
-      # GITHUB_ENV cannot override them; NODE_OPTIONS is cleared; the HMAC is
-      # computed by node with the key read from the environment, never argv; curl is
-      # absolute-pathed. ci_minutes is computed before the body.
+      # RUN_ID, ATTEMPT_ID, BUILD_PASSES and the key are in THIS step's own env so a
+      # poisoned GITHUB_ENV cannot override them; NODE_OPTIONS is cleared; the HMAC is
+      # computed by node with the key read from the environment, never argv; node and
+      # curl are absolute-pathed. ci_minutes is computed before the body.
       - name: Post the score report
         if: always()
         env:
@@ -263,20 +348,22 @@ jobs:
           RUN_ID: ${{ inputs.run_id }}
           ATTEMPT_ID: ${{ inputs.attempt_id }}
           ATTEMPT_HEAD_SHA: ${{ needs.build.outputs.head_sha }}
-          HOLDOUT_TOTAL: ${{ steps.holdout_run.outputs.total }}
-          HOLDOUT_PASSED: ${{ steps.holdout_run.outputs.passed }}
+          BUILD_PASSES: ${{ needs.build.outputs.build_passes }}
+          HOLDOUT_TOTAL: ${{ steps.holdout_count.outputs.total }}
+          HOLDOUT_PASSED: ${{ steps.holdout_count.outputs.passed }}
           NODE_OPTIONS: ""
+          NODE_BIN: ${{ steps.trusted.outputs.node }}
         run: |
           set -euo pipefail
           if [ -z "${IMPROVE_SCORE_KEY}" ]; then
             echo "IMPROVE_SCORE_KEY is unset; the report cannot be signed and will not be sent." >&2
             exit 1
           fi
-          STARTED_EPOCH=$(sed -n 's/^epoch=//p' attempt/started.txt 2>/dev/null || echo "")
-          export CI_MINUTES=$(S="${STARTED_EPOCH}" N="$(date -u +%s)" node -e 'const s=Number(process.env.S||"0"),n=Number(process.env.N||"0");process.stdout.write(s>0?((n-s)/60).toFixed(2):"0")')
-          BODY=$(node scripts/improve-report.mjs attempt/metrics.json "${HOLDOUT_TOTAL}" "${HOLDOUT_PASSED}")
+          STARTED_EPOCH=$(sed -n 's/^epoch=//p' "${RUNNER_TEMP}/attempt/started.txt" 2>/dev/null || echo "")
+          export CI_MINUTES=$(S="${STARTED_EPOCH}" N="$(date -u +%s)" "${NODE_BIN}" -e 'const s=Number(process.env.S||"0"),n=Number(process.env.N||"0");process.stdout.write(s>0?((n-s)/60).toFixed(2):"0")')
+          BODY=$("${NODE_BIN}" "${RUNNER_TEMP}/trusted/improve-report.mjs" "${RUNNER_TEMP}/attempt/metrics.json" "${HOLDOUT_TOTAL}" "${HOLDOUT_PASSED}")
           TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          SIG=$(TS="${TS}" BODY="${BODY}" node -e 'const c=require("crypto");const h=c.createHmac("sha256",process.env.IMPROVE_SCORE_KEY);h.update(process.env.TS+"."+process.env.BODY);process.stdout.write(h.digest("hex"))')
+          SIG=$(TS="${TS}" BODY="${BODY}" "${NODE_BIN}" -e 'const c=require("crypto");const h=c.createHmac("sha256",process.env.IMPROVE_SCORE_KEY);h.update(process.env.TS+"."+process.env.BODY);process.stdout.write(h.digest("hex"))')
           echo "Posting score report for ${ATTEMPT_ID}:"
           echo "${BODY}"
           # A shakedown dispatch (the literal RUN_ID "shakedown") has no run row in
