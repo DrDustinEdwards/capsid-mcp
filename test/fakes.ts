@@ -375,7 +375,13 @@ export function fakeD1(opts: FakeD1Options = {}): FakeD1 {
       // lost the one document it is built around.
       const literalPath = flat.match(/path = '([^']+)'/i);
       const path = literalPath ? literalPath[1] : boundPath;
-      const row = rows.documents.find((d) => d.namespace === namespace && d.path === path) ?? null;
+      // prompts/get binds the path WITHOUT the extension and lets SQL try both:
+      // `path = ?2 OR path = ?2 || '.md'`. A fake that only matched the first
+      // answered null for every prompt document, so the whole prompts surface was
+      // untestable through the real handler.
+      const suffixed = /\|\| '\.md'/.test(flat);
+      const row =
+        rows.documents.find((d) => d.namespace === namespace && (d.path === path || (suffixed && d.path === `${path}.md`))) ?? null;
       const asOk = /SELECT 1 AS ok FROM documents/i.test(flat);
       // The commit-time read of updated_at is NOT the pre-read, so the racing
       // writer lands between them.
