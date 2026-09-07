@@ -444,23 +444,22 @@ export function compare(specs: SecondarySpec[], before: MetricMap, after: Metric
 
 // ---- the seed document ------------------------------------------------------
 
-// THE FIRST-PASS METRICS, per the arc. capsid, foxing, germomics and
-// dustinedwards take tests, lint, errors and latency. foxhound adds the two stubs
-// (recovery_rate for the legacy Recova product, dispute_win_rate for foxhound
-// itself; the namespace maps to both repos, see the roster note in
-// improve-schema.ts).
+// ONLY WIRED METRICS APPEAR HERE (2026-09-07). The seed used to declare
+// error_count and p95_latency_ms for every namespace and two more stubs for
+// foxhound, and NOTHING EVER REPORTED ANY OF THEM. The audits rated it MAJOR 5.7:
+// two of five secondary metrics permanently null, which makes a scores document a
+// statement of intent that reads like a measurement, and leaves germomics scoring
+// on bundle size alone while its document claims five signals.
+//
+// The rule this file now keeps: a metric is declared here only once something
+// reports it. The intentions live in capsid/improve/TASK-wire-the-metrics.md,
+// where a reader can tell they are unbuilt. The `stub` marker survives in the
+// parser for the day a metric is half-wired; it is not a place to park a wish.
 //
 // Generated rather than hand-written per namespace so five documents cannot drift
 // into five formats, and so the parser above is exercised against the exact text
 // this function emits (test/improve-scores.test.ts round-trips it).
 export function seedScoresDoc(namespace: string): string {
-  const stubs =
-    namespace === "foxhound"
-      ? [
-          "- recovery_rate: maximize weight 0 stub",
-          "- dispute_win_rate: maximize weight 0 stub",
-        ]
-      : [];
   return [
     `# improve scores - ${namespace}`,
     "",
@@ -486,10 +485,7 @@ export function seedScoresDoc(namespace: string): string {
     "",
     "- test_pass_rate: maximize weight 3",
     "- lint_count: minimize weight 2",
-    "- error_count: minimize weight 2",
-    "- p95_latency_ms: minimize weight 1",
     "- bundle_size_bytes: minimize weight 1",
-    ...stubs,
     "",
   ].join("\n");
 }

@@ -30,7 +30,7 @@ test("the generated seed document parses to the anchors and secondaries it state
   );
   assert.deepEqual(
     doc.secondary.map((s) => s.metric),
-    ["test_pass_rate", "lint_count", "error_count", "p95_latency_ms", "bundle_size_bytes"]
+    ["test_pass_rate", "lint_count", "bundle_size_bytes"]
   );
   // Vacuity guard on the round trip: the parser is being exercised against the
   // exact text the generator emits, so a generator change that breaks the format
@@ -38,17 +38,17 @@ test("the generated seed document parses to the anchors and secondaries it state
   assert.ok(doc.anchorBlock.includes("build_passes"), "the anchor block did not capture its own lines");
 });
 
-test("foxhound, and only foxhound, carries the two stub metrics", () => {
-  // Keyed on foxhound since the 2026-09-05 namespace rename. Both stubs belong to
-  // this ONE namespace because it maps to both repos: recovery_rate to the legacy
-  // Recova product, dispute_win_rate to foxhound itself.
-  const foxhound = parseScoresDoc("foxhound", seedScoresDoc("foxhound"));
-  const stubs = foxhound.secondary.filter((s) => s.stub).map((s) => s.metric);
-  assert.deepEqual(stubs, ["recovery_rate", "dispute_win_rate"]);
-  for (const namespace of ["capsid", "foxing", "germomics", "dustinedwards"]) {
-    const doc = parseScoresDoc(namespace, seedScoresDoc(namespace));
-    assert.deepEqual(doc.secondary.filter((s) => s.stub), [], `${namespace} unexpectedly carries a stub metric`);
-  }
+test("every namespace seeds the SAME secondary list", () => {
+  // This test used to assert that foxhound, and only foxhound, carried the two
+  // stub metrics recovery_rate and dispute_win_rate. Both were removed on
+  // 2026-09-07 with error_count and p95_latency_ms: nothing measured any of them.
+  // What survives of its subject is the uniformity it was really guarding.
+  // test/null-metrics.test.ts owns the two halves that replaced it: no namespace
+  // declares a stub, and the parser still understands one.
+  const lists = ["capsid", "foxing", "germomics", "dustinedwards", "foxhound"].map((namespace) =>
+    parseScoresDoc(namespace, seedScoresDoc(namespace)).secondary.map((s) => s.metric).join(",")
+  );
+  assert.equal(new Set(lists).size, 1, `the five seeds disagree: ${JSON.stringify(lists)}`);
 });
 
 // ---- the checksum -----------------------------------------------------------
@@ -178,8 +178,6 @@ const SECONDARY = parseScoresDoc("capsid", DOC).secondary;
 const BASE = {
   test_pass_rate: 0.9,
   lint_count: 10,
-  error_count: 4,
-  p95_latency_ms: 200,
   bundle_size_bytes: 100_000,
 };
 
@@ -187,7 +185,7 @@ test("a strict improvement is kept", () => {
   const result = compare(SECONDARY, BASE, { ...BASE, lint_count: 5 });
   assert.equal(result.improved, true);
   assert.ok(result.delta > 0);
-  assert.equal(result.compared, 5);
+  assert.equal(result.compared, 3);
 });
 
 test("a TIE reverts", () => {
@@ -219,11 +217,16 @@ test("a metric missing on ONE side is excluded and named", () => {
   const lint = result.details.find((d) => d.metric === "lint_count");
   assert.equal(lint?.contribution, null);
   assert.match(lint?.why ?? "", /not reported by this attempt/);
-  assert.equal(result.compared, 4, "the other four should still be compared");
+  assert.equal(result.compared, 2, "the other two should still be compared");
 });
 
 test("a STUB metric is excluded even when both sides report a value", () => {
-  const stubbed = parseScoresDoc("foxhound", seedScoresDoc("foxhound")).secondary;
+  // Built here rather than from a seed: no namespace declares a stub any more, and
+  // the mechanism still has to work for the day one is genuinely half-wired.
+  const stubbed = parseScoresDoc(
+    "x",
+    ["# s", "", "## Anchors", "", "- build_passes: required", "", "## Secondary", "", "- lint_count: minimize weight 2", "- recovery_rate: maximize weight 0 stub", ""].join("\n")
+  ).secondary;
   const result = compare(stubbed, { ...BASE, recovery_rate: 0.1 }, { ...BASE, recovery_rate: 0.9 });
   const stub = result.details.find((d) => d.metric === "recovery_rate");
   assert.equal(stub?.contribution, null);

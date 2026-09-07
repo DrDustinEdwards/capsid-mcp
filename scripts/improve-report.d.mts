@@ -29,6 +29,11 @@ export interface SecondarySpec {
   verified: string | null;
 }
 export const SECONDARY_COMMANDS: Record<string, SecondarySpec>;
+
+// The secondary metrics this scorer reports, in report order. Three since
+// 2026-09-07: error_count and p95_latency_ms were removed because nothing ever
+// measured them.
+export const REPORTED_SECONDARY: string[];
 export function markers(nonce?: string): {
   case: string;
   test: string;

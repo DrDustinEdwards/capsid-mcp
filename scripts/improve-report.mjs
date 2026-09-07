@@ -283,6 +283,20 @@ export function secondaryFromStream(text, namespace, nonce = "") {
   return { test_pass_rate, lint_count };
 }
 
+// THE SECONDARY METRICS THIS SCORER ACTUALLY REPORTS, in report order.
+//
+// It used to be five. error_count and p95_latency_ms were emitted as a literal
+// null on every run, by every repo, since the loop was built, and were declared in
+// all five scores documents as though they were signals (audits 2026-09-07, MAJOR
+// 5.7). A document that lists a metric nobody measures is worse than one that
+// lists fewer: it reads as five signals and behaves as three, and germomics'
+// reads as five and behaves as one.
+//
+// test/null-metrics.test.ts derives seedScoresDoc's Secondary list from this array
+// and fails in BOTH directions, so a metric cannot be declared in the canon
+// without something reporting it, or reported without being declared.
+export const REPORTED_SECONDARY = ["test_pass_rate", "lint_count", "bundle_size_bytes"];
+
 // A metric read from Job A's metrics.json: a finite number, or null for anything
 // else (missing, "", non-finite). Coercion is refused so a stray value cannot read
 // as a real measurement.
@@ -417,8 +431,6 @@ function main(argv) {
     secondary: {
       test_pass_rate: metric(numOrNull(process.env.SECONDARY_TEST_PASS_RATE)),
       lint_count: metric(numOrNull(process.env.SECONDARY_LINT_COUNT)),
-      error_count: null,
-      p95_latency_ms: null,
       bundle_size_bytes: metric(m.bundle_size_bytes),
     },
     holdout: { total: numOrNull(holdoutTotal) ?? 0, passed: numOrNull(holdoutPassed) ?? 0 },
