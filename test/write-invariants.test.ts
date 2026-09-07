@@ -578,11 +578,28 @@ test("restore writes the VERSION body, and snapshots the LIVE one", async () => 
   // And the snapshot is the mirror image: it must capture what is being replaced,
   // or the restore is not itself undoable, which is the property its description
   // promises.
+  //
+  // ASSERTED ON THE SQL SHAPE, not on a bound value (corrected 2026-09-07, Grok
+  // MAJOR 10). This assertion used to require the snapshot to BIND "prior body",
+  // which is the pre-read body, and passed for exactly that reason: it could not
+  // tell the fix from the bug, because with a pre-read binding the bound value
+  // and the live value are the same string in this fixture. write and delete were
+  // moved to INSERT..SELECT on 2026-09-06 and restore was not, so this was the
+  // last write path still filing what the handler had READ rather than what the
+  // table HELD at commit; restore elicits a confirmation, so the gap could be the
+  // full 90 second prompt. Same form as the write and delete assertions in
+  // test/audit-2026-09-06-round2.test.ts, whose own title already claimed restore
+  // did this.
   const snapshot = recorded.find((r) => /INSERT INTO document_versions [(]/i.test(r.sql) && !/SELECT NULL/i.test(r.sql));
   assert.ok(snapshot, "restore issued no snapshot of the live body");
+  assert.match(
+    snapshot.sql.replace(/\s+/g, " "),
+    /SELECT id, .*FROM documents/i,
+    "restore binds a pre-read body: a body written between the pre-read and the batch is lost with no version row anywhere"
+  );
   assert.ok(
-    snapshot.params.includes("prior body"),
-    `restore snapshotted the wrong body: ${JSON.stringify(snapshot.params)}`
+    !snapshot.params.includes("prior body"),
+    `restore still carries the pre-read body as a bound param: ${JSON.stringify(snapshot.params)}`
   );
 });
 

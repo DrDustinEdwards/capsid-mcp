@@ -30,12 +30,18 @@
 export const COMPATIBILITY_DATE = "2026-09-06";
 
 // THE PER-INVOCATION CPU CEILING, same number as wrangler.jsonc.example's
-// limits.cpu_ms (test/cloudflare-platform.test.ts asserts they agree). Measured
-// 2026-08-31..09-06 via Workers Observability, max cpuTimeMs per trigger: daily
-// backup 1390ms, improve tick 1ms, largest HTTP request 249ms. 1390 * 1.5
-// rounded to 2100. A runaway invocation is killed by the platform at this line,
-// which is the one hard stop budget alerts cannot provide.
-export const LIMITS = { cpu_ms: 2100 };
+// limits.cpu_ms (test/cloudflare-platform.test.ts asserts they agree). A runaway
+// invocation is killed by the platform at this line, which is the one hard stop
+// budget alerts cannot provide.
+//
+// Resized 2026-09-07. Measured max cpuTimeMs for the backup trigger is still
+// 1390 (Workers Observability, 2026-09-01..09-07, n=10), and 1390 * 1.5 = 2085,
+// so the old 2100 met its own rule while running out: the backup dumps
+// `document_versions`, which has never been pruned and went 25.5MB to 53.9MB in
+// the 23 days to 2026-09-07. First 90-day prune lands about 2026-10-04, by which
+// point the table projects to ~87MB and the dump to ~2240ms. 2240 * 1.5, rounded.
+// The full derivation is in wrangler.jsonc.example beside the same number.
+export const LIMITS = { cpu_ms: 3500 };
 
 export const D1 = { name: "capsid", id: "f24921c8-5e6f-499e-96a1-f124f52f12f7" };
 

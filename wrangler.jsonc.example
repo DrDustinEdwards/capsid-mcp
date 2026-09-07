@@ -11,14 +11,31 @@
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "keep_vars": true,
   "observability": { "enabled": true },
-  // THE RUNAWAY GUARD (Cloudflare platform arc 2026-09-06). Budget alerts are
-  // informational and cannot stop a Worker, so the per-invocation CPU ceiling is
-  // the one platform-enforced hard stop. MEASURED, not guessed, over
-  // 2026-08-31..09-06 via Workers Observability (max cpuTimeMs per trigger):
-  // daily backup cron 1390ms, improve tick 1ms, largest HTTP request (POST /mcp)
-  // 249ms. Ceiling = 1390 * 1.5, rounded to 2100. scripts/bindings.mjs exports
-  // the same number and test/cloudflare-platform.test.ts fails if they drift.
-  "limits": { "cpu_ms": 2100 },
+  // THE RUNAWAY GUARD (Cloudflare platform arc 2026-09-06, resized 2026-09-07).
+  // Budget alerts are informational and cannot stop a Worker, so the
+  // per-invocation CPU ceiling is the one platform-enforced hard stop.
+  //
+  // MEASURED, and then PROJECTED, because the two give different answers and the
+  // measurement alone is the trap. Workers Observability over 2026-09-01..09-07,
+  // filtered to the backup trigger: max cpuTimeMs 1390, p99 1390, n=10. The old
+  // ceiling of 2100 is 1390 * 1.5, so it satisfied its own stated rule on the day
+  // it was written and would have kept satisfying it while quietly running out.
+  //
+  // What the rule missed is that the backup's cost is a function of a table that
+  // has never been pruned. `document_versions` in the off-account mirror went
+  // 25,529,382 bytes (2026-08-15) to 53,948,435 bytes (2026-09-07): it more than
+  // doubled in 23 days, and the 90-day prune has not fired yet because the oldest
+  // rows date from 2026-07-06. First prune lands about 2026-10-04, so the table
+  // grows for roughly another month at ~1.2MB/day to about 87MB before it reaches
+  // steady state. The dump is JSON.stringify over those rows, so CPU tracks bytes
+  // almost linearly: 1390ms at ~54MB projects to ~2240ms at ~87MB, which the old
+  // 2100 would have killed mid-run.
+  //
+  // 2240 * 1.5, rounded, is the number below. Sized against where the workload is
+  // going rather than where it was on one measured week. scripts/bindings.mjs
+  // exports the same number and test/cloudflare-platform.test.ts fails if they
+  // drift; that test also asserts the floor, so shrinking this is a build failure.
+  "limits": { "cpu_ms": 3500 },
   // THREE CRONS. src/index.ts dispatches on which one fired and exports the same
   // three strings; test/improve-cron.test.ts derives one list from the other and
   // fails in both directions, so this config and the handler cannot drift.

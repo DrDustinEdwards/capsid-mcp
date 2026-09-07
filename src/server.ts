@@ -967,10 +967,22 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
       const body = version.body ?? "";
       const statements: D1PreparedStatement[] = [];
       if (prior) {
+        // SNAPSHOT FROM THE LIVE ROW, INSIDE THE BATCH (audit 2026-09-07, Grok
+        // MAJOR 10). write and delete were fixed on 2026-09-06 and restore was
+        // not, so this was the last write path still binding the body this
+        // handler had READ rather than what the table HELD at commit. Restore
+        // elicits a confirmation, so the gap here could be the full 90 second
+        // prompt: a body written in that window was overwritten while the
+        // snapshot recorded its predecessor, and the racer's body then existed
+        // nowhere. The SELECT runs in the same transaction as the overwrite and
+        // cannot be a write behind.
         statements.push(
           db
-            .prepare("INSERT INTO document_versions (document_id, namespace, path, title, body) VALUES (?1, ?2, ?3, ?4, ?5)")
-            .bind(prior.id, namespace, path, prior.title, prior.body)
+            .prepare(
+              `INSERT INTO document_versions (document_id, namespace, path, title, body)
+               SELECT id, namespace, path, title, body FROM documents WHERE namespace = ?1 AND path = ?2`
+            )
+            .bind(namespace, path)
         );
       }
       statements.push(
