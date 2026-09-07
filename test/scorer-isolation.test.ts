@@ -204,8 +204,13 @@ test("attempt code runs only inside a network-less, read-only, digest-pinned con
   for (const mount of [
     /-v "\$\{RUNNER_TEMP\}\/attempt\/code:\/attempt:ro"/,
     /-v "\$\{RUNNER_TEMP\}\/holdout:\/holdout:ro"/,
-    /-v "\$\{GITHUB_WORKSPACE\}\/node_modules:\/nm:ro"/,
-    /-v "\$\{GITHUB_WORKSPACE\}\/test:\/trusted-test:ro"/,
+    /-v "\$\{RUNNER_TEMP\}\/trusted:\/trusted:ro"/,
+    // The whole default-branch checkout, read-only, since 2026-09-07: the sandbox
+    // now runs the repo's OWN test and lint commands, which need its tests,
+    // configs and node_modules. Those are all protected paths, so taking them
+    // from the trusted checkout rather than the artifact is the stronger reading
+    // of the same rule the narrower /nm and /trusted-test mounts expressed.
+    /-v "\$\{GITHUB_WORKSPACE\}:\/repo:ro"/,
   ]) {
     assert.match(WORKFLOW, mount, `every bind mount must be read-only: ${mount}`);
   }
