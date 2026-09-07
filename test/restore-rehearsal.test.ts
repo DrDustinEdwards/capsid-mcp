@@ -3,6 +3,9 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+// @ts-expect-error the scripts/ tree is plain .mjs with no type declarations, and
+// deliberately so: the rehearsal runs in the live CI job with no npm ci and no
+// build step.
 import { deriveTables, rehearse } from "../scripts/restore-rehearsal.mjs";
 
 // THE RESTORE REHEARSAL GUARD (session 3, group 2). Each plant confirms a check
