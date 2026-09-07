@@ -752,6 +752,10 @@ export async function openPr(
 // direct mode (and pr mode aimed at the default branch) against it.
 export const SELF_REPO = "DrDustinEdwards/capsid-mcp";
 
+// What makes a workflow a scorer, regardless of its file name: it posts a signed
+// report to this path. Used by ci_dispatch's content check.
+const SCORE_PATH_MARKER = "/improve/score";
+
 function branchSlug(path: string): string {
   return path.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "file";
 }
@@ -1690,15 +1694,74 @@ export async function ciDispatch(
   // the report to the run's in-flight attempt and head sha, but that is the
   // second lock; this is the first. The loop dispatches its own scorer through
   // dispatchScorer, and a human shakedown goes through GitHub directly.
-  if (args.workflow === SCORER_WORKFLOW) {
-    throw new Error(
-      `ci_dispatch refuses: ${SCORER_WORKFLOW} is the improve loop's scorer, and a hand dispatch of it can mint a signed score report for an arbitrary ref. The loop dispatches it itself; run a shakedown from GitHub directly.`
-    );
+  // THE SCORER IS NOT HAND-DISPATCHABLE THROUGH THIS TOOL, and the refusal now
+  // matches what the workflow IS rather than one spelling of its name (audit
+  // 2026-09-07, Opus MAJOR 2.1, Grok section 23 item 7). The old check was
+  // `args.workflow === "improve-score.yml"`, an exact basename compare, and
+  // GitHub's dispatch endpoint accepts the numeric workflow id or the full path
+  // at that position just as happily, so the refusal was one `gh api` call away
+  // from being bypassed. Three checks now, in cost order.
+  if (args.workflow !== undefined) {
+    // 1. Shape. A workflow is a YAML file in .github/workflows; a numeric id is
+    //    not a name this tool accepts, which closes the alias without needing a
+    //    lookup to notice it.
+    const basename = args.workflow.split("/").pop() ?? "";
+    if (!/^[A-Za-z0-9._-]+\.ya?ml$/.test(basename)) {
+      throw new Error(
+        `ci_dispatch refuses: '${args.workflow}' is not a workflow file name. Pass the file name (for example ci.yml). A numeric workflow id is refused because it names the same file by a different route and defeats the scorer refusal below.`
+      );
+    }
+    // 2. Name, on the basename, so a full path spelling is caught too.
+    if (basename === SCORER_WORKFLOW) {
+      throw new Error(
+        `ci_dispatch refuses: ${SCORER_WORKFLOW} is the improve loop's scorer, and a hand dispatch of it can mint a signed score report for an arbitrary ref. The loop dispatches it itself; run a shakedown from GitHub directly.`
+      );
+    }
   }
   const { owner, repo, full } = await resolveRepo(env, namespace, repoSelector);
 
+  // 3. CONTENT. A scorer renamed, copied or vendored under another file name is
+  //    still a scorer: what makes it dangerous is that it holds the signing key
+  //    and posts to the score endpoint. Read the file on the DEFAULT branch (the
+  //    ref a dispatch resolves the workflow from) and refuse anything that
+  //    declares it. Read failures do NOT refuse: a workflow this tool cannot see
+  //    is the ordinary case for a repo whose default branch differs, and failing
+  //    closed here would make ci_dispatch unusable on a network blip. The two
+  //    checks above are the ones that hold without a lookup.
+  if (args.workflow) {
+    try {
+      const resp = await cachedGet(env, owner, repo, `/repos/${owner}/${repo}/contents/${encodePath(`.github/workflows/${args.workflow.split("/").pop()}`)}`);
+      if (resp.ok) {
+        const data = (await resp.json()) as { content?: string; encoding?: string };
+        const body = data.encoding === "base64" && data.content ? base64Decode(data.content) : "";
+        if (body.includes(SCORE_PATH_MARKER)) {
+          throw new Error(
+            `ci_dispatch refuses: ${args.workflow} on ${full} posts to ${SCORE_PATH_MARKER}, which makes it a scorer whatever it is called. A hand dispatch of it can mint a signed score report for an arbitrary ref.`
+          );
+        }
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith("ci_dispatch refuses")) throw err;
+      // Anything else is a lookup problem, not a verdict. Named, not swallowed.
+      console.log(`CI_DISPATCH_CONTENT_CHECK_SKIPPED ${full} ${args.workflow}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   if (args.run_id) {
     if (args.workflow) throw new Error("ci_dispatch: pass workflow and ref to start a run, or run_id to rerun one, not both");
+    // A RERUN IS A DISPATCH BY ANOTHER NAME. Rerunning the scorer's failed jobs
+    // re-executes the Post step with the key, against whatever ref that run used,
+    // so it is refused for the same reason a fresh dispatch is.
+    const runResp = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/actions/runs/${args.run_id}`);
+    if (runResp.ok) {
+      const runData = (await runResp.json()) as { path?: string; name?: string };
+      const runBasename = (runData.path ?? "").split("/").pop() ?? "";
+      if (runBasename === SCORER_WORKFLOW) {
+        throw new Error(
+          `ci_dispatch refuses: run ${args.run_id} on ${full} is a ${SCORER_WORKFLOW} run, and rerunning it re-executes the signing step against that run's ref. The loop dispatches its own scorer.`
+        );
+      }
+    }
     const resp = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/actions/runs/${args.run_id}/rerun-failed-jobs`, {
       method: "POST",
     });

@@ -718,6 +718,28 @@ export async function ingestScore(env: Env, report: ScoreReport, now: Date): Pro
     return { ok: false, message: `report namespace '${report.namespace}' does not match run ${run.id} ('${run.namespace}')` };
   }
 
+  // THE THREE STOPS APPLY HERE TOO (audit 2026-09-07, Grok MAJOR 6, Opus section
+  // 5 budget note). Pause was checked in openOne, mode in openOne, budget in the
+  // opener and the tick. None of them was checked at ingest, so a score POST
+  // still kept the change, wrote improve:best, abstracted a skill and advanced
+  // the run in a namespace a human had explicitly paused, or after the mode was
+  // switched off, or past the spend cap. A stop that only stops new work is not
+  // a stop: the in-flight attempt is the one someone paused the namespace to
+  // stop. Ingest is the last gate an attempt passes, so it is the one that has to
+  // hold.
+  const paused = await pausedReason(env.APP_KV, run.namespace);
+  if (paused) {
+    return { ok: false, message: `${run.namespace} is paused (${paused}); this score is not ingested and the attempt is not kept. Delete the pause key to resume.` };
+  }
+  const { mode: currentMode } = await readMode(env.APP_KV);
+  if (currentMode === "off") {
+    return { ok: false, message: `improve_mode is off; this score is not ingested and the attempt is not kept.` };
+  }
+  const budget = await checkBudget(env, now);
+  if (budget.exceeded) {
+    return { ok: false, message: `${budget.reason}; this score is not ingested and the attempt is not kept.` };
+  }
+
   // THE HOLDOUT CHECK, before anything is believed. A report that disagrees with
   // the manifest about how many hidden tests exist is refused outright.
   const manifest = await readHoldoutManifest(env, run.namespace);
@@ -727,6 +749,29 @@ export async function ingestScore(env: Env, report: ScoreReport, now: Date): Pro
   const isBaseline = report.attempt_id === baselineId(run.id);
 
   if (isBaseline) {
+    // BIND THE BASELINE LIKE AN ATTEMPT (audit 2026-09-07, Grok MAJOR 5). Until
+    // now the baseline branch only had to name `<run>-baseline` and win the CAS.
+    // It was not checked against the run's in-flight attempt or against the
+    // commit it claimed to measure, so a rerun of the baseline Actions job after
+    // the run had moved on, or a hand dispatch naming that attempt_id with a
+    // chosen branch, would overwrite the run's baseline metrics with a
+    // measurement of something else. Every later comparison is against those
+    // numbers, so this is the one row that silently changes every verdict.
+    //
+    // The baseline branch is created at base_sha and nothing is committed to it,
+    // so its head IS base_sha. That is what the report must carry.
+    if (run.current_attempt !== report.attempt_id) {
+      return {
+        ok: true,
+        message: `run ${run.id} is not awaiting its baseline (current attempt: ${run.current_attempt ?? "none"}); ignored as a duplicate or stale baseline report`,
+      };
+    }
+    if ((run.base_sha ?? "") !== report.head_sha) {
+      return {
+        ok: false,
+        message: `baseline report head_sha ${report.head_sha} does not match run ${run.id} base_sha ${run.base_sha ?? "(none)"}: the report measured a different commit`,
+      };
+    }
     const moved = await advanceRun(env.DB, { runId: run.id, expected: "awaiting-score", next: "judging" });
     if (!moved) return { ok: true, message: "baseline already ingested; nothing to do" };
     await env.DB.batch([

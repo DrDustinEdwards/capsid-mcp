@@ -232,6 +232,7 @@ export interface FakeD1Rows {
   improve_attempts: Array<Record<string, unknown>>;
   improve_scores: Array<Record<string, unknown>>;
   improve_skills: Array<Record<string, unknown>>;
+  improve_jti: Array<Record<string, unknown>>;
   audit_log: Array<{ namespace: string; path: string; actor: string | null }>;
 }
 
@@ -320,6 +321,7 @@ export function fakeD1(opts: FakeD1Options = {}): FakeD1 {
     improve_attempts: (opts.improveAttempts ?? []).map((a) => ({ ...IMPROVE_ATTEMPT_DEFAULTS, ...a })),
     improve_scores: opts.improveScores ?? [],
     improve_skills: (opts.improveSkills ?? []).map((k) => ({ ...IMPROVE_SKILL_DEFAULTS, ...k })),
+    improve_jti: [],
     audit_log: opts.auditLog ?? [],
   };
   const recorded: Recorded[] = [];

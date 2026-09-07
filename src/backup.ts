@@ -117,6 +117,9 @@ export const TABLES = [
   "improve_attempts",
   "improve_runs",
   "improve_skills",
+  // The replay cache (migrations/0004). Pruned below rather than retained: a jti
+  // is only meaningful inside the 30-minute signature window.
+  "improve_jti",
 ] as const;
 
 export interface BackupSummary {
@@ -313,6 +316,10 @@ async function exportAndPrune(env: Env, now: string): Promise<BackupSummary> {
       `-${AUDIT_RETENTION_DAYS} days`
     ),
     env.DB.prepare("DELETE FROM audit_log WHERE at < datetime('now', ?1)").bind(`-${AUDIT_RETENTION_DAYS} days`),
+    // The replay cache, appended LAST so the two count/delete pairs above keep
+    // the positions their counters read. A jti is only meaningful inside the
+    // 30-minute signature window, so a day is generous.
+    env.DB.prepare("DELETE FROM improve_jti WHERE seen_at < datetime('now', '-1 day')"),
   ]);
 
   // Stamp the last CLEAN success. Read by /health, which warns when it is older

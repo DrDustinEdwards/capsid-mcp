@@ -55,4 +55,4 @@ End: write NOTHING by default. The end-of-session episodic was withdrawn portfol
 
     npx wrangler d1 export capsid --remote --no-schema --table <table> --output export-<table>.sql
 
-Export the real tables individually (NINE since migrations/0003_improve.sql added four; `TABLES` in `src/backup.ts` is the list, and test/backup.test.ts derives it from `migrations/` in both directions), take the schema from `migrations/`, and import `documents` FIRST so the FTS triggers rebuild the index. Never export `documents_fts` or its shadow tables. Full runbook, including the measured traps: `capsid/protocol-restore.md`.
+Export the real tables individually (TEN since migrations/0004_improve_jti.sql added the replay cache; `TABLES` in `src/backup.ts` is the list, and test/backup.test.ts derives it from `migrations/` in both directions), take the schema from `migrations/`, and import `documents` FIRST so the FTS triggers rebuild the index. Never export `documents_fts` or its shadow tables. Full runbook, including the measured traps: `capsid/protocol-restore.md`.

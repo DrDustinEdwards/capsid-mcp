@@ -92,31 +92,44 @@ export async function readBoundedText(
   return { ok: true, text: new TextDecoder().decode(joined) };
 }
 
-// The replay cache key and its TTL. The signature is valid across a +/-30 minute
-// window, so the TTL covers the whole span (past skew plus future skew) and a
-// captured signed report cannot be re-accepted anywhere inside it.
-export const jtiReplayKey = (namespace: string, jti: string) => `improve:jti:${namespace}:${jti}`;
-export const JTI_REPLAY_TTL_SECONDS = Math.ceil((2 * SIGNATURE_MAX_AGE_MS) / 1000);
-
-// Claim a report's nonce, or refuse it. First sight records the jti and returns ok;
-// a jti seen before for this namespace is a replay. FAILS CLOSED on a KV error,
-// because this endpoint moves the improve state machine and a replay slipping past
-// a sick KV is exactly what the cache exists to stop.
+// Claim a report's nonce, or refuse it. THE DATABASE DECIDES, not the code
+// (audit 2026-09-07, Grok MAJOR 3).
+//
+// This was a KV get-then-put: read the key, and write it if absent. Those are two
+// round trips with nothing atomic between them, so two requests carrying the same
+// captured signature both read absent and both proceed. The signature is valid
+// for 30 minutes either side, so a captured POST could be replayed for an hour by
+// racing it against itself, on all three signed endpoints.
+//
+// An INSERT against a PRIMARY KEY has no such window: it either returns the row,
+// meaning this call claimed the nonce, or returns nothing, meaning someone else
+// already had it. RETURNING rather than meta.changes, for the reason stated all
+// over this repo.
+//
+// FAILS CLOSED on a database error, because these endpoints move the improve
+// state machine and a replay slipping past a sick database is exactly what the
+// cache exists to stop.
 export async function claimJti(
-  kv: KVNamespace,
-  namespace: string,
+  db: D1Database,
+  scope: string,
   jti: string
 ): Promise<{ ok: true } | { ok: false; status: number; refusal: string }> {
-  const key = jtiReplayKey(namespace, jti);
   try {
-    if (await kv.get(key)) return { ok: false, status: 409, refusal: "replay: this score report (jti) was already accepted" };
-    await kv.put(key, "1", { expirationTtl: JTI_REPLAY_TTL_SECONDS });
-    return { ok: true };
+    const { results } = await db
+      .prepare(
+        `INSERT INTO improve_jti (scope, jti) VALUES (?1, ?2)
+         ON CONFLICT(scope, jti) DO NOTHING
+         RETURNING jti`
+      )
+      .bind(scope, jti)
+      .all<{ jti: string }>();
+    if (results.length === 1) return { ok: true };
+    return { ok: false, status: 409, refusal: "replay: this signed request (jti) was already accepted" };
   } catch (err) {
     return {
       ok: false,
       status: 503,
-      refusal: `could not verify replay status (${err instanceof Error ? err.message : String(err)}); refusing the report`,
+      refusal: `could not verify replay status (${err instanceof Error ? err.message : String(err)}); refusing the request`,
     };
   }
 }

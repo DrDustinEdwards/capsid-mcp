@@ -28,11 +28,11 @@ async function bodyOf(resp: Response): Promise<Record<string, unknown>> {
 
 test("schema_version is the newest applied migration name", async () => {
   const env = healthEnv({
-    DB: fakeD1({ migrations: ["0001_init.sql", "0002_document_links.sql", "0003_improve.sql"] }).db,
+    DB: fakeD1({ migrations: ["0001_init.sql", "0002_document_links.sql", "0003_improve.sql", "0004_improve_jti.sql"] }).db,
     APP_KV: fakeKv({ seed: { "backup:last-ok": new Date().toISOString() } }).kv,
   });
   const body = await bodyOf(await handleHealth(env));
-  assert.equal(body.schema_version, "0003_improve.sql");
+  assert.equal(body.schema_version, "0004_improve_jti.sql");
   // Pinned to the real migrations directory, so a new migration that ships
   // without this assertion tracking it fails here rather than drifting silently.
   assert.equal(body.schema_version, NEWEST_MIGRATION);

@@ -78,6 +78,11 @@ export interface ImproveRows {
   improve_attempts: Array<Record<string, unknown>>;
   improve_scores: Array<Record<string, unknown>>;
   improve_skills: Array<Record<string, unknown>>;
+  // The replay cache (migrations/0004). Row-backed like the rest, so the PRIMARY
+  // KEY behaviour the code now relies on is actually modelled: a second claim of
+  // the same (scope, jti) returns no row, and the fake can therefore DISAGREE
+  // with a handler that assumed it would.
+  improve_jti: Array<Record<string, unknown>>;
 }
 
 export type ImproveAnswer = { handled: false } | { handled: true; results: unknown[] };
@@ -85,7 +90,7 @@ export type ImproveAnswer = { handled: false } | { handled: true; results: unkno
 const flat = (sql: string) => sql.replace(/\s+/g, " ").trim();
 
 export function isImproveStatement(sql: string): boolean {
-  return /\bimprove_(runs|attempts|scores|skills)\b/i.test(sql);
+  return /\bimprove_(runs|attempts|scores|skills|jti)\b/i.test(sql);
 }
 
 // The column list from `INSERT INTO t (a, b, c) VALUES (?1, ?2, ?3)`, paired with
@@ -244,6 +249,24 @@ export function improveExec(sql: string, params: unknown[], rows: ImproveRows): 
     const bound = /LIMIT \?(\d+)/i.exec(text);
     const limit = literal ? Number(literal[1]) : bound ? Number(params[Number(bound[1]) - 1]) : out.length;
     return { handled: true, results: out.slice(0, limit) };
+  }
+
+  // ---- the replay cache -----------------------------------------------------
+
+  // INSERT ... ON CONFLICT DO NOTHING RETURNING. The whole point of the statement
+  // is that the DATABASE decides who claimed the nonce, so the fake models the
+  // uniqueness rather than the SQL: a row already present returns nothing.
+  if (/^INSERT INTO improve_jti/i.test(text)) {
+    const [scope, jti] = params;
+    const already = rows.improve_jti.some((r) => r.scope === scope && r.jti === jti);
+    if (already) return { handled: true, results: [] };
+    rows.improve_jti.push({ scope, jti, seen_at: "2026-09-01 08:00:00" });
+    return { handled: true, results: [{ jti }] };
+  }
+
+  if (/^DELETE FROM improve_jti/i.test(text)) {
+    rows.improve_jti.length = 0;
+    return { handled: true, results: [] };
   }
 
   // ---- skills ---------------------------------------------------------------

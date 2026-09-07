@@ -6,7 +6,6 @@ import {
   checkHoldout,
   claimJti,
   deriveScoreKey,
-  JTI_REPLAY_TTL_SECONDS,
   MAX_REPORT_BYTES,
   parseScoreReport,
   readBoundedText,
@@ -16,7 +15,7 @@ import {
   verifySignedReport,
   type ScoreReport,
 } from "../src/improve-scorer.ts";
-import { fakeKv } from "./fakes.ts";
+import { fakeD1, fakeKv } from "./fakes.ts";
 
 // The scorer seam: who may report a score, and what a report has to say to be
 // believed. Nothing here needs a database or a network.
@@ -228,25 +227,27 @@ test("readBoundedText returns the body when it is under the cap", async () => {
   assert.equal(result.ok && result.text, body);
 });
 
-test("claimJti admits a nonce once, then refuses the replay for the window", async () => {
-  const { kv, puts } = fakeKv();
-  const first = await claimJti(kv, "capsid", "nonce-abc");
+// MOVED FROM KV TO D1 on 2026-09-07 (Grok MAJOR 3). The cache was a get-then-put
+// with no atomicity between the two calls; it is now an INSERT against a PRIMARY
+// KEY, so the database decides. The concurrency property that change exists for
+// is asserted in test/ingest-hardening.test.ts, which races three claims.
+test("claimJti admits a nonce once, then refuses the replay", async () => {
+  const d1 = fakeD1({});
+  const first = await claimJti(d1.db, "capsid", "nonce-abc");
   assert.equal(first.ok, true);
-  // Recorded with a TTL that covers the whole signature window.
-  const put = puts.find((p) => p.key === "improve:jti:capsid:nonce-abc");
-  assert.ok(put);
-  assert.equal(put.ttl, JTI_REPLAY_TTL_SECONDS);
-  const replay = await claimJti(kv, "capsid", "nonce-abc");
+  const replay = await claimJti(d1.db, "capsid", "nonce-abc");
   assert.equal(replay.ok, false);
   assert.equal(replay.ok === false && replay.status, 409);
-  // A different nonce, or the same nonce in another namespace, is not a replay.
-  assert.equal((await claimJti(kv, "capsid", "nonce-xyz")).ok, true);
-  assert.equal((await claimJti(kv, "foxing", "nonce-abc")).ok, true);
+  // A different nonce, or the same nonce in another scope, is not a replay.
+  assert.equal((await claimJti(d1.db, "capsid", "nonce-xyz")).ok, true);
+  assert.equal((await claimJti(d1.db, "foxing", "nonce-abc")).ok, true);
 });
 
-test("claimJti FAILS CLOSED when KV cannot be read", async () => {
-  const { kv } = fakeKv({ failGet: true });
-  const verdict = await claimJti(kv, "capsid", "nonce-abc");
+test("claimJti FAILS CLOSED when the database cannot be reached", async () => {
+  const broken = {
+    prepare: () => ({ bind: () => ({ all: async () => { throw new Error("unavailable"); } }) }),
+  } as unknown as D1Database;
+  const verdict = await claimJti(broken, "capsid", "nonce-abc");
   assert.equal(verdict.ok, false);
   assert.equal(verdict.ok === false && verdict.status, 503);
 });

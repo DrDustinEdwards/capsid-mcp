@@ -555,7 +555,7 @@ async function handleBackupCredential(request: Request, env: Env): Promise<Respo
   const parsed = parseBackupCredentialRequest(body);
   if (!parsed.ok) return textResponse(parsed.refusal, 400);
 
-  const claim = await claimJti(env.APP_KV, "backup", parsed.jti);
+  const claim = await claimJti(env.DB, "backup", parsed.jti);
   if (!claim.ok) return textResponse(claim.refusal, claim.status);
 
   const minted = await mintBackupCredential(env);
@@ -597,7 +597,7 @@ async function handleHoldoutCredential(request: Request, env: Env): Promise<Resp
     );
   }
 
-  const claim = await claimJti(env.APP_KV, verdict.namespace, parsed.jti);
+  const claim = await claimJti(env.DB, verdict.namespace, parsed.jti);
   if (!claim.ok) return textResponse(claim.refusal, claim.status);
 
   const minted = await mintHoldoutCredential(env, verdict.namespace);
@@ -656,7 +656,7 @@ async function handleImproveScore(request: Request, env: Env): Promise<Response>
   // cannot be swapped; a jti seen before, for this namespace, is refused. claimJti
   // fails closed on a KV error, since a replay slipping past a sick KV is exactly
   // what it exists to stop.
-  const claim = await claimJti(env.APP_KV, verdict.namespace, parsed.report.jti);
+  const claim = await claimJti(env.DB, verdict.namespace, parsed.report.jti);
   if (!claim.ok) {
     if (claim.status === 503) console.error(`IMPROVE_SCORE_REPLAY_KV_ERROR ${verdict.namespace}: ${claim.refusal}`);
     return textResponse(claim.refusal, claim.status);

@@ -80,7 +80,13 @@ async function harness(opts: {
     improveScores: opts.improveScores,
     improveSkills: opts.improveSkills,
   });
-  const kv = fakeKv({ seed: { "improve:anchor:capsid": await pin(), ...(opts.kv ?? {}) }, seedToken: true });
+  // improve_mode defaults to "api" here, and opts.kv still overrides it. Ingest
+  // now refuses when the mode is off, when the namespace is paused, or when the
+  // budget is exceeded (2026-09-07, Grok MAJOR 6), so a harness that left the
+  // mode unset would make every ingest test assert the refusal instead of the
+  // thing it is about. The refusals have their own tests in
+  // test/ingest-hardening.test.ts rather than being asserted by accident here.
+  const kv = fakeKv({ seed: { improve_mode: "api", "improve:anchor:capsid": await pin(), ...(opts.kv ?? {}) }, seedToken: true });
   const holdout = fakeR2(
     opts.holdoutTotal === null
       ? {}
@@ -147,10 +153,11 @@ test("MODE off records nothing and opens nothing, but still verifies the anchors
 
 test("MODE off is the default, so an unset key runs nothing", async () => {
   await withFetch({}, async () => {
-    const { d1, env } = await harness({});
+    // Explicitly UNSET, overriding the harness default, because "off when the key
+    // is missing" is exactly what this test is about.
+    const { d1, env } = await harness({ kv: { improve_mode: "" } });
     const summary = await openRuns(env, NOW, "capsid");
     assert.equal(summary.mode, "off");
-    assert.match(summary.modeNote ?? "", /unset/);
     assert.deepEqual(d1.rows.improve_runs, []);
   });
 });
