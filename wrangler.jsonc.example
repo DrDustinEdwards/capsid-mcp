@@ -2,7 +2,12 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "capsid",
   "main": "src/index.ts",
-  "compatibility_date": "2026-06-01",
+  // Bumped 2026-06-01 -> 2026-09-06 (platform arc). nodejs_compat is enabled by
+  // default for dates >= 2026-08-04, so the explicit flag below is now redundant;
+  // it stays because an explicit flag survives a future date rollback and costs
+  // nothing. scripts/bindings.mjs carries the same date and
+  // test/cloudflare-platform.test.ts fails if the two drift.
+  "compatibility_date": "2026-09-06",
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "keep_vars": true,
   "observability": { "enabled": true },

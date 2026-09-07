@@ -37,6 +37,35 @@ test(`no Cloudflare API call uses the legacy KV route /${LEGACY_KV_ROUTE}/ (dead
   }
 });
 
+// ---- compatibility date and toolchain pins -----------------------------------
+
+test("wrangler.jsonc.example and bindings.mjs agree on the compatibility date", () => {
+  const example = readFileSync(join(ROOT, "wrangler.jsonc.example"), "utf8");
+  const inExample = /"compatibility_date":\s*"(\d{4}-\d{2}-\d{2})"/.exec(example);
+  assert.ok(inExample, "wrangler.jsonc.example no longer sets compatibility_date");
+  const bindings = readFileSync(join(ROOT, "scripts", "bindings.mjs"), "utf8");
+  const inBindings = /export const COMPATIBILITY_DATE = "(\d{4}-\d{2}-\d{2})"/.exec(bindings);
+  assert.ok(inBindings, "scripts/bindings.mjs no longer exports COMPATIBILITY_DATE");
+  assert.equal(inExample[1], inBindings[1], "the example and bindings.mjs disagree on the compatibility date");
+  // The date must stay at or past nodejs_compat's default-on threshold, or the
+  // explicit flag in the example stops being redundant and starts being load-bearing.
+  assert.ok(inExample[1] >= "2026-08-04", `compatibility date ${inExample[1]} fell behind the nodejs_compat default threshold`);
+});
+
+test("wrangler is pinned EXACT, and outside the d1-migrations-list 7404 bug window", () => {
+  // ^4.107.0 was the hazard: a caret can float a fresh install into 4.120-4.121,
+  // whose `d1 migrations list` answers error 7404 for an existing bound DB, and
+  // the drift assertion would then fail against a healthy database. Newer pins
+  // are walled off differently: every wrangler >= 4.108 peers workers-types v5,
+  // which agents -> partyserver hard-blocks at ^4 until the deferred MCP/types
+  // migration (see capsid work-queue).
+  const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as { devDependencies: Record<string, string> };
+  const pin = pkg.devDependencies.wrangler;
+  assert.match(pin, /^\d+\.\d+\.\d+$/, `wrangler is not pinned exact: "${pin}" can drift into the 7404 bug window`);
+  const minor = Number(pin.split(".")[1]);
+  assert.ok(!(minor === 120 || minor === 121), `wrangler ${pin} is inside the 4.120-4.121 d1 migrations list bug window`);
+});
+
 // ---- the per-invocation CPU ceiling ------------------------------------------
 
 test("wrangler.jsonc.example and bindings.mjs agree on limits.cpu_ms", () => {

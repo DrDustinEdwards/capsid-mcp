@@ -23,6 +23,12 @@
 // These values are published in capsid/core.md and are inert without an API
 // token: they are an assertion, not a credential.
 
+// THE COMPATIBILITY DATE, same string as wrangler.jsonc.example's
+// compatibility_date (test/cloudflare-platform.test.ts asserts they agree).
+// 2026-09-06 per the platform arc; nodejs_compat is default-on from 2026-08-04,
+// so the explicit flag in the example is redundant but kept.
+export const COMPATIBILITY_DATE = "2026-09-06";
+
 // THE PER-INVOCATION CPU CEILING, same number as wrangler.jsonc.example's
 // limits.cpu_ms (test/cloudflare-platform.test.ts asserts they agree). Measured
 // 2026-08-31..09-06 via Workers Observability, max cpuTimeMs per trigger: daily
