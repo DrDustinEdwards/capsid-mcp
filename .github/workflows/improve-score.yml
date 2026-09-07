@@ -335,35 +335,32 @@ jobs:
               # no process started below can read it and forge a marker.
               M="##CAPSID-${CAPSID_NONCE}"
               unset CAPSID_NONCE
-              for e in /repo/* /repo/.[!.]*; do
-                [ -e "$e" ] || continue
-                b=${e##*/}
-                [ "$b" = ".git" ] && continue
-                ln -s "$e" "/work/$b" 2>/dev/null || true
+              # THE TRUSTED TREE IS COPIED, NOT SYMLINKED, AND THE FIRST CI PLANT
+              # IS WHY. Symlinking /work/test at /repo/test made a test file's
+              # REAL path /repo/test/x.test.ts, so node resolved its `../src`
+              # import against /repo and the sandbox measured the default branch
+              # against itself: run 34168480470 reported test_pass_rate 1 for an
+              # attempt that genuinely broke two tests. Only node_modules stays a
+              # symlink, where resolving through the real path is correct.
+              cd /repo || exit 1
+              find . -path ./.git -prune -o -name node_modules -prune -o -type d -print | while read -r d; do
+                mkdir -p "/work/$d"
               done
-              realize() {
-                d=$1
-                [ "$d" = "." ] && return 0
-                realize "$(dirname "$d")"
-                if [ -L "/work/$d" ]; then
-                  t=$(readlink "/work/$d")
-                  rm -f "/work/$d"
-                  mkdir -p "/work/$d"
-                  for e in "$t"/* "$t"/.[!.]*; do
-                    [ -e "$e" ] || continue
-                    ln -s "$e" "/work/$d/${e##*/}"
-                  done
-                elif [ ! -d "/work/$d" ]; then
-                  mkdir -p "/work/$d"
-                fi
-              }
+              find . -path ./.git -prune -o -name node_modules -prune -o -type f -print | while read -r f; do
+                cp "$f" "/work/$f" 2>/dev/null || true
+              done
+              find . -path ./.git -prune -o -name node_modules -print | while read -r d; do
+                rm -rf "/work/$d"
+                ln -s "/repo/${d#./}" "/work/$d"
+              done
               while read -r T; do
                 [ -n "$T" ] || continue
                 [ -d "/attempt/$T" ] || continue
-                realize "$(dirname "$T")"
                 rm -rf "/work/$T"
+                mkdir -p "/work/$(dirname "$T")"
                 cp -R "/attempt/$T" "/work/$T"
               done < /trusted/trees.txt
+              cd /work || exit 1
               mkdir -p /work/.holdout
               cp /holdout/*.test.* /work/.holdout/ 2>/dev/null || true
               LOADER=""

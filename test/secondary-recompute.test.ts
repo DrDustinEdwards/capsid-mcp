@@ -267,3 +267,22 @@ test("the container mounts the trusted checkout read-only and the attempt separa
     "which trees the attempt replaces comes from the trusted map, never from what the artifact happens to contain"
   );
 });
+
+test("PLANT: the trusted tree is COPIED into the sandbox, not symlinked", () => {
+  // Run 34168480470 is the plant that found this. The sandbox symlinked /work/test
+  // at /repo/test, which made a test file's REAL path /repo/test/x.test.ts, so node
+  // resolved its `../src` import against /repo. The sandbox measured the default
+  // branch against itself and reported test_pass_rate 1 for an attempt that broke
+  // two tests. The whole recompute was decorative until this was fixed.
+  const container = EXECUTABLE.slice(EXECUTABLE.indexOf("docker run --rm"));
+  assert.ok(
+    !/ln -s "\$e" "\/work\/\$b"/.test(container),
+    "blanket-symlinking the trusted tree into /work is what made relative imports resolve outside the sandbox"
+  );
+  assert.match(container, /find \. -path \.\/\.git -prune -o -name node_modules -prune -o -type f -print/, "source files are copied");
+  assert.match(
+    container,
+    /find \. -path \.\/\.git -prune -o -name node_modules -print \| while read -r d; do\n\s+rm -rf "\/work\/\$d"\n\s+ln -s "\/repo\/\$\{d#\.\/\}" "\/work\/\$d"/,
+    "node_modules is the ONE thing that stays a symlink, because resolving a package through its real path is correct"
+  );
+});
