@@ -1,4 +1,5 @@
 import type { Env } from "./env";
+import { BACKUP_LAST_OK_KEY } from "./health";
 import { REPORT_PREFIX } from "./headers";
 import { probeFts } from "./store-probe";
 
@@ -313,6 +314,12 @@ async function exportAndPrune(env: Env, now: string): Promise<BackupSummary> {
     ),
     env.DB.prepare("DELETE FROM audit_log WHERE at < datetime('now', ?1)").bind(`-${AUDIT_RETENTION_DAYS} days`),
   ]);
+
+  // Stamp the last CLEAN success. Read by /health, which warns when it is older
+  // than a day. Only on this path: a preflight-refused run returned above without
+  // stamping, because a run that would not trust its own read of the store is not
+  // a backup anyone should count as fresh.
+  await env.APP_KV.put(BACKUP_LAST_OK_KEY, now);
 
   return {
     ran: true,

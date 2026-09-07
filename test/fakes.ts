@@ -217,6 +217,10 @@ export interface FakeD1Options {
   // Seed audit_log rows so the read/brief provenance lookup (last_actor) can be
   // driven. Later entries win, matching ORDER BY id DESC. Absent by default.
   auditLog?: Array<{ namespace: string; path: string; actor: string | null }>;
+  // Applied migration names in apply order, so /health's schema_version query
+  // (SELECT name FROM d1_migrations ORDER BY id DESC LIMIT 1) has something to
+  // answer. Absent by default; a health test seeds them.
+  migrations?: string[];
 }
 
 export interface FakeD1Rows {
@@ -354,6 +358,14 @@ export function fakeD1(opts: FakeD1Options = {}): FakeD1 {
       return rows.versions.find((v) => v.id === id && v.namespace === namespace && v.path === path) ?? null;
     }
     if (/SELECT COUNT\(\*\) AS n/i.test(flat)) return { n: 0 };
+    // /health's D1 liveness probe: a bare SELECT 1, no table. The `... FROM
+    // documents` form below is a different query (does this row exist).
+    if (/^SELECT 1 AS ok$/i.test(flat.trim())) return { ok: 1 };
+    // /health's schema_version probe: the newest applied migration name.
+    if (/FROM d1_migrations/i.test(flat)) {
+      const names = opts.migrations ?? [];
+      return names.length ? { name: names[names.length - 1] } : null;
+    }
     if (/FROM documents/i.test(flat)) {
       const [namespace, boundPath] = params as [string, string];
       // gather's core lookup binds only the namespace and writes path = 'core.md'

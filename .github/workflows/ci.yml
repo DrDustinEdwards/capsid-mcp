@@ -142,6 +142,26 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
+      # Refuse to ship code against a database missing a migration. Migrations are
+      # applied by hand (README), so a commit that adds migrations/000N and pushes
+      # would otherwise deploy a Worker whose SQL assumes a table the live D1 does
+      # not have. wrangler prints "No migrations to apply!" when the remote is
+      # current and lists the pending ones otherwise; its exit code is 0 either
+      # way, so the confirmation string is the signal. Fails closed: an unreadable
+      # or unexpected output is a missing confirmation and stops the deploy.
+      - name: Assert all migrations are applied
+        run: |
+          set -euo pipefail
+          OUT=$(npx wrangler d1 migrations list capsid --remote 2>&1)
+          echo "$OUT"
+          if ! echo "$OUT" | grep -q "No migrations to apply"; then
+            echo "::error::the live database is missing migrations; apply them with 'wrangler d1 migrations apply capsid --remote' before this deploy" >&2
+            exit 1
+          fi
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
       # scripts/deploy.mjs stamps BUILD_SHA, BUILD_DIRTY and BUILT_AT as
       # deploy-time vars. On a runner the tree is a clean checkout, so
       # dirty=false is meaningful here in a way it is not on a laptop.
@@ -181,17 +201,21 @@ jobs:
       # this commit": provenance made it readable (ac88c99), and this makes it
       # asserted on every push.
       #
-      # On a schedule run the deploy job is skipped, needs.deploy.result is
-      # 'skipped', and EXPECT_SHA resolves to the empty string, which the script
-      # treats as falsy. The six-hourly run then asserts the live surface without
-      # claiming anything about which commit is on it, which is correct: nothing
-      # was deployed.
+      # On a push, EXPECT_SHA is this run's commit and gate 1 polls until /health
+      # reports it. On a SCHEDULE run the deploy job is skipped, but github.sha is
+      # still the head of master, so EXPECT_SHA is set to it too: the six-hourly run
+      # now asserts the live sha EQUALS master head. That closes the drift this file
+      # used to call invisible by design, where master moved (a docs-only push whose
+      # deploy failed, or a hand deploy that never happened) and nothing noticed
+      # until the next real push. A stale live sha now fails the scheduled gate
+      # within the poll budget instead.
       #
-      # The poll budget is raised well above the 10 x 3s default because this is
-      # waiting on a rollout that started seconds ago. 40 x 3s gives two minutes.
+      # The poll budget is raised well above the 10 x 3s default because a push is
+      # waiting on a rollout that started seconds ago. 40 x 3s gives two minutes; on
+      # a schedule run a correct surface matches on the first poll.
       - name: verify:live
         env:
-          EXPECT_SHA: ${{ needs.deploy.result == 'success' && github.sha || '' }}
+          EXPECT_SHA: ${{ (needs.deploy.result == 'success' || github.event_name == 'schedule') && github.sha || '' }}
           VERIFY_POLL_ATTEMPTS: "40"
           # Gate 2 writes the client id it registered here, and the reap step below
           # deletes exactly that key. The file is the whole channel between them.

@@ -128,6 +128,17 @@ Three paths, in the order to try them. Path 2 has been executed end to end again
 
 Single-document recovery rarely needs any of this. Every overwrite and delete snapshots the prior row into `document_versions` first, so recovering one document is usually just reading its latest snapshot back.
 
+## Rollback
+
+Restore above is about DATA. Rollback is about CODE: a deploy shipped a bad Worker and the fix is to serve the previous version now, not to wait for a corrected commit through CI.
+
+```
+npx wrangler deployments list
+npx wrangler rollback [<version-id>]
+```
+
+`wrangler rollback` with no id reverts to the immediately previous deployment; pass a version id from the list to go further back. It swaps the Worker script and that version's bindings and vars only. It does NOT touch D1, R2 or KV data, so it is safe to run against a live store, and it does NOT change `master`: the next push to `master` redeploys `HEAD` through CI and supersedes the rollback, so a rollback is a stopgap that buys time to land the real fix, not the fix itself. After rolling back, `/health` reports the rolled-back commit's `sha`, so the scheduled live gate (which asserts `/health` sha equals master head) will go red until the fix ships. That red is correct: it is the gate telling you production is deliberately behind master.
+
 ## Clone setup
 
 1. Install dependencies:

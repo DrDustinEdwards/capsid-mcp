@@ -226,6 +226,10 @@ ${err.stack}` : String(err)}`);
             .catch((err) => {
               console.error(`IMPROVE_OPEN_THREW ${err instanceof Error ? `${err.message}
 ${err.stack}` : String(err)}`);
+              // Rethrow so the invocation counts as failed, like the backup cron
+              // above. A swallowed throw records a clean run for a night the loop
+              // never opened, which is the one signal an operator has.
+              throw err;
             })
         );
       }
@@ -242,6 +246,9 @@ ${err.stack}` : String(err)}`);
           .catch((err) => {
             console.error(`IMPROVE_TICK_THREW ${err instanceof Error ? `${err.message}
 ${err.stack}` : String(err)}`);
+            // Rethrow so a throwing tick records the invocation as failed rather
+            // than as a clean run that advanced nothing.
+            throw err;
           })
       );
     }

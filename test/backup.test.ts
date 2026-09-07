@@ -175,11 +175,12 @@ test("a second concurrent runner exits named and touches nothing", async () => {
 test("the lease carries an expiry and is released when the run ends", async () => {
   const { env, kv } = makeEnv({ documents: DOCS }, MIRROR);
   await runBackup(env);
-  assert.equal(kv.puts.length, 1);
-  assert.equal(kv.puts[0].key, "backup:lease");
+  // A clean run puts twice: the lease (with a ttl) and backup:last-ok (without).
+  const lease = kv.puts.find((p) => p.key === "backup:lease");
+  assert.ok(lease, "the lease was never taken");
   // A crashed run must not wedge backups forever, so the lease cannot be eternal,
   // and KV will not accept a TTL under 60 seconds.
-  assert.ok((kv.puts[0].ttl ?? 0) >= 60, "lease has no usable expiry");
+  assert.ok((lease.ttl ?? 0) >= 60, "lease has no usable expiry");
   assert.equal(kv.store.has("backup:lease"), false, "lease was not released");
 });
 
@@ -265,11 +266,31 @@ test("a pre-change flat dump key ages as its own single-object run", async () =>
 test("/health and the backup preflight probe the index through one module", () => {
   // They must agree. A backup that carried its own copy of the probe would drift
   // from the one the live gate asserts, and the drift would only surface on the day
-  // the store was actually broken.
+  // the store was actually broken. /health lives in health.ts since 2026-09-07.
   const src = (name: string) => readFileSync(join(import.meta.dirname, "..", "src", name), "utf8");
-  for (const name of ["routes.ts", "backup.ts"]) {
+  for (const name of ["health.ts", "backup.ts"]) {
     assert.match(src(name), /from "\.\/store-probe"/, `${name} does not use the shared probe`);
     assert.doesNotMatch(src(name), /documents_fts MATCH/, `${name} carries its own copy of the FTS probe`);
   }
   assert.match(src("store-probe.ts"), /documents_fts MATCH/);
+});
+
+test("a clean run stamps backup:last-ok with the run timestamp", async () => {
+  const { env, kv } = makeEnv({ documents: DOCS }, MIRROR);
+  const result = await runBackup(env);
+  assert.equal(result.ran, true);
+  if (!result.ran) return;
+  const stamp = kv.puts.find((p) => p.key === "backup:last-ok");
+  assert.ok(stamp, "a clean run did not stamp backup:last-ok");
+  // The stamp is the same ISO instant the run used for its lease and dump prefix,
+  // so /health's age is measured from when the backup actually ran.
+  assert.match(stamp.value, /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/);
+});
+
+test("a preflight-refused run does NOT stamp backup:last-ok", async () => {
+  // A run that would not trust its own read of the store must not report itself as
+  // a fresh backup, or /health would go quiet on exactly the day it should warn.
+  const { env, kv } = makeEnv({ documents: [] }, MIRROR);
+  await captureErrors(() => runBackup(env));
+  assert.equal(kv.puts.some((p) => p.key === "backup:last-ok"), false, "a refused run stamped itself as fresh");
 });

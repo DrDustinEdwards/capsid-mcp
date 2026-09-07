@@ -35,7 +35,7 @@ import {
   verifyBackupCredentialRequest,
   verifySignedReport,
 } from "./improve-scorer";
-import { probeFts } from "./store-probe";
+import { handleHealth } from "./health";
 
 const GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize";
 const GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token";
@@ -516,35 +516,8 @@ async function handleCspReport(request: Request, env: Env): Promise<Response> {
   return new Response(null, { status: 204 });
 }
 
-// /health carries deploy provenance so "the deployed worker is this commit" is a
-// readable fact rather than an inference from a clean tree. The vars are stamped at
-// deploy time by scripts/deploy.mjs; dirty=true means the deployed bytes are NOT
-// the named commit.
-//
-// IT ALSO PROBES THE STORE, because provenance alone cannot see the failure that
-// matters most here. Every binding in this Worker is resolved by NAME at deploy
-// time, and a Worker whose DB binding is missing, or pointed at an empty database,
-// starts perfectly and answers /health with a cheerful ok. Every read tool then
-// errors and every write is refused, and nothing in the gate family would have
-// gone red: tsc passes, the tests are offline, and the OAuth gates never touch D1.
-// scripts/ci-config.mjs pins the binding ids for exactly this reason, but that only
-// guards the CI deploy path, not a hand-run wrangler deploy against a stale config.
-//
-// Two probes, because they fail separately:
-//   d1  - SELECT 1. The binding exists and the database answers.
-//   fts - a MATCH that must return one PINNED document. This is the one that
-//         catches index damage, and index damage is real here rather than
-//         theoretical: DELETE FROM documents_fts corrupts the index, COUNT(*) on
-//         an external-content FTS5 table reads through to the content table so it
-//         cannot detect drift, and integrity-check passes on an emptied index
-//         (all three measured 2026-07-27). A MATCH that has to find a specific
-//         row is the only cheap check that fails when the index is empty.
-//
-// A failed probe returns 503 with status "degraded", so a deploy that unbinds the
-// store goes RED rather than green-with-a-detail-nobody-reads.
-//
-// The fts probe itself moved to src/store-probe.ts on 2026-08-17, because the backup
-// preflight refuses to prune on the same signal and the two must be the same probe.
+// /health moved to src/health.ts on 2026-09-07 so it could be tested: routes.ts
+// pulls cloudflare:workers via the Agents SDK and cannot load under node --test.
 // THE SCORE REPORT SINK. CI posts here when it has finished scoring a branch.
 //
 // NOT UNDER /ops/. An /ops/ path means "an operator key opens this", and an
@@ -691,30 +664,6 @@ async function handleImproveScore(request: Request, env: Env): Promise<Response>
 
   const result = await ingestScore(env, parsed.report, new Date());
   return Response.json(result, { status: result.ok ? 200 : 409 });
-}
-
-async function handleHealth(env: Env): Promise<Response> {
-  const provenance = {
-    sha: env.BUILD_SHA ?? "unknown",
-    dirty: env.BUILD_DIRTY === "true",
-    builtAt: env.BUILT_AT ?? null,
-  };
-
-  let d1 = "unbound";
-  let fts = "skipped";
-  try {
-    const one = await env.DB.prepare("SELECT 1 AS ok").first<{ ok: number }>();
-    d1 = one?.ok === 1 ? "ok" : `unexpected: ${JSON.stringify(one)}`;
-  } catch (err) {
-    d1 = `error: ${(err instanceof Error ? err.message : String(err)).slice(0, 120)}`;
-  }
-  if (d1 === "ok") fts = await probeFts(env.DB);
-
-  const healthy = d1 === "ok" && fts === "ok";
-  return Response.json(
-    { status: healthy ? "ok" : "degraded", ...provenance, store: { d1, fts } },
-    { status: healthy ? 200 : 503 }
-  );
 }
 
 export const defaultHandler = {
