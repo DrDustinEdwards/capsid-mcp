@@ -1,0 +1,79 @@
+# The restore rehearsal (session 3, group 2). Weekly, and on demand: pull the
+# newest JSON dump from R2 with a minted one-hour credential and prove it
+# restores into a fresh FTS5 database. A backup nobody has restored is a hope;
+# this turns the restore into a scheduled job that fails loudly when a dump
+# cannot be rebuilt, long before an incident makes it urgent.
+#
+# It uses the SAME /backup/credential mint as the off-account mirror, signed
+# with BACKUP_CREDENTIAL_KEY. This repo is the restore-rehearsal consumer the
+# derive script names alongside the mirror, so BACKUP_CREDENTIAL_KEY belongs on
+# capsid-mcp as well as capsid-backups. The rehearsal reads only the newest run
+# (object-read-only), never writes, and needs no D1 or account access.
+name: restore-rehearsal
+on:
+  schedule:
+    - cron: "30 11 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  rehearse:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Mint a credential and pull the newest dump
+        id: pull
+        env:
+          BACKUP_CREDENTIAL_KEY: ${{ secrets.BACKUP_CREDENTIAL_KEY }}
+          CAPSID_URL: https://capsid.dustin-edwards.workers.dev
+          AWS_DEFAULT_REGION: auto
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+        run: |
+          set -euo pipefail
+          if [ -z "${BACKUP_CREDENTIAL_KEY}" ]; then
+            echo "BACKUP_CREDENTIAL_KEY is not set on this repo; derive it with scripts/improve-derive-key.mjs --backup-credential" >&2
+            exit 1
+          fi
+          TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          BODY=$(node -e 'process.stdout.write(JSON.stringify({ jti: require("crypto").randomUUID() }))')
+          SIG=$(TS="${TS}" BODY="${BODY}" node -e 'const c=require("crypto");const h=c.createHmac("sha256",process.env.BACKUP_CREDENTIAL_KEY);h.update(process.env.TS+"."+process.env.BODY);process.stdout.write(h.digest("hex"))')
+          CRED_FILE=$(mktemp)
+          STATUS=$(/usr/bin/curl --silent --show-error -o "${CRED_FILE}" -w '%{http_code}' \
+            -X POST "${CAPSID_URL}/backup/credential" \
+            -H "Content-Type: application/json" \
+            -H "X-Backup-Timestamp: ${TS}" \
+            -H "X-Backup-Signature: ${SIG}" \
+            --data "${BODY}")
+          if [ "${STATUS}" != "200" ]; then
+            echo "backup credential request failed (HTTP ${STATUS}):" >&2
+            cat "${CRED_FILE}" >&2
+            exit 1
+          fi
+          eval "$(CRED_FILE="${CRED_FILE}" node -e '
+            const c = JSON.parse(require("fs").readFileSync(process.env.CRED_FILE, "utf8"));
+            const fields = [["AWS_ACCESS_KEY_ID", c.access_key_id], ["AWS_SECRET_ACCESS_KEY", c.secret_access_key], ["AWS_SESSION_TOKEN", c.session_token], ["DUMP_ENDPOINT", c.endpoint], ["DUMP_BUCKET", c.bucket], ["DUMP_PREFIX", c.prefix]];
+            for (const [name, value] of fields) {
+              if (!value) { console.error("missing " + name + " in the credential response"); process.exit(1); }
+              process.stdout.write("export " + name + "=" + JSON.stringify(value) + "\n");
+            }')"
+          # The newest run is the last prefix lexically (the keys carry an ISO
+          # timestamp at a fixed offset). List one level, take the last, sync it.
+          NEWEST=$(aws s3 ls "s3://${DUMP_BUCKET}/${DUMP_PREFIX}" --endpoint-url "${DUMP_ENDPOINT}" | awk '/PRE/{print $2}' | sort | tail -1)
+          if [ -z "${NEWEST}" ]; then
+            echo "no run prefixes under ${DUMP_PREFIX}; nothing to rehearse" >&2
+            exit 1
+          fi
+          echo "newest run: ${NEWEST}"
+          mkdir -p dump
+          aws s3 sync "s3://${DUMP_BUCKET}/${DUMP_PREFIX}${NEWEST}" dump/ --endpoint-url "${DUMP_ENDPOINT}"
+
+      - name: Rehearse the restore
+        run: node scripts/restore-rehearsal.mjs dump
