@@ -310,7 +310,16 @@ export function secondaryFromStream(text, namespace, nonce = "") {
   let lint_count = null;
   if (lintSeg !== null && ran(lintSeg) && spec.lint_pattern) {
     const re = new RegExp(spec.lint_pattern);
-    lint_count = lintSeg.lines.filter((/** @type {string} */ l) => re.test(l)).length;
+    const matches = lintSeg.lines.filter((/** @type {string} */ l) => re.test(l)).length;
+    // A CRASH IS NOT A CLEAN LINT, and telling them apart is the whole point.
+    // Measured on foxing 2026-09-08: biome could not resolve its platform binary,
+    // exited 1, printed a Node module-not-found dump, and NOTHING in that dump
+    // matched the count pattern. The honest reading of "zero matches" was
+    // therefore "zero problems", and the report carried lint_count 0 for a lint
+    // that never ran. A clean lint exits 0; a lint that found problems exits
+    // nonzero AND says so in a form the pattern matches. Nonzero with no matches
+    // is neither, so it is null.
+    lint_count = matches > 0 || lintSeg.status === 0 ? matches : null;
   }
   return { test_pass_rate, lint_count };
 }

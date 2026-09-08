@@ -373,16 +373,13 @@ jobs:
                 cp -R "/attempt/$T" "/work/$T"
               done < /trusted/trees.txt
               cd /work || exit 1
-              mkdir -p /work/.holdout
-              cp /holdout/*.test.* /work/.holdout/ 2>/dev/null || true
-              LOADER=""
-              [ -f /work/test/resolve-ts.mjs ] && LOADER="--import ./test/resolve-ts.mjs"
-              for f in /work/.holdout/*.test.*; do
-                [ -e "$f" ] || continue
-                echo "${M}-CASE ${f##*/}"
-                # shellcheck disable=SC2086
-                node --test --test-reporter=tap $LOADER "$f" 2>/dev/null || true
-              done
+              # THE SECONDARY PHASES RUN BEFORE THE HOLDOUT IS COPIED IN, and the
+              # order is load-bearing rather than tidy. The holdout cases land in
+              # /work/.holdout, which is inside the working directory, so a lint
+              # command spelled `eslint .` walks them: on foxhound 2026-09-08 the
+              # count included the hidden suite and its filenames appeared in the
+              # run log. Running each repo command first means the tree they
+              # see is the tree the attempt produced, and nothing else.
               if [ -f /trusted/secondary-test.sh ]; then
                 echo "${M}-TEST"
                 sh /trusted/secondary-test.sh 2>&1
@@ -393,6 +390,16 @@ jobs:
                 sh /trusted/secondary-lint.sh 2>&1
                 echo "${M}-STATUS $?"
               fi
+              mkdir -p /work/.holdout
+              cp /holdout/*.test.* /work/.holdout/ 2>/dev/null || true
+              LOADER=""
+              [ -f /work/test/resolve-ts.mjs ] && LOADER="--import ./test/resolve-ts.mjs"
+              for f in /work/.holdout/*.test.*; do
+                [ -e "$f" ] || continue
+                echo "${M}-CASE ${f##*/}"
+                # shellcheck disable=SC2086
+                node --test --test-reporter=tap $LOADER "$f" 2>/dev/null || true
+              done
               echo "${M}-END"
             ' > "${RUNNER_TEMP}/holdout.tap" 2>"${RUNNER_TEMP}/holdout.err" || true
           echo "container exited $?"
