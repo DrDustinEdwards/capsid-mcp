@@ -216,6 +216,13 @@ export function importedNames(text) {
   // A name is a JavaScript identifier and nothing else. Belt and braces after the
   // regex above: a token that is not one is a parse artefact, and letting one
   // through means the manifest is compared against garbage.
+  //
+  // THE SPREAD IS LOAD-BEARING. The loop DELETES from `names` while iterating it,
+  // and iterating a Set that is being mutated is exactly the case the spread
+  // exists for: it takes a snapshot so the deletions cannot disturb the walk.
+  // dustinedwards-info lints this file more strictly than the repo it is authored
+  // in and flagged it as useless, which it is not.
+  // eslint-disable-next-line unicorn/no-useless-spread -- the Set is mutated inside the loop, so the copy is the point
   for (const name of [...names]) {
     if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name)) names.delete(name);
   }
