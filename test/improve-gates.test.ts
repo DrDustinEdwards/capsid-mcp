@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { anchorDriftVerdict, driftVerdict, monitorAttempt, pathMonitor } from "../src/improve-gates.ts";
-import { parseScoresDoc, seedScoresDoc } from "../src/improve-scores.ts";
+import { parseScoresDoc } from "../src/improve-scores.ts";
 import { DRIFT_RUN_WINDOW, protectedHits } from "../src/improve-schema.ts";
 import type { RunRow } from "../src/improve-state.ts";
 import { fakeEnv } from "./fakes.ts";
 import { IMPROVE_RUN_DEFAULTS } from "./improve-fakes.ts";
+import { seedScoresDoc } from "./seed-scores.ts";
 
 // The two gates. Both halves of the monitor and both halves of the drift gate.
 

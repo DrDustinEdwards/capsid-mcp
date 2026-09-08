@@ -209,22 +209,17 @@ async function cachedGet(env: Env, owner: string, repo: string, path: string): P
   return new Response(body, { status: resp.status });
 }
 
-// INVALIDATION AFTER A WRITE (audit 2, F15). Nothing deleted these entries, so for
-// up to READ_CACHE_TTL_SECONDS after a commit, read_repo_file returned the body the
-// write replaced and list_repo_tree the listing it changed. Capsid writes to a repo
-// and then reads it back, so this is the ordinary path, not a corner.
+// INVALIDATION AFTER A WRITE. Nothing deleted these entries, so for up to
+// READ_CACHE_TTL_SECONDS after a commit a read returned the body the write
+// replaced. Capsid writes and then reads back, so this is the ordinary path.
 //
-// Swept by REPO PREFIX rather than by computed key, deliberately. A key-precise
-// invalidation has to reproduce the exact spelling of every entry the write
-// affected: the file path through encodePath, the parent directory listing, the
-// root listing's trailing slash, and each of those in both the no-ref spelling and
-// the ?ref=<branch> spelling. Miss one spelling and the stale read survives while
-// the code reads as though it were handled. The prefix sweep matches the SHAPE
-// instead, so it cannot be defeated by a spelling, and it covers a merge, where the
-// affected paths are not known here at all without another API call. It
-// over-invalidates: a write on a work branch also drops the default branch's
-// entries for that repo. That costs one GitHub GET on the next read, which is the
-// cheaper side to be wrong on.
+// Swept by REPO PREFIX rather than by computed key. A key-precise invalidation has
+// to reproduce the exact spelling of every affected entry (the encoded path, the
+// parent listing, the root listing's trailing slash, each in both the no-ref and
+// the ?ref= spelling), and one missed spelling is a stale read the code reads as
+// handled. The prefix sweep matches the SHAPE, so a spelling cannot defeat it, and
+// it covers a merge, where the affected paths are not known here at all. It
+// over-invalidates by one GitHub GET, which is the cheaper side to be wrong on.
 async function invalidateRepoReads(env: Env, owner: string, repo: string): Promise<number> {
   const prefix = readPrefix(owner, repo);
   let cursor: string | undefined;
@@ -761,21 +756,15 @@ export const SELF_REPO = "DrDustinEdwards/capsid-mcp";
 // report to this path. Used by ci_dispatch's content check.
 const SCORE_PATH_MARKER = "/improve/score";
 
-// THE WORKFLOW DIRECTORY IS NOT ORDINARY REPO CONTENT (audit 2026-09-07, Opus
-// NOTE 6.1, confirmed by probe on the same day).
+// THE WORKFLOW DIRECTORY IS NOT ORDINARY REPO CONTENT. The App holds Workflows:
+// write, verified by probe rather than assumed, contradicting a standing note
+// claiming it could not. A workflow is not a file, it is code CI executes with
+// that repo's secrets in scope.
 //
-// The Capsid GitHub App holds Workflows: write. That was verified rather than
-// assumed: a probe PR authored .github/workflows/ on germomics and succeeded,
-// which contradicted a standing note claiming the App could not. So a write-grant
-// operator key could author a workflow in any mapped repo, and a workflow is not
-// a file, it is code CI executes with that repo's secrets in scope. Nothing in
-// this module refused it.
-//
-// Refused now unless the caller passes allow_workflow_write, which is
-// audit-logged. Checked in TWO places on purpose: commitOnBranch covers both
-// verbs including delete_repo_file (whose mutate does its own ghFetch and never
-// reaches putFile), and putFile covers the write primitive itself, so a third
-// caller added later inherits the refusal without remembering to ask for it.
+// Refused unless the caller passes allow_workflow_write, which is audit-logged.
+// Checked in TWO places on purpose: commitOnBranch covers both verbs including
+// the delete path (which never reaches putFile), and putFile covers the write
+// primitive, so a third caller added later inherits the refusal.
 //
 // The improve loop never passes the flag and never can: .github/ is a protected
 // path, so an attempt touching one is reverted before it is pushed.
@@ -842,25 +831,16 @@ async function commitOnBranch<R>(
   const workflowRefusal = workflowWriteRefusal(path, op.allowWorkflowWrite);
   if (workflowRefusal) throw new Error(workflowRefusal);
   const { owner, repo } = await resolveRepo(env, namespace, repoSelector);
-  // THE SERVER'S OWN DEFAULT BRANCH CANNOT BE WRITTEN (audit 2026-09-06, Fable
-  // MAJOR 8, the self-inflicted rug pull): CI deploys this Worker on every push
-  // to its default branch, so a commit landing there IS a production deploy
-  // behind nothing but a write-grant key.
+  // THE SERVER'S OWN DEFAULT BRANCH CANNOT BE WRITTEN: CI deploys this Worker on
+  // every push to it, so a commit landing there IS a production deploy behind
+  // nothing but a write-grant key.
   //
-  // SCOPED TO THE DEFAULT BRANCH, 2026-09-07. It used to refuse mode "direct"
-  // against this repo outright, regardless of which branch was named, and that
-  // was too wide in a way nothing caught: the improve loop pushes every attempt
-  // with writeRepoFile(..., "direct", <attempt branch>), so on the capsid
-  // namespace, which maps to this very repo, EVERY attempt threw on its first
-  // file. capsid sat on the roster with a pinned anchor and a 30-case holdout
-  // while api mode could not complete a single attempt on it (Opus MAJOR 5.3;
-  // Grok records the same collision under its section 5 CLEAN list).
-  //
-  // The deploy is what the refusal is about, and only the default branch
-  // deploys. A commit to `improve/<attempt-id>` is not a deploy and never was.
-  // What is refused is now exactly that: any write whose target branch is this
-  // repo's default branch, in either mode, which also subsumes the old pr-mode
-  // check below it.
+  // SCOPED TO THE DEFAULT BRANCH. It used to refuse mode "direct" against this
+  // repo outright, whichever branch was named, and that was too wide in a way
+  // nothing caught: the improve loop pushes every attempt to a branch in direct
+  // mode, so on the namespace mapping to this very repo, EVERY attempt threw on
+  // its first file. The deploy is what the refusal is about, and only the default
+  // branch deploys.
   // The cheap half, kept from the 2026-09-06 fix: direct mode with NO branch
   // always resolves to the default branch, so it can be refused without knowing
   // what that branch is called, and the refusal costs no GitHub round trip.

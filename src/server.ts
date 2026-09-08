@@ -232,22 +232,16 @@ async function confirmDestructive(server: McpServer, message: string): Promise<C
   }
 }
 
-// THE CONFIRMATION BLOCK, ONCE (audit 2, F25). Four call sites wrote the same
-// three-branch dance (accepted, declined, unsupported) around confirmDestructive,
-// and each carried its own wording for the two refusals, so "is this tool
-// confirmed?" could only be answered by reading four places. Returns a caller
-// facing error string, or null to proceed.
+// THE CONFIRMATION BLOCK, ONCE. Four call sites wrote the same three-branch dance
+// around confirmDestructive, each with its own wording for the two refusals, so
+// "is this tool confirmed?" could only be answered by reading four places. The
+// messages stay per tool because they are the instruction the caller acts on.
 //
-// The messages stay per tool because they are the instruction the caller acts on:
-// a generic "confirmation required" does not say which argument to add or what
-// will happen when they do.
-//
-// IT REPORTS WHETHER IT ACTUALLY ELICITED, and that signal is load-bearing rather
-// than informational (quality audit 4.1). A human who sat through an elicitation
-// said "overwrite THIS" about a body that was read before the prompt went out, and
-// the answer can arrive up to 90 seconds later, so that consent is about a
-// specific body and goes stale exactly like an if_match does. Both write and
-// restore arm the commit-time body guard on it.
+// IT REPORTS WHETHER IT ACTUALLY ELICITED, and that signal is load-bearing. A
+// human who sat through an elicitation said "overwrite THIS" about a body read
+// before the prompt went out, and the answer can arrive 90 seconds later: that
+// consent goes stale exactly like an if_match. Both write and restore arm the
+// commit-time body guard on it.
 //
 // Before this returned it, the two paths inferred it separately: write kept its own
 // `elicited` flag, restore re-derived it as `confirm !== true`. Those coincide
@@ -267,30 +261,21 @@ async function requireConfirmation(
   return { ok: false, message: verdict === "declined" ? messages.declined : messages.unsupported };
 }
 
-// `actor` is the principal that will be recorded on every audit_log row this
-// server writes. It replaces a hardcoded 'operator' string that every one of the
-// eight audit write sites used, which meant the column answered "what happened"
-// and never "who did it". Establishing who deleted three parity documents on
-// 2026-08-10 took the Workers Observability 7-day window plus prose in two
-// session docs, because the audit log itself could not say.
+// `actor` is the principal recorded on every audit_log row. It replaced a
+// hardcoded 'operator' string at all eight audit write sites, which meant the
+// column answered "what happened" and never "who did it".
 //
-// Shape: "github:<login>" for an OAuth session on /mcp, "opkey:<fingerprint>"
-// for an operator key on /ops/mcp, where the fingerprint is a 12-char prefix of
-// the key's sha256 and not the key. The 1,631 rows written before 2026-08-11
-// keep their literal 'operator' value; there is no backfill, because inventing
-// an attribution for them would be worse than an honest unknown.
-// THE GRANT, NOT A BOOLEAN (quality audit 2.2).
-//
-// This parameter used to be `operator: boolean`, and it read as a lie at every
-// call site: `buildServer(env, true, ...)` looks like "this is the operator
-// server", when what it means is "this grant may write". A read-only ro: key IS
-// an operator, so the name asserted the opposite of the thing it gated on, and
-// the next person to add a tool had to read the body to find out which.
-//
-// Renaming it to writeGrant would have fixed the declaration and left every CALL
-// still saying `true`. Taking the grant itself fixes both, and it removes a
-// conversion: src/auth.ts already resolves an operator key to exactly this union,
-// and routes.ts flattened it to a boolean on the way in.
+// Shape: "github:<login>" for an OAuth session, "opkey:<fingerprint>" for an
+// operator key, where the fingerprint is a 12-char PREFIX of the key's sha256 and
+// not the key: OPERATOR_KEY_HASH is the verifier, so a full hash in audit_log
+// copies it into the database the audit log exists to hold to account. Rows
+// written before the change keep their literal 'operator' value; inventing an
+// attribution for them would be worse than an honest unknown.
+
+// THE GRANT, NOT A BOOLEAN. This used to be `operator: boolean`, which read as a
+// lie at every call site: `buildServer(env, true, ...)` looks like "this is the
+// operator server" when it means "this grant may write", and a read-only ro: key
+// IS an operator. src/auth.ts already resolves a key to exactly this union.
 export type ToolGrant = "write" | "read";
 
 export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServer {

@@ -1,16 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
-import {
-  anchorChecksum,
-  anchorRegressions,
-  anchorVerdict,
-  compare,
-  parseScoresDoc,
-  seedScoresDoc,
-  verifyAnchors,
-} from "../src/improve-scores.ts";
+import { anchorChecksum, anchorRegressions, anchorVerdict, compare, parseScoresDoc, verifyAnchors } from "../src/improve-scores.ts";
 import { fakeKv } from "./fakes.ts";
+import { seedScoresDoc } from "./seed-scores.ts";
 
 // The referee: the scores document, the anchor pin, and keep-or-revert.
 //

@@ -1,37 +1,22 @@
-// THE D1 WRITE-INTEGRITY CORE, extracted from server.ts on 2026-09-07 (audit
-// MAJOR 17). These are the statements and the commit protocol that make every
-// overwrite, create and path mutation abort inside its own transaction rather
-// than reporting a success it did not achieve. They lived beside the tool
-// registrations, which is the one file a tool must be added to and the one file
-// the invariant scanners read; keeping the guards there tied the store's
-// integrity core to the registration surface for no reason. Tool registration
-// stays in server.ts; this is only the mechanism, imported back by it.
-//
-// The source-guard walk is recursive as of the same day, so a scanner that reads
-// through test/source-files.ts sees this module without any change to it.
+// THE D1 WRITE-INTEGRITY CORE: the statements and the commit protocol that make
+// every overwrite, create and path mutation abort inside its own transaction
+// rather than report a success it did not achieve. Tool registration stays in
+// server.ts; this is only the mechanism, imported back by it.
 
 import { sha256Hex } from "./auth";
 
 // A statement that ABORTS the batch it is in unless (namespace, path) names an
-// existing document. It writes nothing when the document is there.
+// existing document, and writes nothing when it does.
 //
-// Why a statement and not an `if`: every path-mutating tool already reads the row
-// first, and that read is a different transaction from the batch that follows it.
-// Between the two, the row can go. What the tools then reported was a success:
-// the batch ran, zero rows matched, `move` answered "moved" and `delete` answered
-// "deleted" over a document that was not there. D1's meta.changes cannot be used
-// to catch it either, because `documents` carries FTS5 sync triggers whose row
-// changes accumulate across a batch (measured 2026-08-10: one repointed edge
-// reported as five). So the check has to be INSIDE the transaction, and it has to
-// be a statement rather than a number read back afterwards.
+// A STATEMENT rather than an `if`, because the pre-read is a different
+// transaction from the batch and the row can go between them: move answered
+// "moved" and delete answered "deleted" over documents that were not there.
+// meta.changes cannot catch it either, since the FTS5 triggers on `documents`
+// inflate it (measured 2026-08-10: one repointed edge reported as five).
 //
 // The mechanism, since SQLite has no RAISE outside a trigger body: attempt an
 // INSERT that violates NOT NULL, guarded by NOT EXISTS so it is attempted only
-// when the document is missing. Present, and the SELECT yields no rows and
-// nothing is inserted. Missing, and it tries to write NULL into
-// document_versions.document_id, which fails the constraint and rolls the whole
-// batch back. document_versions is the target because it carries no triggers and
-// is already in this file's vocabulary; the guard never inserts a row into it.
+// when the document is missing. It never actually inserts a row.
 const GUARD_VIOLATION = "document_versions.document_id";
 export function requireExists(db: D1Database, namespace: string, path: string): D1PreparedStatement {
   return db
@@ -50,38 +35,20 @@ export function isMissingRowAbort(err: unknown): boolean {
   return (err instanceof Error ? err.message : String(err)).includes(GUARD_VIOLATION);
 }
 
-// THE WRITE PREDICATE (audit 2 finding F12/F13/F14, 2026-08-17).
+// THE WRITE PREDICATE. if_match used to be a pre-read: select, hash, compare,
+// then run an unguarded batch. The window between the compare and the commit is
+// not theoretical, because a large replace elicits a confirmation first and the
+// gap can be the full 90 second timeout. The expectation now lives INSIDE the
+// batch, by the same mechanism and for the same reason as requireExists.
 //
-// Before this, if_match was a PRE-READ: select the body, hash it, compare, then
-// run an unguarded batch. Everything between the compare and the commit was
-// unprotected, and the window is not theoretical: mode 'replace' over a large
-// document elicits a confirmation first, so the gap could be the full 90 second
-// elicitation timeout. A writer that landed inside that window was overwritten
-// with a clean success and no signal, which is the precise failure if_match
-// exists to prevent.
-//
-// So the expectation moves INSIDE the batch, using the same mechanism
-// requireExists uses and for the same reason: SQLite has no RAISE outside a
-// trigger body, D1's meta.changes is inflated by the FTS5 triggers on
-// `documents` and cannot be used to count what a batch did, so the check has to
-// be a STATEMENT that aborts the transaction rather than a number read back
-// afterwards.
-//
-// WHY BODY EQUALITY RATHER THAN A STORED SHA COLUMN. The obvious alternative is
-// a `body_sha` column compared in the WHERE clause. It was not taken: a hash
-// column is a second source of truth for something the row already contains, it
-// has to be recomputed correctly by every present and future write path, and a
-// path that forgets leaves the guard comparing a stale hash while looking
-// green. That is the mirrored-state defect class this repo already guards
-// against elsewhere. Comparing the body itself needs no migration, cannot drift
-// from the thing it describes, and is strictly stronger than comparing a digest
-// of it. The caller still speaks sha256, which is what it already holds; the
-// server resolves that to the body it read and asserts THAT body is still
-// there.
+// BODY EQUALITY RATHER THAN A STORED SHA COLUMN, deliberately. A hash column is
+// a second source of truth for something the row already contains, has to be
+// recomputed correctly by every future write path, and leaves the guard
+// comparing a stale hash while looking green when one forgets. Comparing the
+// body needs no migration and cannot drift from what it describes.
 //
 // `IS` rather than `=` because a NULL body is a legitimate stored value and
-// `body = NULL` is never true in SQL, which would make the guard fire forever
-// on any document with a null body.
+// `body = NULL` is never true, which would make the guard fire forever on it.
 export function requireBodyUnchanged(
   db: D1Database,
   namespace: string,
@@ -116,31 +83,23 @@ function requireMissing(db: D1Database, namespace: string, path: string): D1Prep
 // site arms exactly one.
 type WriteGuard = "none" | "body" | "missing";
 
-// THE COMMIT PROTOCOL, in one place.
+// THE COMMIT PROTOCOL, in one place. write and restore perform the same four
+// steps and the ORDER is the whole point:
 //
-// write and restore perform the same four steps, and the ORDER is the whole point:
+//   1. pre-check if_match BEFORE any elicitation, so a caller holding an
+//      obviously stale sha is refused immediately rather than after 90 seconds;
+//   2. arm exactly one guard: absence for a create, unchanged-body for an update
+//      the caller asked to be checked or a human confirmed;
+//   3. run the batch with that guard FIRST, so nothing is half-written;
+//   4. map the abort back to the guard that was armed, since all three fail with
+//      the identical NOT NULL violation and the error cannot say which.
 //
-//   1. pre-check if_match, BEFORE any elicitation, so a caller holding an
-//      obviously stale sha is refused immediately instead of being made to sit
-//      through a 90 second prompt for a write that was never going to land;
-//   2. arm exactly one guard, chosen from the same pre-read the caller already
-//      has: absence for a create, unchanged-body for an update the caller asked
-//      to be checked (if_match) or a human confirmed (elicited);
-//   3. run the batch with that guard FIRST, so the transaction aborts before any
-//      other statement is attempted and nothing is half-written;
-//   4. map the abort back to the guard that was armed, since all three guards
-//      fail with the identical NOT NULL violation and the error cannot say which.
+// It was written out twice and the copies had drifted on step 2's consent
+// condition. `guard` is unreachable from the handlers now, so arming and
+// interpreting cannot disagree about what was armed.
 //
-// It was written out twice, and the copies had drifted: they spelled step 2's
-// consent condition differently (`elicited` against `confirm !== true`), which
-// happened to denote the same thing only because of how requireConfirmation
-// returns. Step 4 is the reason the flag from step 2 must not be a separate
-// variable a caller can forget to set: `guard` is now unreachable from the
-// handlers, so arming and interpreting cannot disagree about what was armed.
-//
-// An unguarded update keeps its last-writer-wins behaviour on purpose. Requiring
-// if_match everywhere would refuse every legitimate rapid edit, and would break
-// append, which is safe by construction.
+// An unguarded update keeps last-writer-wins on purpose: requiring if_match
+// everywhere would refuse every legitimate rapid edit, and break append.
 type CommitRefusals = {
   ifMatchOnMissing: string;
   ifMatchMismatch: (currentSha: string, passed: string) => string;
@@ -186,11 +145,9 @@ export function guardedCommit(opts: {
         await db.batch([...armed, ...statements]);
         return null;
       } catch (err) {
-        // Every batch failure returns a clean refusal (audit 2, F30). This used to
-        // rethrow anything that was not a guard abort, so a D1 error escaped the
-        // handler as an exception while delete, move and finalize all answered
-        // with fail(). Same class of failure, two different shapes, and the
-        // caller had to know which tool it called to know what to expect.
+        // Every batch failure returns a clean refusal. This used to rethrow
+        // anything that was not a guard abort, so the same class of failure had
+        // two shapes depending on which tool the caller had called.
         if (!isMissingRowAbort(err)) {
           return refusals.batchFailed(err instanceof Error ? err.message : String(err));
         }

@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { BUDGET_DEFAULTS, ROSTER } from "../src/improve-schema.ts";
 import { checkBudget, improveStatus, openRuns, tickRuns } from "../src/improve-run.ts";
-import { anchorChecksum, parseScoresDoc, seedScoresDoc } from "../src/improve-scores.ts";
+import { anchorChecksum, parseScoresDoc } from "../src/improve-scores.ts";
 import { fakeD1, fakeEnv, fakeKv, fakeR2, withFetch } from "./fakes.ts";
+import { seedScoresDoc } from "./seed-scores.ts";
 
 // THE BUDGET KILL SWITCH (Cloudflare platform arc 2026-09-06). Budget alerts
 // cannot stop a Worker, so the opener and the tick check monthly caps from KV

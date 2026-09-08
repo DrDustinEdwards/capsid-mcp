@@ -30,11 +30,3 @@ test("package.json runs the test suite by glob, not by an enumerated list", () =
     `the test script names individual files again: ${enumerated.join(", ")}. A file not on that list runs nowhere.`
   );
 });
-
-test("this file is itself proof: it runs only because the glob picked it up", () => {
-  // Deliberately trivial. Its value is its existence in the run, not its
-  // assertion: if the script regresses to an enumeration, this file is exactly
-  // the one that would be forgotten, and its absence from the count is the
-  // signal.
-  assert.ok(true);
-});

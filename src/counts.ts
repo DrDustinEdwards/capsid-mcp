@@ -1,64 +1,30 @@
-// Batch-two item 10: one-directional staleness.
+// ONE-DIRECTIONAL STALENESS: prose that records a count.
 //
-// Capsid records counts in prose. "22 tools", "6 of 6 gates", "all seven
-// headers". Every one of those was true when written and every one of them rots
-// silently, because nothing connects the sentence to the artifact it describes.
-// The tool surface moved 16 to 19 to 22 across three sessions; the live gate
-// count moved 6 to 8 in one; the header count is now not even a single number.
+// "22 tools", "6 of 6 gates", "all seven headers". Every one of those was true
+// when written and every one rots silently, because nothing connects the sentence
+// to the artifact it describes. The tool surface moved 16 to 19 to 22 across three
+// sessions while the prose stayed put.
 //
 // This module holds the authoritative values and a scan that FLAGS prose
-// disagreeing with them. It never rewrites anything. Auto-correcting prose would
-// mean a program editing canon on its own judgement, and the numbers are
-// sometimes deliberately historical.
+// disagreeing with them. It never rewrites anything: auto-correcting canon on a
+// program's own judgement would be worse than the drift, and some numbers are
+// deliberately historical.
 //
-// The values here are not the source of truth, they are a cache of it, and
-// test/counts.test.ts is what keeps them honest: it derives each one from the
-// actual artifact (the registrations in server.ts, the record() calls in
-// verify-live.mjs, the header sets in headers.ts) and fails when they disagree.
-// That is the "derive the expected list from the source of truth" rule from
-// capsid/conventions.md, applied to numbers instead of table names.
-
-// tools moved 26 to 30 on 2026-09-06: repo_refs, repo_history, delete_branch and
-// ci_dispatch. The SECOND ruled exception of that day, recorded in
-// capsid/decisions.md alongside the improve one below. The measurement behind it: the
-// claude.ai GitHub connector authenticates and then 404s on every private repo in the
-// portfolio, while this Worker's App token has reached them all since 2026-07-06, so
-// the four tools make existing reach callable rather than adding capability. Two
-// widenings landed with them and are deliberately NOT new tools: ci_status gained ref
-// and run_id, read_repo_file gained paths.
+// THE VALUES HERE ARE A CACHE, NOT THE SOURCE OF TRUTH. test/counts.test.ts
+// derives each one from the actual artifact (the registrations in server.ts, the
+// record() calls in verify-live.mjs, the header sets in headers.ts) and fails when
+// the two disagree. Why each number is what it is, and which ruling moved it, is
+// in capsid/decisions.md and capsid/core.md.
 //
-// tools moved 24 to 26 in the improve arc: improve_run and improve_status. A
-// second ruled exception to the lean-surface rule, on the same reasoning as the
-// first and recorded in capsid/decisions.md: the improve loop is driven by cron,
-// and a cron-only subsystem is one nobody can inspect or start by hand. The
-// 2026-08-09 consent outage ran 26 days undetected for that shape of reason.
+// KEYED BY NAMESPACE, and that is load-bearing. These numbers describe CAPSID's
+// artifacts and nothing else. There was one global object until 2026-08-14 and the
+// scan ran over every namespace, so another project's 24-gate suite was compared
+// against capsid's 9 live gates: 16 claims flagged portfolio-wide and 14 of them
+// were that. A lint that is wrong 14 times out of 16 is a lint nobody reads.
 //
-// tools moved 22 to 24 on 2026-08-13: history and restore. That is a deliberate
-// exception to the repo's own "the tool surface is deliberately small and should
-// stay that way" rule, ruled by Dustin in the audit response, because every
-// overwrite and delete had been snapshotting to document_versions since day one and
-// nothing could read a snapshot back without raw SQL.
-//
-// liveGates moved 9 to 10 on 2026-08-17: gate 2b reads a long-lived canary client
-// record out of OAUTH_KV, bounding time-to-detect on a vanished-record recurrence
-// at the six-hour schedule interval instead of the user-visible symptom.
-// liveGates moved 8 to 9 before that: /health gained a D1 and FTS probe, so a
-// deploy that unbinds the store now goes red.
-// KEYED BY NAMESPACE, and that is the whole point rather than a formality. These
-// numbers are derived from CAPSID'S artifacts: registerTool calls in src/server.ts,
-// record() labels in scripts/verify-live.mjs, the header sets in src/headers.ts. They
-// describe capsid and nothing else.
-//
-// Until 2026-08-14 there was one global object and the scan ran over every namespace,
-// so dustinedwards's own 24-gate suite was compared against capsid's 9 live gates and
-// the operator wrapper's 5 tools against capsid's 24. Measured that day: 16 claims
-// flagged portfolio-wide and 14 of them were this. A lint that is wrong 14 times out
-// of 16 is a lint nobody reads, which is the same failure the "all seven" scoping fix
-// addressed two days earlier.
-//
-// A namespace with no entry here gets NO count claims. That is correct rather than a
-// gap: another project's counts are guarded by that project's own gates, against its
-// own artifacts, and this module cannot see them.
+// A namespace with no entry gets NO count claims, which is correct rather than a
+// gap: another project's counts are guarded by that project's own gates, against
+// its own artifacts, and this module cannot see them.
 export interface AuthoritativeCounts {
   tools: number;
   liveGates: number;
@@ -75,9 +41,9 @@ export const AUTHORITATIVE: Record<string, AuthoritativeCounts> = {
   },
 };
 
-// Object.hasOwn, not `?? null`, because AUTHORITATIVE is an object literal and so
-// carries Object.prototype. A bare lookup of "constructor" returned the Object
-// FUNCTION, which is not nullish, so `?? null` never fired and the caller got a
+// Object.hasOwn, not `?? null`. AUTHORITATIVE carries Object.prototype, so a bare
+// lookup of "constructor" returned the Object FUNCTION, which is not nullish: the
+// guard never fired and the caller got a
 // value whose .tools is undefined: garbage claims instead of "this namespace has
 // no authoritative counts". Found 2026-09-05 by the capsid holdout suite before
 // the improve loop had run once.
@@ -158,20 +124,18 @@ export function scanCountClaims(docs: ScannableDoc[], namespace: string): CountC
       });
     };
 
-    // Tool-count mentions, CLASSIFIED before they are compared. A bare number next to
-    // the word "tools" is not automatically a claim that the surface is that size, and
+    // Tool-count mentions, CLASSIFIED before they are compared: a bare number next
+    // to the word "tools" is not automatically a claim about the surface size, and
     // treating it as one produced both surviving false positives of 2026-08-14.
-    //
-    // Three passes, in order, each consuming the text it matched so a later pass
-    // cannot re-read the same numbers as something else.
+    // Three passes in order, each consuming what it matched so a later pass cannot
+    // re-read the same numbers as something else.
     const consumed: Array<[number, number]> = [];
     const isConsumed = (start: number) => consumed.some(([a, b]) => start >= a && start < b);
     const consume = (m: RegExpExecArray) => consumed.push([m.index, m.index + m[0].length]);
 
-    // PASS 1, "N of M tools" and "tools (N of M)". M is the total; N is a SUBSET of it
-    // and says nothing about the surface size. Both numbers are still worth something:
-    // if N exceeds M the sentence contradicts itself, and that is checkable without
-    // knowing the authoritative figure at all.
+    // PASS 1, "N of M tools". M is the total; N is a SUBSET and says nothing about
+    // the surface size. If N exceeds M the sentence contradicts itself, which is
+    // checkable without knowing the authoritative figure at all.
     for (const re of [/(\d+)\s*(?:of|\/)\s*(\d+)\s+tools\b/gi, /tools?\s*\((\d+)\s*(?:of|\/)\s*(\d+)\)/gi]) {
       let m: RegExpExecArray | null;
       while ((m = re.exec(body)) !== null) {
@@ -184,13 +148,9 @@ export function scanCountClaims(docs: ScannableDoc[], namespace: string): CountC
       }
     }
 
-    // PASS 2, "N to M tools" and "tool surface N to M". A transition states that the
-    // count BECAME M, so M is the resulting state and N is the pre-state. Flagging N
-    // reported "the surface is 19" against a sentence saying it stopped being 19.
-    //
-    // In an append-only log a transition is exempt entirely: "it went from 19 to 22" is
-    // a record of a change that happened on a date, not an assertion about now, and
-    // that is the whole genre of a ruling log.
+    // PASS 2, "N to M tools". A transition says the count BECAME M, so N is the
+    // pre-state. Flagging N reported "the surface is 19" against a sentence saying
+    // it stopped being 19.
     for (const re of [/(\d+)\s+to\s+(\d+)\s+tools\b/gi, /tool surface[^.\n]*?\b(\d+)\s+to\s+(\d+)\b/gi]) {
       let m: RegExpExecArray | null;
       while ((m = re.exec(body)) !== null) {
@@ -200,9 +160,8 @@ export function scanCountClaims(docs: ScannableDoc[], namespace: string): CountC
       }
     }
 
-    // PASS 3, a plain "N tools" or "tool surface ... N", unless it is SUBSET-QUALIFIED.
-    // "The other 12 tools are read-open" is a true statement about a subset, and it was
-    // flagged as a stale total even after the document had been corrected.
+    // PASS 3, a plain "N tools", unless SUBSET-QUALIFIED. "The other 12 tools are
+    // read-open" is true about a subset and was flagged as a stale total.
     const SUBSET_PREFIX = /\b(?:other|others|remaining|rest|read-open|read open|gated|write-gated|ungated|only|another|of those|of these|first|last)\b[^.\n]{0,12}$/i;
     for (const re of [/(\d+)\s+tools\b/gi, /tool surface[^.\n]*?\b(\d+)\b/gi]) {
       let m: RegExpExecArray | null;
@@ -229,17 +188,10 @@ export function scanCountClaims(docs: ScannableDoc[], namespace: string): CountC
       flag("live gates", m, m[1], String(authoritative.liveGates));
     }
 
-    // The header count is no longer a single number, so any phrasing that
-    // implies one is stale by construction. "all seven" is called out by name
-    // because it is the exact phrase batch-two item 8 was written with, and it
-    // is now wrong: six are enforced and the seventh is on trial.
-    //
-    // SCOPED TO HEADER CONTEXT, and this is not fussiness. Measured across the
-    // live corpus 2026-08-12: "all seven" appears in 25 documents and almost
-    // none are about headers. Seven ROWS files, seven manifest fields, seven
-    // migrations, seven width probes. An unscoped match would have flagged all
-    // of them, and a lint that cries wolf 24 times out of 25 is a lint nobody
-    // reads. Only a match whose neighbourhood also talks about headers counts.
+    // The header count is no longer a single number, so any phrasing implying one
+    // is stale by construction. SCOPED TO HEADER CONTEXT, and that is not
+    // fussiness: measured across the live corpus, "all seven" appears in 25
+    // documents and almost none are about headers.
     const HEADER_CONTEXT = /header|security-policy|\bCSP\b|\bHSTS\b|nosniff|Referrer-Policy|X-Frame-Options|Permissions-Policy|COOP/i;
     const sevenForm = /all seven\b[^.\n]*/gi;
     while ((m = sevenForm.exec(body)) !== null) {

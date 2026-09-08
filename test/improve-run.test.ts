@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { anchorChecksum, parseScoresDoc, seedScoresDoc } from "../src/improve-scores.ts";
+import { anchorChecksum, parseScoresDoc } from "../src/improve-scores.ts";
 import { MAX_CONSECUTIVE_REVERTS, SCORE_TIMEOUT_MS } from "../src/improve-schema.ts";
 import { improveRunManual, improveStatus, ingestScore, openRuns, tickRuns } from "../src/improve-run.ts";
 import type { ScoreReport } from "../src/improve-scorer.ts";
 import { fakeD1, fakeEnv, fakeKv, fakeR2, withFetch, type FakeD1Options } from "./fakes.ts";
+import { seedScoresDoc } from "./seed-scores.ts";
 
 // THE LOOP, DRIVEN. Keep and revert, the monitor's veto, the restore after five
 // consecutive reverts, the subscription task document, and the dry run that writes

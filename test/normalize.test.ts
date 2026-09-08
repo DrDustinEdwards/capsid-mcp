@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { hasWideDash, normalizeDashes } from "../src/normalize.ts";
+import { normalizeDashes } from "../src/normalize.ts";
+
+// hasWideDash lived in src/normalize.ts and nothing in the Worker called it: the
+// write path normalizes rather than asking. It is a detector, and the only thing
+// that ever needed one was this file, so it lives here now.
+const hasWideDash = (text: string) => /[\u2013\u2014\u2015]/.test(text ?? "");
 
 test("prose em dash collapses to a comma-space", () => {
   assert.equal(normalizeDashes("the shell — the capsid"), "the shell, the capsid");

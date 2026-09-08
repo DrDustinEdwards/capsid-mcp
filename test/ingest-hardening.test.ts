@@ -180,8 +180,9 @@ test("an ordinary RERUN still works", async () => {
 // attempt is the one someone paused the namespace to stop.
 
 import { ingestScore } from "../src/improve-run.ts";
-import { anchorChecksum, parseScoresDoc, seedScoresDoc } from "../src/improve-scores.ts";
+import { anchorChecksum, parseScoresDoc } from "../src/improve-scores.ts";
 import type { ScoreReport } from "../src/improve-scorer.ts";
+import { seedScoresDoc } from "./seed-scores.ts";
 
 const SCORES = seedScoresDoc("capsid");
 const AT = new Date("2026-09-04T08:10:00Z");

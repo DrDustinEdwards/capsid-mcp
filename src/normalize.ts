@@ -30,9 +30,3 @@ export function normalizeDashes(text: string, mode: "prose" | "title" = "prose")
     .map((line) => applyDashes(line, HEADING.test(line) ? " - " : ", "))
     .join("\n");
 }
-
-// True if the text still holds any em dash, horizontal bar, or en dash. Used by
-// checks and the one-time cleanup verification; the write path just normalizes.
-export function hasWideDash(text: string): boolean {
-  return /[–—―]/.test(text ?? "");
-}

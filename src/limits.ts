@@ -1,58 +1,37 @@
-// Input bounds and the document path grammar (audit 2, F29 and F7).
+// Input bounds and the document path grammar.
 //
 // Every string a tool accepts was unbounded, so any of them could be handed
-// megabytes, and document paths were whatever the caller typed: a leading slash, a
-// "..", a newline, or an empty string all went straight into the UNIQUE(namespace,
-// path) key and into every audit row and R2 mirror key derived from it.
+// megabytes, and document paths were whatever the caller typed: a leading slash,
+// a "..", a newline, or an empty string all went straight into the
+// UNIQUE(namespace, path) key and into every audit row and R2 mirror key derived
+// from it.
 //
-// THE BOUNDS ARE MEASURED, NOT GUESSED. Read-only queries against the live store on
-// 2026-08-17, 536 documents and 1,328 version rows:
+// THE BOUNDS ARE MEASURED, NOT GUESSED, against the live store on 2026-08-17.
+// The one that matters is `body`: it is set from the largest VERSION row, not the
+// largest document, because restore writes a stored snapshot back through the
+// write path and a bound under that figure would make the largest snapshots
+// unrestorable. The ceiling stays under D1's own row limit. The full table, and
+// the measurement that the whole store already satisfies the grammar below, is in
+// capsid/archive/TASK-capsid-audit-2026-08-17.md (finding F29).
 //
-//   field         largest stored   bound here   headroom
-//   path                      83          512       6.2x
-//   title                    382        1,024       2.7x
-//   tags                     265        1,024       3.9x
-//   namespace                 13           64       4.9x
-//   body (documents)      74,625    1,000,000       13x
-//   body (versions)      138,727    1,000,000        7x
-//   repos JSON               165        4,096        25x
-//   links JSON        4 edges/doc        8,192        ~20x
-//
-// The version-row figure is the one that sets the body bound, because restore
-// writes a stored snapshot back through the write path: a bound under 138,727 would
-// have made the largest snapshots unrestorable, which is the opposite of the point.
-// The ceiling is also comfortably under D1's own 2,000,000 byte row limit.
-//
-// The same queries checked every existing row against the grammar below: zero
-// leading slashes, zero "..", zero control characters, zero empty paths, zero
-// double slashes, zero trailing slashes, in both documents and document_versions.
-// Nothing in the store is bricked by enforcing this.
-//
-// NO archive/ RULE. The batch asked for archive/ to be allowed "only where
-// archiving intends it" and the measurement is why that is not here: 219 of 536
-// live documents already sit under archive/, so a rule against writing to that
-// prefix would refuse every future append, patch or meta on 41% of the store, and
-// would refuse restore of a deleted archived document, which is the one case
-// restore exists for. archive/ is an ordinary directory to this grammar; what the
-// grammar exists to stop is traversal, and it does.
+// NO archive/ RULE, and that is a measurement rather than an oversight: 41% of
+// the live store already sits under that prefix, so a rule against writing there
+// would refuse every future append, patch or meta on it, and would refuse restore
+// of a deleted archived document, which is the one case restore exists for. What
+// the grammar exists to stop is traversal, and it does.
 
 import { z } from "zod";
 
-// THE DOCUMENT PATH BOUND. Repo file paths are bounded by this number too, but
-// they are deliberately NOT held to docPath's grammar (quality audit 7.2): a
-// GitHub path is whatever the repo contains, and this grammar is about what may
-// become a D1 key, an R2 object key and an edge endpoint. Repo tools take
-// bounded(MAX_PATH); only Capsid documents take docPath.
+// Repo file paths take this bound too, but are deliberately NOT held to docPath's
+// grammar: a GitHub path is whatever the repo contains, and the grammar is about
+// what may become a D1 key, an R2 object key and an edge endpoint.
 export const MAX_PATH = 512;
 export const MAX_TITLE = 1024;
 export const MAX_TAGS = 1024;
 export const MAX_NAMESPACE = 64;
 export const MAX_DOC_TYPE = 64;
-// `status` had been bounded by MAX_DOC_TYPE since there was one number and two
-// fields (quality audit 2.3). They are different vocabularies, and a bound named
-// after the other one is a rule nobody can check: the next person tightening
-// document types would have silently retuned the status field too. Same value
-// today, stated separately so they can move apart.
+// Separate from MAX_DOC_TYPE despite the same value: different vocabularies, and
+// a bound named after the other one silently retunes both.
 export const MAX_DOC_STATUS = 64;
 export const MAX_BODY = 1_000_000;
 export const MAX_LINKS_JSON = 8192;
@@ -81,37 +60,29 @@ export const MAX_ROWS = 500;
 // it now SAYS when there were more, which a bare array could not.
 export const SEARCH_ROWS = 25;
 
-// brief's existing budget, unchanged, moved here so the number and the prose that
-// quotes it cannot drift apart.
+// Here rather than at the call site so the number and the prose quoting it cannot
+// drift apart.
 export const BRIEF_BUDGET = 40_000;
 
-// gather's budget was already this number, but only as a WARNING threshold, and
-// the packets measured over it: recova 213KB, dustinedwards 330KB. A warning that
-// fires on the normal case is not a bound. Same number, now enforced by trimming
-// the section gather itself tells the caller to batch.
+// Enforced by trimming, not warned about: real packets measured 213KB and 330KB
+// against this threshold, and a warning that fires on the normal case is not a
+// bound.
 export const GATHER_BUDGET = 150_000;
 
-// lint finalize's consumed bound (audit 2026-09-06, Grok MAJOR 22 / Fable MAJOR
-// 16). Finalize issues one existence guard plus three pathMutation statements
-// per path plus one audit row: 20 paths is 81 statements, safely under D1's
+// Four statements per path plus an audit row: 20 paths is 81, under D1's
 // 100-statement batch ceiling with the archive still ATOMIC. Chunking was
-// considered and rejected: a partial archive silently drops documents out of
-// the lint loop's view, which is the exact failure the in-batch guards stop.
+// rejected because a partial archive silently drops documents out of the lint
+// loop's view.
 export const LINT_CONSUMED_MAX = 20;
 
-// ci_dispatch's inputs key bound (audit 2026-09-06, Grok §10 MINOR). GitHub's
-// own workflow_dispatch ceiling is 10 inputs, so a larger map can never be
-// valid; refusing it here costs the caller a clear message instead of a 422.
+// GitHub's own workflow_dispatch ceiling, so a larger map can never be valid.
 export const CI_DISPATCH_MAX_INPUTS = 10;
 
-// history's listing bound (audit 2026-09-06, Grok §10 MINOR). Retention is 90
-// days, so 100 rows covers better than one snapshot a day before truncating.
+// Retention is 90 days, so 100 rows covers better than a snapshot a day.
 export const HISTORY_ROWS = 100;
 
-// search_code's ceiling, here rather than inside searchCode (quality audit 2.4).
-// It lived as a local const, so the tool description quoting "max 200" was a
-// second copy of the number that nothing could keep honest. Both the clamp and
-// the prose read this now.
+// Here rather than inside searchCode, so the clamp and the tool description that
+// quotes it are the same number.
 export const MAX_SCAN_CAP = 200;
 export const DEFAULT_SCAN_RESULTS = 20;
 export const DEFAULT_SCAN_FILES = 200;
@@ -140,25 +111,17 @@ export function pathProblem(path: string): string | null {
   return null;
 }
 
-// THE GITHUB REPO ARGUMENT GRAMMAR (audit 2026-09-06, CRITICAL: GitHub path
-// traversal). A sibling of pathProblem for repo file paths, branches, refs and
-// workflow filenames. It is deliberately LOOSER than docPath (a repo path is
-// whatever the repo contains, so a leading dot like .npmrc or a dotted name like
-// a.test.ts is fine) but it rejects the two things that let a caller walk out of
-// the mapped repo once the string is concatenated into a GitHub API URL:
+// THE GITHUB REPO ARGUMENT GRAMMAR, for repo paths, branches, refs and workflow
+// filenames. Deliberately LOOSER than docPath, because a repo path is whatever
+// the repo contains, and it rejects only what lets a caller walk out of the
+// mapped repo once the string is concatenated into an API URL: a segment that IS
+// "." or "..", and control characters.
 //
-//   1. Any segment that is exactly "." or ".." . encodePath preserved "/" between
-//      segments and encodeURIComponent leaves "." and ".." untouched, so
-//      "../../other-repo/contents/x" reached fetch() as real slashes plus real
-//      "..", and WHATWG URL normalization then walked it out of
-//      /repos/<owner>/<repo>/ into a repo the namespace never mapped.
-//   2. Control characters, which have no place in a ref or a path and would ride
-//      into a log line or a header.
-//
-// A whole-segment check, not path.includes(".."), because "a..b" is a legal file
-// name and "..." is not traversal; only a segment that IS "." or ".." moves the
-// URL. Empty and leading/trailing slash are also refused so the string cannot
-// introduce an empty segment that changes how the URL parses.
+// A WHOLE-SEGMENT check, not includes(".."), because "a..b" is a legal file name
+// and only a segment that is exactly ".." moves the URL. This closed a real
+// traversal: encodeURIComponent leaves "." and ".." untouched, so
+// "../../other-repo/contents/x" reached fetch() intact and URL normalization
+// walked it into a repo the namespace never mapped.
 export function repoPathProblem(value: string): string | null {
   if (value.length === 0) return "must not be empty";
   if (value.length > MAX_PATH) return `is longer than ${MAX_PATH} characters`;
@@ -172,22 +135,17 @@ export function repoPathProblem(value: string): string | null {
   return null;
 }
 
-// The one document path schema. Every tool that names a document uses it, so the
-// grammar cannot be enforced in one place and forgotten in another.
-//
-// It is NOT the GitHub path grammar and must not become it. A repo file path is
-// whatever the repo already contains, and refusing to read one because Capsid
-// dislikes its shape would make the repo tools unable to reach real files. This
-// grammar governs what may become a D1 key, an R2 mirror key and a typed edge
-// endpoint, which is a different question with a different blast radius.
+// The one document path schema, so the grammar cannot be enforced in one place
+// and forgotten in another. It is NOT the GitHub grammar above and must not
+// become it: this one governs what may become a D1 key, an R2 mirror key and an
+// edge endpoint.
 export const docPath = z.string().superRefine((value, ctx) => {
   const problem = pathProblem(value);
   if (problem) ctx.addIssue({ code: "custom", message: problem });
 });
 
-// Every free-text input goes through this, so an unbounded z.string() in a tool
-// schema is a visible anomaly rather than the default. test/limits.test.ts fails
-// if one appears.
+// Every free-text input goes through this, so a bare z.string() in a tool schema
+// is a visible anomaly. test/limits.test.ts fails if one appears.
 export const bounded = (max: number) => z.string().max(max);
 
 export const nsName = bounded(MAX_NAMESPACE);
