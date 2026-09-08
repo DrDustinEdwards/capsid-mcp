@@ -29,7 +29,7 @@ test("the integration suite has files, and they are where the config looks", () 
 });
 
 test("PLANT: CI runs both suites and typechecks all three configs", () => {
-  for (const step of ["npm run check", "npm run check:test", "npm run check:integration", "npm test", "npm run test:integration"]) {
+  for (const step of ["npm run check", "npm run check:test", "npm run check:integration", "npm run check:scripts", "npm test", "npm run test:integration"]) {
     assert.ok(CI.includes(`run: ${step}`), `the CI checks job does not run \`${step}\``);
   }
   // Ordering matters: the deploy job is `needs: checks`, so an integration failure

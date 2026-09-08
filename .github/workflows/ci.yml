@@ -111,6 +111,14 @@ jobs:
       - name: Typecheck integration tests
         run: npm run check:integration
 
+      # scripts/improve-report.mjs is copied BYTE-IDENTICAL into four other repos,
+      # and they do not all gate it the same way. On 2026-09-07 this repo shipped
+      # ten type errors in it that only dustinedwards-info's stricter gate could
+      # see. A guard scoped to one repo is a guess about where the next bug will be
+      # written; this is the guard, in the repo the file is authored in.
+      - name: Typecheck the copied scorer script
+        run: npm run check:scripts
+
       - name: Tests
         run: npm test
 

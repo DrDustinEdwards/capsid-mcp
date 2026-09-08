@@ -13,7 +13,8 @@
     "test": "node --import ./test/resolve-ts.mjs --test \"test/*.test.ts\"",
     "verify:live": "node scripts/verify-live.mjs",
     "test:integration": "vitest run",
-    "check:integration": "tsc --noEmit -p test-integration/tsconfig.json"
+    "check:integration": "tsc --noEmit -p test-integration/tsconfig.json",
+    "check:scripts": "tsc --noEmit -p tsconfig.scripts.json"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",

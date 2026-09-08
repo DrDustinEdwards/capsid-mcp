@@ -1,0 +1,33 @@
+{
+  // scripts/, type-checked as JavaScript.
+  //
+  // WHY IT IS ITS OWN CONFIG, and why it exists at all. scripts/improve-report.mjs
+  // is copied BYTE-IDENTICAL into all five roster repos, and those repos do not
+  // all gate it the same way. On 2026-09-07 dustinedwards-info's own gate rejected
+  // this repo's newly written code with ten type errors that nothing here could
+  // see: tsconfig.json includes only src, tsconfig.test.json only src and test,
+  // and neither checks a .mjs body. The file shipped to four repos before the
+  // strictest of them said no.
+  //
+  // A guard scoped to one repo is a guess about where the next bug will be
+  // written (capsid/conventions.md). This is that guard, in the repo the file is
+  // authored in, so the strictest consumer is no longer the first to find out.
+  //
+  // checkJs with strict, because that is what the strictest consumer applies. The
+  // .d.mts beside the .mjs types it for TypeScript importers; this checks the
+  // implementation the .d.mts describes.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "types": ["node"]
+  },
+  // SCOPED TO THE ONE FILE THAT IS COPIED, deliberately, and the scope is the
+  // honest part. The rest of scripts/ carries pre-existing implicit-any gaps that
+  // are real but are nobody's incident: those scripts run in one repo, under one
+  // gate, and a failure in them is loud and local. improve-report.mjs is the only
+  // file here that ships to four other repos, which is what makes a type error in
+  // it somebody else's build break. Widening this include is a fine piece of work
+  // and is recorded as a residual rather than done under a security remediation.
+  "include": ["scripts/improve-report.mjs", "scripts/improve-report.d.mts"]
+}

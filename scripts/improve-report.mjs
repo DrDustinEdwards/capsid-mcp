@@ -49,6 +49,18 @@ export function markers(nonce = "") {
   return { case: `${p}-CASE `, test: `${p}-TEST`, lint: `${p}-LINT`, status: `${p}-STATUS `, end: `${p}-END` };
 }
 
+// One segment of the container's output stream: a holdout case, or one of the two
+// secondary phases, plus the exit status the trusted shell printed after it.
+// Declared once because splitStream builds them and both readers narrow them, and
+// an inline shape in three places is three chances to disagree.
+/**
+ * @typedef {object} Segment
+ * @property {string} kind
+ * @property {string} name
+ * @property {string[]} lines
+ * @property {number | null} status
+ */
+
 // ---- the per-repo command map -----------------------------------------------
 //
 // WHY THE MAP LIVES HERE. The secondaries used to be measured by Job A, which
@@ -182,26 +194,39 @@ export function holdoutFilePassed(text) {
  */
 export function splitStream(text, nonce = "") {
   const m = markers(nonce);
-  /** @type {{ kind: string, name: string, lines: string[], status: number | null }[]} */
+  /** @type {Segment[]} */
   const segments = [];
-  /** @type {{ kind: string, name: string, lines: string[], status: number | null } | null} */
+  /** @type {Segment | null} */
   let current = null;
   let terminated = false;
+  // `open` RETURNS the segment and the loop assigns `current`, rather than
+  // assigning it from inside the closure. A checker cannot follow an assignment
+  // made in a callback, so the closure form narrowed `current` to `never` at
+  // every later use: it type-checks under this repo's config, which does not
+  // check .mjs bodies, and fails under dustinedwards-info's, which does. Same
+  // behaviour, one fewer place for a stricter copy of this file to disagree.
+  /**
+   * @param {string} kind
+   * @param {string} name
+   * @returns {Segment}
+   */
   const open = (kind, name) => {
-    current = { kind, name, lines: [], status: null };
-    segments.push(current);
+    /** @type {Segment} */
+    const segment = { kind, name, lines: [], status: null };
+    segments.push(segment);
+    return segment;
   };
   for (const line of text.split("\n")) {
     if (line.startsWith(m.case)) {
-      open("case", line.slice(m.case.length).trim());
+      current = open("case", line.slice(m.case.length).trim());
       continue;
     }
     if (line === m.test) {
-      open("test", "test");
+      current = open("test", "test");
       continue;
     }
     if (line === m.lint) {
-      open("lint", "lint");
+      current = open("lint", "lint");
       continue;
     }
     if (line.startsWith(m.status)) {
@@ -268,17 +293,24 @@ export function holdoutPassCount(text, nonce = "") {
 export function secondaryFromStream(text, namespace, nonce = "") {
   const { segments, terminated } = splitStream(text, nonce);
   const spec = /** @type {Record<string, any>} */ (SECONDARY_COMMANDS)[namespace] ?? {};
-  const find = (kind) => segments.find((s) => s.kind === kind) ?? null;
+  /** @param {string} kind @returns {Segment | null} */
+  const find = (kind) => segments.find((/** @type {Segment} */ s) => s.kind === kind) ?? null;
+  // A phase RAN if the container finished and the phase reported an exit status
+  // that is not "could not execute" (126, 127). Written as an explicit null check
+  // rather than a predicate helper so the narrowing is visible to a checker: the
+  // callers below dereference `.lines` on the strength of it.
+  /** @param {Segment | null} seg */
   const ran = (seg) => terminated && seg !== null && seg.status !== null && seg.status < 126;
 
   const testSeg = find("test");
-  const test_pass_rate = ran(testSeg) ? testPassRate(testSeg.lines.join("\n")) : null;
+  const test_pass_rate = testSeg !== null && ran(testSeg) ? testPassRate(testSeg.lines.join("\n")) : null;
 
   const lintSeg = find("lint");
+  /** @type {number | null} */
   let lint_count = null;
-  if (ran(lintSeg) && spec.lint_pattern) {
+  if (lintSeg !== null && ran(lintSeg) && spec.lint_pattern) {
     const re = new RegExp(spec.lint_pattern);
-    lint_count = lintSeg.lines.filter((l) => re.test(l)).length;
+    lint_count = lintSeg.lines.filter((/** @type {string} */ l) => re.test(l)).length;
   }
   return { test_pass_rate, lint_count };
 }
@@ -386,6 +418,10 @@ function main(argv) {
         );
       }
     }
+    /**
+     * @param {string} name
+     * @param {number | null} value
+     */
     const line = (name, value) => `${name}=${value === null ? "" : String(value)}\n`;
     process.stdout.write(line("test_pass_rate", recomputed.test_pass_rate) + line("lint_count", recomputed.lint_count));
     return;
