@@ -28,6 +28,8 @@
 // base fresh each night also catches the metrics that move on their own (error
 // counts, latency) rather than attributing that drift to the first attempt.
 
+import { sha256Hex } from "./auth";
+import { bytesToHex } from "./encoding";
 import type { Env } from "./env";
 import { defaultBranchSha, listRepoTree, openPr, resolveRepo } from "./github";
 import { proposeChange, pushAttempt, renderChange } from "./improve-attempt";
@@ -1525,13 +1527,87 @@ export async function improveRunManual(
 export type ImproveControlResult =
   | { action: "mode"; requested: string; mode: ImproveMode; mode_note: string | null }
   | { action: "pause" | "unpause"; namespaces: string[]; paused: Record<string, string | null> }
-  | { action: "budget"; caps: BudgetCaps };
+  | { action: "budget"; caps: BudgetCaps }
+  | {
+      action: "mint_operator_key";
+      key: string;
+      hash: string;
+      // The line that goes in OPERATOR_KEY_HASH: `ro:<hash>`. The tier lives on
+      // the ENTRY, which is what makes it the operator's decision rather than
+      // the caller's.
+      entry: string;
+      grant: "read-only";
+      already_listed: boolean;
+      next_step: string;
+      command: string;
+      warning: string;
+    };
 
 export async function improveControl(
   env: Env,
-  action: "mode" | "pause" | "unpause" | "budget",
+  action: "mode" | "pause" | "unpause" | "budget" | "mint_operator_key",
   opts: { value?: string; namespace?: string; reason?: string; actions_minutes_month?: number; model_usd_month?: number }
 ): Promise<ImproveControlResult> {
+  // MINT A READ-ONLY OPERATOR KEY, and stop one step short of installing it.
+  //
+  // WHY THE LAST STEP IS MANUAL, which is the only interesting thing here. This
+  // action generates the key and prints the command that would add its hash to
+  // OPERATOR_KEY_HASH. It does not run that command and it cannot: a Worker that
+  // can widen its own authorization list has an authorization list that is
+  // decorative, and every guard downstream of it inherits that. Minting is
+  // cheap and reversible; installing is the gate, and the gate stays with a
+  // human holding Cloudflare credentials the Worker does not have.
+  //
+  // The KEY IS RETURNED ONCE and stored nowhere. Not in KV, not in a document,
+  // and NOT IN THE AUDIT ROW: OPERATOR_KEY_HASH is the verifier, so writing the
+  // hash into audit_log would copy the verifier into a table this same key can
+  // read. The audit row records that a mint happened and a fingerprint, which is
+  // what an operator needs to tell two mints apart.
+  if (action === "mint_operator_key") {
+    const bytes = new Uint8Array(32);
+    crypto.getRandomValues(bytes);
+    // bytesToHex, not an inline map: src/encoding.ts owns the byte encodings and
+    // test/encoding.test.ts fails the build on a second implementation. A
+    // duplicated crypto-adjacent helper is not a tidiness problem, it is the copy
+    // nobody looked at mishandling the high byte.
+    const key = `capsid_${bytesToHex(bytes)}`;
+    // THE `ro:` PREFIX GOES ON THE LIST ENTRY, NOT ON THE KEY. src/auth.ts hashes
+    // the presented key and then compares it against each entry with the prefix
+    // stripped, so the tier is a property of what the OPERATOR wrote down, not of
+    // what the caller presents. Getting this backwards mints a WRITE key from a
+    // helper whose whole purpose is the read-only tier, which is why the test
+    // resolves the minted key through the real verifier rather than trusting the
+    // label on this response.
+    const hash = await sha256Hex(key);
+    const entry = `ro:${hash}`;
+    const existing = (env.OPERATOR_KEY_HASH ?? "").split(",").map((h) => h.trim()).filter(Boolean);
+    const alreadyListed = existing.includes(entry);
+    const next = alreadyListed ? existing : [...existing, entry];
+    await env.DB.batch([
+      improveAudit(env.DB, "operator-key-minted", null, {
+        // A fingerprint, not the hash. Enough to tell two mints apart in the log
+        // and useless as a verifier.
+        fingerprint: hash.slice(0, 8),
+        grant: "read-only",
+      }),
+    ]);
+    return {
+      action: "mint_operator_key",
+      key,
+      hash,
+      entry,
+      grant: "read-only",
+      already_listed: alreadyListed,
+      next_step:
+        "This key does NOTHING until its hash is in OPERATOR_KEY_HASH. Run the command below from a machine with wrangler and this account. The Worker deliberately cannot do it: a Worker that can widen its own authorization list does not have one.",
+      command: `npx wrangler secret put OPERATOR_KEY_HASH
+# then paste, on one line:
+${next.join(",")}`,
+      warning:
+        "The key is shown ONCE and is stored nowhere: not in KV, not in a document, and not in the audit row. Copy it now. Lose it and mint another, then remove the stale hash from the list above. Revoke by removing a hash and putting the secret again.",
+    };
+  }
+
   if (action === "mode") {
     const value = (opts.value ?? "").trim().toLowerCase();
     if (!(IMPROVE_MODES as readonly string[]).includes(value)) {

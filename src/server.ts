@@ -2104,12 +2104,12 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
     {
       annotations: hintsFor("improve_run"),
       description:
-        `Open improve runs, or control the loop. action defaults to "run": open runs for the roster (or one namespace) and advance them one step, respecting APP_KV improve_mode and skipping paused namespaces; dry_run reports the plan and writes NOTHING. The control actions each write one KV value, audit it, and read it back so the response is the value that actually landed: action "mode" sets improve_mode to value ("off" | "subscription" | "api"); action "pause"/"unpause" sets or clears improve:paused for one namespace or "all" (pause takes an optional reason); action "budget" sets the monthly caps actions_minutes_month and model_usd_month. improve_status reflects any of these on its next call. Requires an operator key with the write grant.`,
+        `Open improve runs, or control the loop. action defaults to "run": open runs for the roster (or one namespace) and advance them one step, respecting APP_KV improve_mode and skipping paused namespaces; dry_run reports the plan and writes NOTHING. The control actions each write one KV value, audit it, and read it back so the response is the value that actually landed: action "mode" sets improve_mode to value ("off" | "subscription" | "api"); action "pause"/"unpause" sets or clears improve:paused for one namespace or "all" (pause takes an optional reason); action "budget" sets the monthly caps actions_minutes_month and model_usd_month. action "mint_operator_key" generates a READ-ONLY (ro:) operator key, returns it ONCE and stores it nowhere, and prints the exact wrangler command that adds its hash to OPERATOR_KEY_HASH; it deliberately does NOT set the secret itself, because a Worker that can widen its own authorization list does not have one. improve_status reflects the control actions on its next call. Requires an operator key with the write grant.`,
       inputSchema: {
         action: z
-          .enum(["run", "mode", "pause", "unpause", "budget"])
+          .enum(["run", "mode", "pause", "unpause", "budget", "mint_operator_key"])
           .optional()
-          .describe('What to do. Defaults to "run". The others control the loop: mode, pause, unpause, budget.'),
+          .describe('What to do. Defaults to "run". The others control the loop: mode, pause, unpause, budget, mint_operator_key.'),
         namespace: nsName.optional().describe('For "run", limit to one namespace (omit for the whole roster). For pause/unpause, the target namespace, or "all".'),
         value: z.enum(["off", "subscription", "api"]).optional().describe('For action "mode": the mode to set.'),
         reason: bounded(MAX_DOC_STATUS).optional().describe('For action "pause": the reason recorded on the pause key. Defaults to a generic note.'),
