@@ -198,9 +198,16 @@ test("attempt code runs only inside a network-less, read-only, digest-pinned con
   assert.match(WORKFLOW, /--tmpfs \/work:rw/, "the only writable surface is scratch that dies with the run");
   assert.match(
     WORKFLOW,
-    /node:24\.14\.1-alpine@sha256:[0-9a-f]{64}/,
+    /node:24\.14\.1-bookworm-slim@sha256:[0-9a-f]{64}/,
     "the image must be pinned by digest, not by tag"
   );
+  // GLIBC, NOT MUSL, and it is a measurement. The container mounts node_modules
+  // installed by the runner, which is Ubuntu. On Alpine every package with a
+  // platform-specific native binary asks for its musl build and finds only the gnu
+  // one: rollup threw in native.js and took vitest with it, biome could not resolve
+  // its binary, and three repos reported a null test_pass_rate while capsid-mcp,
+  // whose tooling is pure JS, measured clean.
+  assert.ok(!/node:[\d.]+-alpine/.test(EXECUTABLE), "an Alpine image cannot load the runner's native modules");
   for (const mount of [
     /-v "\$\{RUNNER_TEMP\}\/attempt\/code:\/attempt:ro"/,
     /-v "\$\{RUNNER_TEMP\}\/holdout:\/holdout:ro"/,

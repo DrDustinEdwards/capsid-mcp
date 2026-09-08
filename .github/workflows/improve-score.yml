@@ -289,6 +289,16 @@ jobs:
       #   --tmpfs /work     the only writable surface, and it dies with the run.
       #   pinned by digest  so the image cannot be repointed under us.
       #
+      # GLIBC, NOT ALPINE, and that is a measurement rather than a preference. The
+      # container mounts node_modules installed by the RUNNER, which is Ubuntu and
+      # therefore glibc. On an Alpine image every package with a platform-specific
+      # native binary asks for its musl build and finds only the gnu one: rollup
+      # threw at `/repo/node_modules/rollup/dist/native.js:121` on foxhound, which
+      # took vitest and everything downstream of vite with it, and biome could not
+      # resolve its binary at all. Pure-JS tooling (node --test, tsc) was fine,
+      # which is exactly why capsid-mcp measured clean while three repos reported
+      # null. bookworm-slim matches the runner.
+      #
       # RESULTS LEAVE AS A STDOUT PIPE. There is no seekable TAP destination for
       # the child to rewrite: the reporter writes to the container's stdout, the
       # runner captures it outside the container, and a test's own stdout is
@@ -328,7 +338,7 @@ jobs:
             -v "${GITHUB_WORKSPACE}:/repo:ro" \
             -w /work \
             --entrypoint /bin/sh \
-            node:24.14.1-alpine@sha256:8510330d3eb72c804231a834b1a8ebb55cb3796c3e4431297a24d246b8add4d5 \
+            node:24.14.1-bookworm-slim@sha256:b506e7321f176aae77317f99d67a24b272c1f09f1d10f1761f2773447d8da26c \
             -c '
               set -u
               # The nonce becomes a SHELL variable and leaves the environment, so
