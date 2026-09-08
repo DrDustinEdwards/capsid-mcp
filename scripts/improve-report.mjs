@@ -26,7 +26,7 @@
 // calls it. Only Job A (per repo) differs. Pure functions are exported for
 // test/improve-report.test.ts; the CLI has four modes, all repo-agnostic.
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -95,21 +95,29 @@ export const SECONDARY_COMMANDS = {
     test: "node_modules/.bin/vitest run --reporter=tap",
     lint: null,
     lint_pattern: null,
-    verified: null,
+    verified: "2026-09-08",
   },
   foxhound: {
     trees: ["app", "workers"],
     test: "node_modules/.bin/vitest run --reporter=tap",
     lint: "node_modules/.bin/eslint .",
     lint_pattern: "^[ \t]+[0-9]+:[0-9]+",
-    verified: null,
+    verified: "2026-09-08",
   },
   foxing: {
     trees: ["packages/core", "packages/api", "apps/web"],
-    test: "node_modules/.bin/vitest run --reporter=tap",
+    // UNIT TESTS ONLY (ruled 2026-09-08). The bare `vitest run` swept in
+    // apps/web/e2e/*.spec.ts, which are playwright specs that cannot run behind
+    // --network none: 58 top-level results of which 38 were e2e failing for the
+    // environment rather than for the code, and the repo scored 0.3448 for
+    // reasons no attempt could act on. A score the loop cannot move is noise it
+    // optimises against. e2e is UNSCORED here and foxing/improve/scores.md says
+    // so; it is not excluded to make a number go up, it is excluded because the
+    // sandbox is the wrong place to run it.
+    test: 'node_modules/.bin/vitest run --reporter=tap --exclude "**/e2e/**"',
     lint: "node_modules/.bin/biome check .",
     lint_pattern: "(lint|assist|format)/",
-    verified: null,
+    verified: "2026-09-08",
   },
   germomics: {
     trees: ["app", "workers"],
@@ -121,6 +129,109 @@ export const SECONDARY_COMMANDS = {
     verified: "2026-09-07",
   },
 };
+
+// ---- the holdout import manifest --------------------------------------------
+//
+// WHAT IT IS FOR, and it is not a security control. `improve/holdout/<ns>/imports.txt`
+// lists every name the hidden suite imports out of the repo's own source. Names
+// only, one per line, committed to the repo and deliberately NOT secret: an export
+// name is already in the source, and publishing the list tells an attacker nothing
+// the source does not.
+//
+// WHAT IT BUYS, ruled 2026-09-08 after it cost a broken anchor. The bloat pass
+// removed two exports on a scan that found no caller in src/ or test/. The holdout
+// imports both, and the holdout is structurally invisible to anything that runs in
+// the repo: that is its entire point. The result was 28 of 30 against an anchor of
+// min 1.0, which would have reverted every attempt forever, and nothing local
+// could have predicted it. The list is the missing third place to look.
+//
+// TWO CONSUMERS, pulling in opposite directions and both needed:
+//
+//   the dead-export check   treats a name here as a caller, so removing it is a
+//                           build failure in the repo rather than a surprise at
+//                           03:00.
+//   Job B                   refuses a holdout case importing a name that is NOT
+//                           here, so the list cannot quietly fall behind the suite
+//                           it describes. Fails in both directions, like every
+//                           other derived list in this repo.
+export const HOLDOUT_IMPORTS_FILE = "imports.txt";
+
+/** @param {string} namespace */
+export function holdoutImportsPath(namespace) {
+  return `improve/holdout/${namespace}/${HOLDOUT_IMPORTS_FILE}`;
+}
+
+// Names only. Blank lines and `#` comments are allowed so the file can say what it
+// is; anything else is a name.
+/** @param {string} text */
+export function parseImportsManifest(text) {
+  return text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0 && !l.startsWith("#"));
+}
+
+// Every NAME a holdout case imports from the repo's own source. Matched on the
+// import specifier being relative (../src/..., ../../app/...), because an import
+// of a node builtin or an npm package says nothing about this repo's exports.
+//
+// Default and namespace imports are reported under the names they bind, since
+// removing the thing they point at breaks the case just the same.
+/** @param {string} text */
+export function importedNames(text) {
+  /** @type {Set<string>} */
+  const names = new Set();
+  const re = /import\s+([\s\S]*?)\s+from\s+["'](\.[^"']*)["']/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const clause = m[1].trim();
+    const braces = clause.match(/\{([\s\S]*)\}/);
+    if (braces) {
+      for (const part of braces[1].split(",")) {
+        const name = part.trim().replace(/^type\s+/, "").split(/\s+as\s+/)[0].trim();
+        if (name) names.add(name);
+      }
+    }
+    const bare = clause.replace(/\{[\s\S]*\}/, "").replace(/,/g, " ").trim();
+    for (const part of bare.split(/\s+/)) {
+      const name = part.replace(/^\*$/, "").replace(/^type$/, "").trim();
+      if (name && name !== "as") names.add(name);
+    }
+  }
+  return names;
+}
+
+// The Job B gate. Returns the refusal to print and fail on, or null to proceed.
+// It NEVER names a case file: a filename is part of the hidden suite, and this
+// runs in a job whose log is readable. It names the missing IMPORTS, which are
+// source export names and are what the operator has to add.
+/**
+ * @param {string[]} caseTexts
+ * @param {string[] | null} declared
+ * @param {string} namespace
+ */
+export function holdoutImportRefusal(caseTexts, declared, namespace) {
+  /** @type {Set<string>} */
+  const used = new Set();
+  for (const text of caseTexts) for (const name of importedNames(text)) used.add(name);
+  const sorted = [...used].sort();
+  if (declared === null) {
+    return (
+      `no ${holdoutImportsPath(namespace)} in this repo. The hidden suite imports names out of this repo's source, ` +
+      `and nothing that runs here can see which, so a bloat pass removing one is a broken anchor nobody predicted. ` +
+      `Create the file with these ${sorted.length} names, one per line:
+${sorted.join("\n")}`
+    );
+  }
+  const missing = sorted.filter((n) => !declared.includes(n));
+  if (missing.length > 0) {
+    return (
+      `the hidden suite imports ${missing.length} name(s) that ${holdoutImportsPath(namespace)} does not list: ` +
+      `${missing.join(", ")}. Add them, or stop importing them. The list is what makes those exports undeletable.`
+    );
+  }
+  return null;
+}
 
 // The files the trusted step writes into $RUNNER_TEMP/trusted and the container
 // reads from a read-only mount. Files rather than an inlined string because the
@@ -378,6 +489,42 @@ function main(argv) {
       count = 0;
     }
     process.stdout.write(String(count));
+    return;
+  }
+  // Job B's gate on the holdout import manifest. Reads the synced holdout
+  // directory and this repo's committed list, and exits non-zero with a named
+  // refusal when they disagree. It never prints a case FILENAME: a filename is
+  // part of the hidden suite and this runs in a job whose log is readable.
+  if (argv[0] === "--check-holdout-imports") {
+    const [, holdoutDir, namespace, manifestPath] = argv;
+    /** @type {string[]} */
+    const texts = [];
+    try {
+      for (const name of readdirSync(holdoutDir)) {
+        if (!/\.test\./.test(name)) continue;
+        texts.push(readFileSync(join(holdoutDir, name), "utf8"));
+      }
+    } catch (err) {
+      process.stderr.write(`could not read the holdout directory: ${err instanceof Error ? err.message : String(err)}\n`);
+      process.exit(1);
+    }
+    if (texts.length === 0) {
+      process.stderr.write("no holdout cases were synced, so their imports cannot be checked. Refusing rather than passing on an empty read.\n");
+      process.exit(1);
+    }
+    /** @type {string[] | null} */
+    let declared = null;
+    try {
+      declared = parseImportsManifest(readFileSync(manifestPath, "utf8"));
+    } catch {
+      declared = null;
+    }
+    const refusal = holdoutImportRefusal(texts, declared, namespace);
+    if (refusal) {
+      process.stderr.write(`${refusal}\n`);
+      process.exit(1);
+    }
+    process.stdout.write(`holdout imports: ${declared?.length ?? 0} declared, all accounted for across ${texts.length} cases\n`);
     return;
   }
   if (argv[0] === "--secondary-scripts") {

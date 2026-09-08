@@ -54,3 +54,17 @@ export function secondaryFromStream(
   namespace: string,
   nonce?: string
 ): { test_pass_rate: number | null; lint_count: number | null };
+
+// The holdout import manifest (2026-09-08). improve/holdout/<ns>/imports.txt lists
+// every name the hidden suite imports out of the repo's own source. Committed and
+// not secret; enforced in both directions, by the dead-export check here and by
+// the scorer's Job B over the synced suite.
+export const HOLDOUT_IMPORTS_FILE: string;
+export function holdoutImportsPath(namespace: string): string;
+export function parseImportsManifest(text: string): string[];
+export function importedNames(text: string): Set<string>;
+export function holdoutImportRefusal(
+  caseTexts: string[],
+  declared: string[] | null,
+  namespace: string
+): string | null;

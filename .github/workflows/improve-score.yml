@@ -125,6 +125,14 @@ jobs:
           BUILD_PASSES=0; [ "${{ steps.build.outcome }}" = "success" ] && BUILD_PASSES=1
           RATE=$(node scripts/improve-report.mjs --rate test-report.json || echo "")
           LINT_COUNT=$(npm run check:test 2>&1 | grep -c "error TS" || true)
+          # bundle_size_bytes needs a wrangler.jsonc, and this repo gitignores the
+          # real one, so the dry run had nothing to read and the metric came back
+          # null on every run. Generated here from wrangler.jsonc.example plus the
+          # pinned ids in scripts/bindings.mjs, with NO NETWORK and NO SECRETS: a
+          # dry run bundles, it does not talk to the account, so placeholder-free
+          # ids are all it needs. Job A holds no credential and this does not
+          # change that (ruled 2026-09-08).
+          node scripts/dry-run-config.mjs
           BUNDLE_BYTES=$(npx wrangler deploy --dry-run --outdir=.improve-build > /dev/null 2>&1 && du -sb .improve-build/index.js 2>/dev/null | cut -f1 || echo "")
           BUILD_PASSES="${BUILD_PASSES}" RATE="${RATE}" LINT_COUNT="${LINT_COUNT}" BUNDLE_BYTES="${BUNDLE_BYTES}" node -e '
             const n=(v)=>(v===undefined||v===""?null:Number(v));
@@ -280,6 +288,31 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/holdout"
           aws s3 sync "s3://${HOLDOUT_BUCKET}/${HOLDOUT_PREFIX}" "${RUNNER_TEMP}/holdout/" --endpoint-url "${HOLDOUT_ENDPOINT}"
 
+      # THE HOLDOUT IMPORT MANIFEST, checked before anything runs (ruled
+      # 2026-09-08). improve/holdout/<ns>/imports.txt lists every name the hidden
+      # suite imports out of this repo's source. It is committed and not secret:
+      # an export name is already in the source.
+      #
+      # Why it is a gate rather than a note. The bloat pass removed two exports on
+      # a scan that found no caller in src/ or test/; the holdout imported both,
+      # and the holdout is structurally invisible to anything that runs in the
+      # repo. 28 of 30 against an anchor of min 1.0, and nothing local could have
+      # predicted it. This fails in BOTH directions: the dead-export check treats
+      # a listed name as a caller, and this step refuses a case importing a name
+      # that is not listed, so the list cannot fall behind the suite.
+      #
+      # It runs on the TRUSTED copy, over the R2 sync, before the container. It
+      # never prints a case filename.
+      - name: Check the holdout import manifest
+        env:
+          NODE_BIN: ${{ steps.trusted.outputs.node }}
+          IMPROVE_NAMESPACE: ${{ vars.IMPROVE_NAMESPACE }}
+        run: |
+          set -euo pipefail
+          "${NODE_BIN}" "${RUNNER_TEMP}/trusted/improve-report.mjs" --check-holdout-imports \
+            "${RUNNER_TEMP}/holdout" "${IMPROVE_NAMESPACE}" \
+            "improve/holdout/${IMPROVE_NAMESPACE}/imports.txt"
+
       # THE ONLY PLACE ATTEMPT CODE EVER RUNS IN THIS JOB, and it runs with no
       # network, a read-only root, no workspace mount, and no secret in scope.
       #
@@ -297,7 +330,14 @@ jobs:
       # took vitest and everything downstream of vite with it, and biome could not
       # resolve its binary at all. Pure-JS tooling (node --test, tsc) was fine,
       # which is exactly why capsid-mcp measured clean while three repos reported
-      # null. bookworm-slim matches the runner.
+      # null. bookworm matches the runner.
+      #
+      # THE FULL IMAGE, NOT slim, BECAUSE IT CARRIES git. A foxhound test shells
+      # out to git and slim answered "git: not found", failing one file of 255.
+      # Ruled 2026-09-08: add the tool rather than exclude the file, because
+      # excluding a file to make a number go up is how a score stops describing
+      # the suite. There is no second way in: apt-get cannot run behind
+      # --network none, so the tool has to be in the image or absent.
       #
       # RESULTS LEAVE AS A STDOUT PIPE. There is no seekable TAP destination for
       # the child to rewrite: the reporter writes to the container's stdout, the
@@ -338,7 +378,7 @@ jobs:
             -v "${GITHUB_WORKSPACE}:/repo:ro" \
             -w /work \
             --entrypoint /bin/sh \
-            node:24.14.1-bookworm-slim@sha256:b506e7321f176aae77317f99d67a24b272c1f09f1d10f1761f2773447d8da26c \
+            node:24.14.1-bookworm@sha256:80fc934952c8f1b2b4d39907af7211f8a9fff1a4c2cf673fb49099292c251cec \
             -c '
               set -u
               # The nonce becomes a SHELL variable and leaves the environment, so

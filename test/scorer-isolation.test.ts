@@ -198,9 +198,14 @@ test("attempt code runs only inside a network-less, read-only, digest-pinned con
   assert.match(WORKFLOW, /--tmpfs \/work:rw/, "the only writable surface is scratch that dies with the run");
   assert.match(
     WORKFLOW,
-    /node:24\.14\.1-bookworm-slim@sha256:[0-9a-f]{64}/,
+    /node:24\.14\.1-bookworm@sha256:[0-9a-f]{64}/,
     "the image must be pinned by digest, not by tag"
   );
+  // THE FULL IMAGE, NOT slim, because it carries git. A foxhound test shells out
+  // to git and slim answered "git: not found", failing one file of 255. Ruled
+  // 2026-09-08: add the tool rather than exclude the file, and there is no second
+  // way in because apt-get cannot run behind --network none.
+  assert.ok(!/node:[\d.]+-bookworm-slim/.test(EXECUTABLE), "slim carries no git, and a test that shells out to it fails for the environment");
   // GLIBC, NOT MUSL, and it is a measurement. The container mounts node_modules
   // installed by the runner, which is Ubuntu. On Alpine every package with a
   // platform-specific native binary asks for its musl build and finds only the gnu
