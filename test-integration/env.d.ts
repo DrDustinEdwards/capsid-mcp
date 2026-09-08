@@ -11,6 +11,9 @@ declare global {
       // Handed to the setup file through a binding: a setup file runs inside
       // workerd and cannot read migrations/ off the filesystem itself.
       TEST_MIGRATIONS: D1Migration[];
+      // Every SQL statement in src/, walked at config time (scripts/sql-statements.mjs).
+      TEST_SQL_STATEMENTS: { file: string; sql: string }[];
+      TEST_SQL_SKIPPED: { file: string; sql: string }[];
     }
   }
 }

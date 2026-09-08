@@ -1,6 +1,7 @@
 import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-pool-workers";
 import path from "node:path";
 import { defineConfig } from "vitest/config";
+import { extractStatements } from "./scripts/sql-statements.mjs";
 
 // THE INTEGRATION LAYER (audit 2026-09-07). node:test under test/ drives handlers
 // against fakes; this runs the whole Worker inside workerd with a real D1, real KV
@@ -34,6 +35,12 @@ export const INTEGRATION_COMPAT_DATE = "2026-08-22";
 
 const migrations = await readD1Migrations(path.join(import.meta.dirname, "migrations"));
 
+// Every SQL statement in src/, walked from the source at config time. A setup file
+// runs inside workerd and cannot read the filesystem, so the walk happens here and
+// arrives as a binding. test-integration/query-plans.test.ts runs EXPLAIN QUERY
+// PLAN over the reads.
+const sql = extractStatements(path.join(import.meta.dirname, "src"));
+
 export default defineConfig({
   plugins: [
     cloudflareTest({
@@ -49,6 +56,8 @@ export default defineConfig({
           // pool's route for it: a setup file runs inside workerd and cannot read
           // the filesystem.
           TEST_MIGRATIONS: migrations,
+          TEST_SQL_STATEMENTS: sql.statements,
+          TEST_SQL_SKIPPED: sql.skipped,
           // Non-secret vars, matching wrangler.jsonc.example.
           GITHUB_APP_CLIENT_ID: "test-client-id",
           // Secrets, with obviously fake values. capsid/conventions.md hard rule:
