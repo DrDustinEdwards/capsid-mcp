@@ -17,6 +17,7 @@
 # Harvested from the first run of that gate on 2026-09-08, which reports every
 # name it finds. An EXTRA name here costs nothing; a missing one is a red gate.
 
+
 APPROVAL_MAX_AGE_SECONDS
 ROSTER
 approvalTag
@@ -30,5 +31,7 @@ hasWideDash
 normalizeDashes
 onRoster
 pathProblem
+readSkillBody
+recordSkillOutcome
 runId
 seedScoresDoc
