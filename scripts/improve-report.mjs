@@ -406,14 +406,12 @@ function main(argv) {
     // the map and a reporter flag the tool no longer supports.
     const { segments, terminated } = splitStream(stream, nonce ?? "");
     if (!terminated) {
-      process.stderr.write("SECONDARY: the container did not finish; every recomputed metric is null.
-");
+      process.stderr.write("SECONDARY: the container did not finish; every recomputed metric is null.\n");
     }
     for (const kind of ["test", "lint"]) {
       const seg = segments.find((x) => x.kind === kind);
       if (!seg) {
-        process.stderr.write(`SECONDARY ${kind}: no phase ran (this namespace declares no ${kind} command).
-`);
+        process.stderr.write(`SECONDARY ${kind}: no phase ran (this namespace declares no ${kind} command).\n`);
         continue;
       }
       const why =
@@ -423,8 +421,7 @@ function main(argv) {
             ? `exit ${seg.status}, which is "could not execute": check the command in SECONDARY_COMMANDS`
             : `exit ${seg.status}`;
       const tail = seg.lines.filter((l) => l.trim() !== "").slice(-3);
-      process.stderr.write(`SECONDARY ${kind}: ${seg.lines.length} lines, ${why}. Last output: ${JSON.stringify(tail)}
-`);
+      process.stderr.write(`SECONDARY ${kind}: ${seg.lines.length} lines, ${why}. Last output: ${JSON.stringify(tail)}\n`);
     }
     /** @type {Record<string, unknown>} */
     let claimed = {};

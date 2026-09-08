@@ -308,7 +308,15 @@ test("PLANT: the trusted tree is COPIED into the sandbox, not symlinked", () => 
   assert.match(container, /find \. -path \.\/\.git -prune -o -name node_modules -prune -o -type f -print/, "source files are copied");
   assert.match(
     container,
-    /find \. -path \.\/\.git -prune -o -name node_modules -print \| while read -r d; do\n\s+rm -rf "\/work\/\$d"\n\s+ln -s "\/repo\/\$\{d#\.\/\}" "\/work\/\$d"/,
+    /find \. -path \.\/\.git -prune -o -name node_modules -print -prune \| while read -r d; do\n\s+rm -rf "\/work\/\$d"\n\s+ln -s "\/repo\/\$\{d#\.\/\}" "\/work\/\$d"/,
     "node_modules is the ONE thing that stays a symlink, because resolving a package through its real path is correct"
+  );
+  // -print -prune, not -print. Without the prune this descends INTO node_modules
+  // and tries to relink every nested one underneath the read-only symlink it just
+  // made: on foxhound's first scored run that was thousands of "Read-only file
+  // system" lines burying the one message that mattered.
+  assert.ok(
+    !/-name node_modules -print \|/.test(container),
+    "the relink must prune, or it walks the whole dependency tree it just made read-only"
   );
 });
