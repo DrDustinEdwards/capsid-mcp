@@ -1,26 +1,34 @@
 # Every name the hidden holdout suite imports out of this repo's source.
 #
 # NAMES ONLY, one per line. Committed and deliberately not secret: an export name
-# is already in src/, so publishing the list tells a reader nothing the source
-# does not. What is secret is the suite itself, and no part of it is here.
+# is already in the source, so publishing the list tells a reader nothing the
+# source does not. What is secret is the suite itself, and no part of it is here.
 #
-# WHY THIS FILE EXISTS. On 2026-09-07 a bloat pass removed two exports on a scan
-# that found no caller in src/ or test/. The holdout imported both, and the
-# holdout is structurally invisible to anything that runs in this repo: that is
-# its entire point. The result was 28 of 30 against an anchor of min 1.0, which
-# would have reverted every attempt forever, and nothing local could have
-# predicted it.
+# WHY THIS FILE EXISTS. On 2026-09-07 a bloat pass in capsid-mcp removed two
+# exports on a scan that found no caller in src/ or test/. The holdout imported
+# both, and the holdout is structurally invisible to anything that runs in the
+# repo: that is its entire point. 28 of 30 against an anchor of min 1.0, and
+# nothing local could have predicted it.
 #
-# It fails in BOTH directions, which is what makes it a guard rather than a note:
-#   test/dead-exports.test.ts   treats a name here as a caller, so removing one
-#                               is a build failure rather than a 03:00 surprise.
-#   the scorer's Job B          refuses a holdout case importing a name that is
-#                               NOT here, so this list cannot fall behind the
-#                               suite it describes.
+# Enforced in BOTH directions: a dead-export check treats a name here as a
+# caller, and the scorer's Job B refuses a holdout case importing a name that is
+# NOT here.
 #
-# Add a name when the suite starts importing it. Remove one only when the suite
-# stops. The list is completed from a scored run: Job B prints every name it
-# found when one is missing.
+# Harvested from the first run of that gate on 2026-09-08, which reports every
+# name it finds. An EXTRA name here costs nothing; a missing one is a red gate.
 
+APPROVAL_MAX_AGE_SECONDS
+ROSTER
+approvalTag
+attemptId
+authoritativeFor
+branchName
+candidateSkills
+chicagoDay
+chicagoHour
 hasWideDash
+normalizeDashes
+onRoster
+pathProblem
+runId
 seedScoresDoc

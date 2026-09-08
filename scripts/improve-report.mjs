@@ -181,7 +181,15 @@ export function parseImportsManifest(text) {
 export function importedNames(text) {
   /** @type {Set<string>} */
   const names = new Set();
-  const re = /import\s+([\s\S]*?)\s+from\s+["'](\.[^"']*)["']/g;
+  // ANCHORED AT A STATEMENT START, and the clause may not cross a `;`.
+  //
+  // The first spelling used a lazy `[\s\S]*?` for the clause, which crossed
+  // statement boundaries: in a file whose first relative import is the third
+  // line, the match began at line one and swallowed the two node-builtin imports
+  // above it. The five first runs of this gate reported names like `assert`,
+  // `from`, `import` and `test } from "node:test";` as things the suite imports.
+  // An import clause never contains a semicolon, so `[^;]*?` is the boundary.
+  const re = /(?:^|\n)\s*import\s+([^;]*?)\s+from\s+["'](\.[^"']*)["']/g;
   let m;
   while ((m = re.exec(text)) !== null) {
     const clause = m[1].trim();
@@ -197,6 +205,12 @@ export function importedNames(text) {
       const name = part.replace(/^\*$/, "").replace(/^type$/, "").trim();
       if (name && name !== "as") names.add(name);
     }
+  }
+  // A name is a JavaScript identifier and nothing else. Belt and braces after the
+  // regex above: a token that is not one is a parse artefact, and letting one
+  // through means the manifest is compared against garbage.
+  for (const name of [...names]) {
+    if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name)) names.delete(name);
   }
   return names;
 }
