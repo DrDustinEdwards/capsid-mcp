@@ -30,3 +30,17 @@ export function normalizeDashes(text: string, mode: "prose" | "title" = "prose")
     .map((line) => applyDashes(line, HEADING.test(line) ? " - " : ", "))
     .join("\n");
 }
+
+// NOT DEAD, AND THE SCAN THAT SAID SO COULD NOT HAVE KNOWN. This was moved to
+// test/ on 2026-09-07 as an export with no caller in src/ or test/. The holdout
+// suite imports it, and the holdout is structurally invisible to anything that
+// runs here: that is the whole point of it. The measurement, 2026-09-08: with
+// this and seedScoresDoc removed the holdout scored 28/30, and restoring both
+// took it back to 30/30 against an anchor of min 1.0.
+//
+// THE GENERAL RULE, worth more than the two functions: "no caller in src/ or
+// test/" is not "dead" in this repo. The hidden suite is a consumer no local scan
+// can see, so an export removal is checked by scoring a branch, not by grepping.
+export function hasWideDash(text: string): boolean {
+  return /[–—―]/.test(text ?? "");
+}
