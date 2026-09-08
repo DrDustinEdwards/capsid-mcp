@@ -306,15 +306,18 @@ test("PLANT: the trusted tree is COPIED into the sandbox, not symlinked", () => 
     "blanket-symlinking the trusted tree into /work is what made relative imports resolve outside the sandbox"
   );
   assert.match(container, /find \. -path \.\/\.git -prune -o -name node_modules -prune -o -type f -print/, "source files are copied");
-  assert.match(
-    container,
-    /find \. -path \.\/\.git -prune -o -name node_modules -print -prune \| while read -r d; do\n\s+rm -rf "\/work\/\$d"\n\s+ln -s "\/repo\/\$\{d#\.\/\}" "\/work\/\$d"/,
-    "node_modules is the ONE thing that stays a symlink, because resolving a package through its real path is correct"
+  // node_modules is the ONE thing not copied: it is a real directory in the tmpfs
+  // whose entries are symlinks to the read-only originals. A symlink to the
+  // DIRECTORY was the previous form and it broke vite, which writes
+  // node_modules/.vite-temp before it loads a config. One level of symlinks keeps
+  // every package read-only while leaving the directory itself writable.
+  assert.match(container, /find \. -path \.\/\.git -prune -o -name node_modules -print -prune/, "the relink must prune");
+  assert.match(container, /mkdir -p "\/work\/\$rel"/, "node_modules is a real directory, so a tool can write inside it");
+  assert.match(container, /ln -s "\$e" "\/work\/\$rel\/\$\{e##\*\/\}"/, "and its entries are symlinks to the read-only originals");
+  assert.ok(
+    !/ln -s "\/repo\/\$\{d#\.\/\}" "\/work\/\$d"/.test(container),
+    "symlinking the node_modules DIRECTORY makes it read-only, which is what broke vite"
   );
-  // -print -prune, not -print. Without the prune this descends INTO node_modules
-  // and tries to relink every nested one underneath the read-only symlink it just
-  // made: on foxhound's first scored run that was thousands of "Read-only file
-  // system" lines burying the one message that mattered.
   assert.ok(
     !/-name node_modules -print \|/.test(container),
     "the relink must prune, or it walks the whole dependency tree it just made read-only"

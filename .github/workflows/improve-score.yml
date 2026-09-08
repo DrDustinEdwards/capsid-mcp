@@ -371,9 +371,23 @@ jobs:
               # relink them underneath the read-only symlink it just made. On
               # foxhound that was thousands of "Read-only file system" lines
               # burying the one message that mattered.
+              # A REAL DIRECTORY OF SYMLINKS, not a symlink to the directory.
+              # vite writes node_modules/.vite-temp before it loads a config, and
+              # a symlink to the read-only mount made that ENOENT: foxhound and
+              # dustinedwards-info both died trying to mkdir that path, with the
+              # vitest config never loaded.
+              # One level of symlinks gives every package its read-only original
+              # while leaving the directory itself writable in the tmpfs, so a
+              # tool that scribbles inside node_modules gets somewhere to scribble
+              # and still cannot reach the trusted checkout.
               find . -path ./.git -prune -o -name node_modules -print -prune | while read -r d; do
-                rm -rf "/work/$d"
-                ln -s "/repo/${d#./}" "/work/$d"
+                rel=${d#./}
+                rm -rf "/work/$rel"
+                mkdir -p "/work/$rel"
+                for e in "/repo/$rel"/* "/repo/$rel"/.[!.]*; do
+                  [ -e "$e" ] || continue
+                  ln -s "$e" "/work/$rel/${e##*/}"
+                done
               done
               while read -r T; do
                 [ -n "$T" ] || continue
