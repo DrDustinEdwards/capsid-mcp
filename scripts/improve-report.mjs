@@ -397,6 +397,35 @@ function main(argv) {
       stream = "";
     }
     const recomputed = secondaryFromStream(stream, namespace, nonce ?? "");
+
+    // WHY IT IS NULL, IN THE RUN LOG. A null that does not say why is the shape
+    // this whole change exists to stop: an unmeasured metric that reads like a
+    // measured one. The four roster repos reported null on their first scored run
+    // and the log could not distinguish "the command was not found" from "it ran
+    // and produced no parseable result", which is the difference between a typo in
+    // the map and a reporter flag the tool no longer supports.
+    const { segments, terminated } = splitStream(stream, nonce ?? "");
+    if (!terminated) {
+      process.stderr.write("SECONDARY: the container did not finish; every recomputed metric is null.
+");
+    }
+    for (const kind of ["test", "lint"]) {
+      const seg = segments.find((x) => x.kind === kind);
+      if (!seg) {
+        process.stderr.write(`SECONDARY ${kind}: no phase ran (this namespace declares no ${kind} command).
+`);
+        continue;
+      }
+      const why =
+        seg.status === null
+          ? "no exit status was printed"
+          : seg.status >= 126
+            ? `exit ${seg.status}, which is "could not execute": check the command in SECONDARY_COMMANDS`
+            : `exit ${seg.status}`;
+      const tail = seg.lines.filter((l) => l.trim() !== "").slice(-3);
+      process.stderr.write(`SECONDARY ${kind}: ${seg.lines.length} lines, ${why}. Last output: ${JSON.stringify(tail)}
+`);
+    }
     /** @type {Record<string, unknown>} */
     let claimed = {};
     try {

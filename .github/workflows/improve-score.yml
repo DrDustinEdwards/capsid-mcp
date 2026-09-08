@@ -356,7 +356,12 @@ jobs:
               find . -path ./.git -prune -o -name node_modules -prune -o -type f -print | while read -r f; do
                 cp "$f" "/work/$f" 2>/dev/null || true
               done
-              find . -path ./.git -prune -o -name node_modules -print | while read -r d; do
+              # -print -prune, not -print: without the prune this descends INTO
+              # node_modules and finds every nested one, then tries to rm and
+              # relink them underneath the read-only symlink it just made. On
+              # foxhound that was thousands of "Read-only file system" lines
+              # burying the one message that mattered.
+              find . -path ./.git -prune -o -name node_modules -print -prune | while read -r d; do
                 rm -rf "/work/$d"
                 ln -s "/repo/${d#./}" "/work/$d"
               done
