@@ -294,6 +294,31 @@ test("PLANT: the container script carries no apostrophe, comments included", () 
   );
 });
 
+test("PLANT: the sandbox is a real git repository, with one commit and no history", () => {
+  // Adding the git BINARY was not enough. The sandbox assembles its tree by
+  // copying, deliberately without .git, so foxhound went from "git: not found"
+  // to "not a git repository" with the same file still failing. Ruled 2026-09-08:
+  // one commit of the assembled tree, so rev-parse and status answer.
+  const container = EXECUTABLE.slice(EXECUTABLE.indexOf("docker run --rm"));
+  assert.match(container, /git init -q/, "the sandbox must be a repository, not just a machine with git on it");
+  assert.match(container, /git commit -q -m sandbox/, "one commit, so HEAD exists");
+  assert.match(
+    container,
+    /printf "node_modules\\n\.holdout\\n" > \/work\/\.git\/info\/exclude/,
+    "node_modules and the holdout stay out of the index, so it is the source tree and nothing else"
+  );
+  // NO REAL HISTORY AND NO REMOTE. The commit exists to answer a question, not to
+  // tell an attempt anything about the actual repository.
+  assert.ok(!/git remote add/.test(container), "the sandbox must have no remote");
+  assert.ok(!/git fetch|git clone|git pull/.test(container), "and no network operation, behind --network none");
+  // It runs BEFORE the phases that might ask, and the holdout is not in the tree
+  // yet, which is why the exclude entry is belt and braces rather than the fix.
+  assert.ok(
+    container.indexOf("git init") < container.indexOf("secondary-test.sh"),
+    "the repository must exist before any repo command runs"
+  );
+});
+
 test("PLANT: the trusted tree is COPIED into the sandbox, not symlinked", () => {
   // Run 34168480470 is the plant that found this. The sandbox symlinked /work/test
   // at /repo/test, which made a test file's REAL path /repo/test/x.test.ts, so node

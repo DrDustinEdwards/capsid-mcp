@@ -437,6 +437,30 @@ jobs:
                 cp -R "/attempt/$T" "/work/$T"
               done < /trusted/trees.txt
               cd /work || exit 1
+              # A REAL GIT REPOSITORY, because code that asks git a question should
+              # get an answer rather than a fatal (ruled 2026-09-08). Adding the
+              # binary was not enough: the sandbox assembles its tree by copying,
+              # deliberately without .git, so the tool was present and the
+              # repository was not, and foxhound went from
+              # "git: not found" to "not a git repository" with the same file
+              # still failing.
+              #
+              # ONE COMMIT OF THE ASSEMBLED TREE. No network, no remote, no
+              # history, no real author: enough for rev-parse and status to
+              # answer, and nothing that tells an attempt anything about the
+              # actual repository. node_modules and the holdout are excluded so
+              # the index is the source tree and nothing else, and every step is
+              # tolerant of failure because a repo without git is not a reason to
+              # lose the whole measurement.
+              git init -q >/dev/null 2>&1 || true
+              if [ -d /work/.git ]; then
+                printf "node_modules\n.holdout\n" > /work/.git/info/exclude
+                git config user.email sandbox@invalid >/dev/null 2>&1 || true
+                git config user.name sandbox >/dev/null 2>&1 || true
+                git add -A >/dev/null 2>&1 || true
+                git commit -q -m sandbox --no-gpg-sign >/dev/null 2>&1 || true
+              fi
+
               # THE SECONDARY PHASES RUN BEFORE THE HOLDOUT IS COPIED IN, and the
               # order is load-bearing rather than tidy. The holdout cases land in
               # /work/.holdout, which is inside the working directory, so a lint

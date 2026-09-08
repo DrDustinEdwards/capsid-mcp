@@ -106,15 +106,22 @@ export const SECONDARY_COMMANDS = {
   },
   foxing: {
     trees: ["packages/core", "packages/api", "apps/web"],
-    // UNIT TESTS ONLY (ruled 2026-09-08). The bare `vitest run` swept in
-    // apps/web/e2e/*.spec.ts, which are playwright specs that cannot run behind
-    // --network none: 58 top-level results of which 38 were e2e failing for the
-    // environment rather than for the code, and the repo scored 0.3448 for
-    // reasons no attempt could act on. A score the loop cannot move is noise it
-    // optimises against. e2e is UNSCORED here and foxing/improve/scores.md says
-    // so; it is not excluded to make a number go up, it is excluded because the
-    // sandbox is the wrong place to run it.
-    test: 'node_modules/.bin/vitest run --reporter=tap --exclude "**/e2e/**"',
+    // UNIT TESTS ONLY, and that took two exclusions rather than one (ruled
+    // 2026-09-08). The bare `vitest run` swept in apps/web/e2e/*.spec.ts,
+    // playwright specs that cannot run behind --network none: 58 top-level
+    // results, 38 of them failing for the environment rather than the code, and
+    // the repo scored 0.3448 for reasons no attempt could act on.
+    //
+    // Excluding e2e by folder took it to 0.5263 and revealed the second set:
+    // *.integration.test.ts lives under test/ rather than e2e/, so a folder
+    // exclusion never reached it. Both are UNSCORED and
+    // foxing/improve/scores.md says so.
+    //
+    // Neither is excluded to make a number go up. A score the loop cannot move
+    // is noise it optimises against, and the hidden holdout suite is what
+    // covers behaviour the unit tests do not.
+    test:
+      'node_modules/.bin/vitest run --reporter=tap --exclude "**/e2e/**" --exclude "**/*.integration.test.ts"',
     lint: "node_modules/.bin/biome check .",
     lint_pattern: "(lint|assist|format)/",
     verified: "2026-09-08",
