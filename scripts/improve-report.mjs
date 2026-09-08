@@ -429,8 +429,15 @@ function main(argv) {
           : seg.status >= 126
             ? `exit ${seg.status}, which is "could not execute": check the command in SECONDARY_COMMANDS`
             : `exit ${seg.status}`;
-      const tail = seg.lines.filter((l) => l.trim() !== "").slice(-3);
-      process.stderr.write(`SECONDARY ${kind}: ${seg.lines.length} lines, ${why}. Last output: ${JSON.stringify(tail)}\n`);
+      // HEAD AND TAIL. The tail of a Node crash is the version banner, which says
+      // nothing. The message that names the missing module is at the TOP, and
+      // printing only the tail turned "vitest could not resolve X" into three
+      // closing braces, which is where the first two rounds of this diagnosis went.
+      const nonEmpty = seg.lines.filter((l) => l.trim() !== "");
+      process.stderr.write(
+        `SECONDARY ${kind}: ${seg.lines.length} lines, ${why}. First: ${JSON.stringify(nonEmpty.slice(0, 3))}\n`
+      );
+      process.stderr.write(`SECONDARY ${kind}: last: ${JSON.stringify(nonEmpty.slice(-3))}\n`);
     }
     /** @type {Record<string, unknown>} */
     let claimed = {};
