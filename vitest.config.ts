@@ -76,5 +76,13 @@ export default defineConfig({
   test: {
     include: ["test-integration/**/*.test.ts"],
     setupFiles: ["./test-integration/apply-migrations.ts"],
+    // THE DEFAULT 5s IS TOO TIGHT FOR WHAT THESE ACTUALLY DO, and finding that
+    // out from a flake is worse than saying it here. One test applies every
+    // migration and dumps every table to R2; another runs EXPLAIN QUERY PLAN over
+    // 62 statements. Measured 8 to 12 seconds each on a loaded machine, under 5
+    // when idle, which is exactly the band that goes red in CI and green locally.
+    // The timeout is a guard against a hang, not a performance budget.
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
   },
 });
