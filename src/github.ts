@@ -1944,3 +1944,28 @@ export async function defaultBranchSha(env: Env, namespace: string, repoSelector
   const branch = await getDefaultBranch(env, owner, repo);
   return getRefSha(env, owner, repo, branch);
 }
+
+// EVERY BLOB PATH ON THE DEFAULT BRANCH, in one call.
+//
+// Added 2026-09-07 for the truth report's doc-vs-code drift check, which asks a
+// set-membership question about a few hundred paths and needs the whole tree
+// rather than a directory at a time. It reuses searchCode's tree fetch and its
+// size refusal for the same reason searchCode has them: a recursive tree on a
+// large repo is one response, and GitHub truncates it silently past a limit.
+//
+// Returns null rather than throwing when the tree cannot be read or is too large.
+// The caller reports that check as UNRUN; an empty set would report every cited
+// path as drift, which is worse than not looking.
+export async function repoBlobPaths(env: Env, namespace: string, repoSelector?: string): Promise<Set<string> | null> {
+  try {
+    const { owner, repo } = await resolveRepo(env, namespace, repoSelector);
+    const ref = await getDefaultBranch(env, owner, repo);
+    const resp = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(ref)}?recursive=1`);
+    if (!resp.ok) return null;
+    const tree = (await resp.json()) as { tree?: Array<{ path: string; type: string }>; truncated?: boolean };
+    if (!Array.isArray(tree.tree) || tree.truncated || tree.tree.length > SEARCH_TREE_LIMIT) return null;
+    return new Set(tree.tree.filter((e) => e.type === "blob").map((e) => e.path));
+  } catch {
+    return null;
+  }
+}

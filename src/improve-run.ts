@@ -93,6 +93,7 @@ import {
   type AttemptRow,
   type RunRow,
 } from "./improve-state";
+import { integrityOf, REPORTS_PREFIX } from "./truth-report";
 
 // A baseline job is dispatched under a synthetic attempt id that is deliberately
 // NOT a row in improve_attempts: it measures the base, it is not an attempt at
@@ -1385,6 +1386,13 @@ export interface NamespaceStatus {
     note: string | null;
   } | null;
   totals: { runs: number; attempts: number; kept: number; reverts: number; cost_usd: number; ci_minutes: number };
+  // THE LATEST TRUTH REPORT for this namespace (2026-09-07). `lint` mode
+  // `report` stores one document per namespace per day under reports/, carrying
+  // one integrity percentage; this is the read path for it, so the number is
+  // visible without anyone knowing the path convention. null means no report has
+  // ever been run here, which is NOT the same as an integrity of zero and is
+  // reported as null for exactly that reason.
+  latest_report: { path: string; integrity: number | null; generated: string } | null;
 }
 
 export interface StatusReport {
@@ -1428,6 +1436,15 @@ export async function improveStatus(env: Env, only?: string, taskPath?: string):
       .bind(namespace)
       .first<NamespaceStatus["totals"]>();
 
+    const report = await env.DB
+      .prepare(
+        `SELECT path, body, updated_at FROM documents
+         WHERE namespace = ?1 AND path LIKE ?2 AND type = 'reference'
+         ORDER BY path DESC LIMIT 1`
+      )
+      .bind(namespace, `${REPORTS_PREFIX}lint-%`)
+      .first<{ path: string; body: string | null; updated_at: string }>();
+
     out.push({
       namespace,
       paused: await pausedReason(env.APP_KV, namespace),
@@ -1436,6 +1453,13 @@ export async function improveStatus(env: Env, only?: string, taskPath?: string):
       best: best ? { sha: best.sha, score: best.score, recorded_at: best.recorded_at } : null,
       last_run: last ?? null,
       totals: totals ?? { runs: 0, attempts: 0, kept: 0, reverts: 0, cost_usd: 0, ci_minutes: 0 },
+      // ORDER BY path DESC gives the newest date because the filename is
+      // ISO-dated, which sorts lexically. Deliberate: updated_at would give the
+      // most recently REWRITTEN report, and a re-run of an old date is not the
+      // latest measurement.
+      latest_report: report
+        ? { path: `${namespace}/${report.path}`, integrity: integrityOf(report.body), generated: report.updated_at }
+        : null,
     });
   }
 

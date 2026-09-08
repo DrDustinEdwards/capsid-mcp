@@ -30,6 +30,7 @@ import {
   REPO_PATCH_BUDGET,
   REPO_SHAPE,
   repoHistory,
+  repoBlobPaths,
   repoRefs,
   requireSinglePrimary,
   searchCode,
@@ -41,6 +42,7 @@ import { normalizeDashes } from "./normalize";
 import { parseLinks } from "./links";
 import { validateDocStatus, validateDocType } from "./doc-meta";
 import { authoritativeFor, scanCountClaims } from "./counts";
+import { buildTruthReport, renderTruthReport, reportPath, type ReportDoc, type ReportEdge } from "./truth-report";
 import { b64urlDecode, b64urlEncode } from "./encoding";
 import { bounded, BRIEF_BUDGET, CI_DISPATCH_MAX_INPUTS, DEFAULT_SCAN_FILES, DEFAULT_SCAN_RESULTS, docPath, GATHER_BUDGET, HISTORY_ROWS, LINT_CONSUMED_MAX, MAX_BODY, MAX_DOC_STATUS, MAX_COMMIT_MESSAGE, MAX_DOC_TYPE, MAX_GLOB, MAX_LINKS_JSON, MAX_PATH, MAX_PR_BODY, MAX_PR_TITLE, MAX_QUERY, MAX_REF, MAX_REPO_SELECTOR, MAX_REPOS_JSON, MAX_ROWS, MAX_SCAN_CAP, MAX_SHA, MAX_TAGS, MAX_TITLE, nsName, SEARCH_ROWS } from "./limits";
 import { assembleBody } from "./write-modes";
@@ -1429,10 +1431,10 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
     {
       annotations: hintsFor("lint"),
       description:
-        "Consolidation loop for a namespace. mode 'gather' (default, read-only) returns the packet a driving LLM needs to compile the wiki: current core.md, the concept and decision docs, every unconsolidated episodic and source doc, and the capsid schema and conventions rules. After writing the updated core.md and concept docs via write, call mode 'finalize' with consumed: the episodic/source paths that were compiled. Finalize moves them under archive/ (never deletes, never touches core or concept docs) and writes one audit row. Finalize requires operator key and confirmation: the server elicits it when the client supports elicitation, otherwise pass confirm: true.",
+        "Consolidation loop and truth report for a namespace. mode 'gather' (default, read-only) returns the packet a driving LLM needs to compile the wiki: current core.md, the concept and decision docs, every unconsolidated episodic and source doc, and the capsid schema and conventions rules. After writing the updated core.md and concept docs via write, call mode 'finalize' with consumed: the episodic/source paths that were compiled. Finalize moves them under archive/ (never deletes, never touches core or concept docs) and writes one audit row. mode 'report' measures the store instead of compiling it: documents by type, contradictions (prose asserting a number the artifact disagrees with), stale decisions, unbound specs, broken links, and doc-vs-code drift (a repo path named in canon that is no longer in the repo), plus ONE integrity percentage. It STORES the result as <namespace>/reports/lint-<date>.md so the trend is a document, and improve_status surfaces the latest number per namespace. A check that could not run is excluded from integrity rather than counted as clean. finalize and report require operator key; finalize also requires confirmation, elicited when the client supports it, otherwise pass confirm: true.",
       inputSchema: {
         namespace: nsName,
-        mode: z.enum(["gather", "finalize"]).optional(),
+        mode: z.enum(["gather", "finalize", "report"]).optional(),
         // Bounded (audit 2026-09-06): the finalize batch spends four statements
         // per path plus one audit row, and D1 caps a batch at 100 statements.
         // The bound keeps the archive one atomic batch; see LINT_CONSUMED_MAX.
@@ -1573,6 +1575,110 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
       }
 
       if (!mayWrite) return fail(DENIED);
+
+      // ---- mode "report": measure the store rather than compile it ----------
+      //
+      // WRITE-GATED because it produces a document. The trend is the whole point
+      // (capsid/conventions.md: a number that lives only here can be wrong
+      // forever and nothing notices), and a trend needs something written down.
+      // One document per namespace per day: a second run the same date overwrites
+      // rather than accumulating, so the series is daily rather than
+      // per-invocation.
+      if (mode === "report") {
+        const now = new Date();
+        const docs = await db
+          .prepare(
+            `SELECT path, type, status, title, body, updated_at FROM documents
+             WHERE namespace = ?1 ORDER BY path`
+          )
+          .bind(namespace)
+          .all<ReportDoc>();
+        const edges = await db
+          .prepare(
+            `SELECT from_ns, from_path, type, to_ns, to_path FROM document_links
+             WHERE from_ns = ?1 OR to_ns = ?1`
+          )
+          .bind(namespace)
+          .all<ReportEdge>();
+        const dangling = await db
+          .prepare(
+            `SELECT l.from_ns, l.from_path, l.type, l.to_ns, l.to_path,
+                    CASE WHEN f.id IS NULL THEN 1 ELSE 0 END AS source_missing,
+                    CASE WHEN t.id IS NULL THEN 1 ELSE 0 END AS target_missing
+             FROM document_links l
+             LEFT JOIN documents f ON f.namespace = l.from_ns AND f.path = l.from_path
+             LEFT JOIN documents t ON t.namespace = l.to_ns AND t.path = l.to_path
+             WHERE (f.id IS NULL OR t.id IS NULL)
+               AND (l.from_ns = ?1 OR l.to_ns = ?1)`
+          )
+          .bind(namespace)
+          .all<ReportEdge>();
+        // The count-claim scan wants standing documents only, same as gather.
+        const claims = scanCountClaims(
+          docs.results.filter((d) => !d.path.startsWith("archive/")).map((d) => ({ path: d.path, type: d.type, body: d.body })),
+          namespace
+        );
+        // NULL, NOT AN EMPTY SET, when the tree cannot be read. An empty set would
+        // report every path the canon names as drift, which is a worse answer than
+        // not looking; buildTruthReport excludes the check from integrity instead.
+        const repoPaths = (await repoBlobPaths(env, namespace)) ?? undefined;
+
+        const report = buildTruthReport({
+          namespace,
+          now,
+          docs: docs.results,
+          edges: edges.results,
+          danglingEdges: dangling.results,
+          countClaims: claims.map((c) => ({ path: c.path, noun: c.noun, states: c.states, authoritative: c.authoritative, quote: c.quote })),
+          repoPaths,
+        });
+        const path = reportPath(now);
+        const body = renderTruthReport(report);
+        // Through the ordinary write path, so the report is snapshotted and
+        // audited like any other document. Hard rule 5: no write path skips
+        // document_versions and audit_log, and a report is not an exception.
+        const prior = await db
+          .prepare("SELECT id, title, body FROM documents WHERE namespace = ?1 AND path = ?2")
+          .bind(namespace, path)
+          .first<{ id: number; title: string | null; body: string | null }>();
+        const title = `Truth report - ${namespace} - ${path.slice("reports/lint-".length, -3)}`;
+        const statements = [];
+        if (prior) {
+          statements.push(
+            db
+              .prepare(
+                "INSERT INTO document_versions (document_id, namespace, path, title, body) SELECT id, namespace, path, title, body FROM documents WHERE namespace = ?1 AND path = ?2"
+              )
+              .bind(namespace, path)
+          );
+        }
+        // THE SAME UPSERT THE `write` TOOL ISSUES, byte for byte. One spelling of
+        // the document upsert in this file, so a change to the write path cannot
+        // leave a second one behind that nobody remembers to update.
+        statements.push(
+          db
+            .prepare(
+              `INSERT INTO documents (namespace, path, title, body, type, tags, status)
+               VALUES (?1, ?2, ?3, ?4, COALESCE(?5, 'note'), ?6, COALESCE(?7, 'published'))
+               ON CONFLICT(namespace, path) DO UPDATE SET
+                 title = COALESCE(?3, documents.title),
+                 body = excluded.body,
+                 type = COALESCE(?5, documents.type),
+                 tags = COALESCE(?6, documents.tags),
+                 status = COALESCE(?7, documents.status),
+                 updated_at = datetime('now')`
+            )
+            .bind(namespace, path, title, body, "reference", null, "published")
+        );
+        statements.push(
+          db
+            .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES (?1, 'lint_report', ?2, ?3, ?4)")
+            .bind(actor, namespace, path, JSON.stringify({ integrity: report.integrity, findings: report.findings.length }))
+        );
+        await db.batch(statements);
+        return ok({ mode: "report", stored: `${namespace}/${path}`, ...report });
+      }
+
       const paths = [...new Set(consumed ?? [])];
       if (paths.length === 0) {
         return fail("finalize requires consumed: the episodic/source paths that were compiled into the wiki");
