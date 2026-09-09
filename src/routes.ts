@@ -223,8 +223,30 @@ async function handleAuthorizeGet(request: Request, env: Env): Promise<Response>
   return renderApprovalDialog(oauthReq, client.clientName ?? oauthReq.clientId, crypto.randomUUID(), client.redirectUris);
 }
 
+// THE CONSENT FORM'S BODY CAP. Generous next to the shape it carries: `req` is a
+// base64url AuthRequest and `csrf` is a uuid, so a real submission is well under a
+// kilobyte. 64KB is three orders of magnitude of headroom and still refuses a body
+// that is trying to be something else, which is the same reasoning MAX_REPORT_BYTES
+// carries on the signed endpoints.
+const AUTHORIZE_FORM_MAX_BYTES = 65_536;
+
 async function handleAuthorizePost(request: Request, env: Env): Promise<Response> {
-  const form = await request.formData();
+  // BOUNDED AT THE STREAM, BEFORE THE PARSE (2026-09-08). This was a bare
+  // request.formData(), which buffers AND PARSES the whole body before any check
+  // in this handler runs, on a path reachable without credentials: the CSRF cookie
+  // is checked after the parse, and a caller can fetch the form to obtain one.
+  // Same primitive and same reason as /csp-report; the difference is that this is
+  // the consent path, where a small safe-looking change broke logins for 26 days
+  // in 2026-08, so the test file asserts the CSRF and missing-field refusals still
+  // answer 403 and 400 rather than only asserting the new 413.
+  const bounded = await readBoundedText(request, AUTHORIZE_FORM_MAX_BYTES);
+  if (!bounded.ok) return new Response(null, { status: 413 });
+  // URLSearchParams, not formData(): the consent dialog is a plain
+  // `<form method="post">` with no enctype, so the browser sends
+  // application/x-www-form-urlencoded and multipart is not a shape this endpoint
+  // has ever received. Parsing only what it is actually sent is narrower than
+  // formData() by design, and the live gate's approve step posts urlencoded too.
+  const form = new URLSearchParams(bounded.text);
   const csrf = form.get("csrf");
   const req = form.get("req");
   if (typeof csrf !== "string" || typeof req !== "string") return textResponse("bad request", 400);
