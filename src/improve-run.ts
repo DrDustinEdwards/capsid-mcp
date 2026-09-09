@@ -55,6 +55,9 @@ import {
   MAX_CONSECUTIVE_REVERTS,
   ROSTER,
   RUN_MAX_AGE_MS,
+  driverKey,
+  DRIVER_LEASE_TTL_SECONDS,
+  servedProtectedPaths,
   runId as makeRunId,
   RUN_CONDITIONS,
   runTaskPath,
@@ -70,6 +73,7 @@ import {
   type ImproveMode,
   type RunCondition,
   type RunStatus,
+  type ServedProtectedPath,
 } from "./improve-schema";
 import { selectBase } from "./improve-select";
 import { signTaskBody, verifyTaskDoc } from "./improve-task";
@@ -1408,6 +1412,13 @@ export interface StatusReport {
   cost_note: string;
   // Monthly spend against the KV caps the opener and tick enforce.
   budget: BudgetStatus;
+  // THE DETERMINISTIC PATH GUARD'S LIST, SERVED (residual 10). The
+  // subscription-mode driver runs on a laptop, outside every guard in this
+  // Worker, and had no path monitor at all. It now fetches these and applies
+  // them to each attempt's changed paths before any push, through
+  // scripts/path-guard.mjs. Served rather than copied so the list cannot drift:
+  // a pattern added to PROTECTED_PATH_PATTERNS is in the next call's response.
+  protected_paths: ServedProtectedPath[];
   namespaces: NamespaceStatus[];
 }
 
@@ -1477,6 +1488,7 @@ export async function improveStatus(env: Env, only?: string, taskPath?: string):
     cost_note:
       "cost_usd is an ESTIMATE computed from token counts and published rates, including cache read and write multipliers. It is for sanity-checking, not accounting.",
     budget,
+    protected_paths: servedProtectedPaths(),
     namespaces: out,
   };
 }
@@ -1529,6 +1541,16 @@ export type ImproveControlResult =
   | { action: "pause" | "unpause"; namespaces: string[]; paused: Record<string, string | null> }
   | { action: "budget"; caps: BudgetCaps }
   | {
+      action: "claim";
+      namespace: string;
+      // True only when THIS call took the lease. A refused claim and a release
+      // both report false, and `reason` says which.
+      held: boolean;
+      holder: string | null;
+      expires_in_seconds: number | null;
+      reason: string | null;
+    }
+  | {
       action: "mint_operator_key";
       key: string;
       hash: string;
@@ -1545,8 +1567,15 @@ export type ImproveControlResult =
 
 export async function improveControl(
   env: Env,
-  action: "mode" | "pause" | "unpause" | "budget" | "mint_operator_key",
-  opts: { value?: string; namespace?: string; reason?: string; actions_minutes_month?: number; model_usd_month?: number }
+  action: "mode" | "pause" | "unpause" | "budget" | "mint_operator_key" | "claim",
+  opts: {
+    value?: string;
+    namespace?: string;
+    reason?: string;
+    actions_minutes_month?: number;
+    model_usd_month?: number;
+    release?: boolean;
+  }
 ): Promise<ImproveControlResult> {
   // MINT A READ-ONLY OPERATOR KEY, and stop one step short of installing it.
   //
@@ -1605,6 +1634,54 @@ export async function improveControl(
 ${next.join(",")}`,
       warning:
         "The key is shown ONCE and is stored nowhere: not in KV, not in a document, and not in the audit row. Copy it now. Lose it and mint another, then remove the stale hash from the list above. Revoke by removing a hash and putting the secret again.",
+    };
+  }
+
+  // THE DRIVER LEASE (residual 9). Claimed before a subscription-mode run touches
+  // a clone, released when it finishes.
+  //
+  // BEST-EFFORT, AND SAID SO. KV has no compare-and-set, so this is a get then a
+  // put with nothing atomic between them, exactly like the backup lease: it stops
+  // a second driver started minutes or hours later, and does not stop two claims
+  // landing in the same millisecond. The window it closes is the one that exists.
+  //
+  // The TTL is what makes a crashed driver cost one night rather than forever:
+  // the release does not run if the session dies, so the key expires on its own.
+  if (action === "claim") {
+    const target = (opts.namespace ?? "").trim();
+    if (!target) throw new Error('claim needs a namespace. Nothing was changed.');
+    if (!(ROSTER as readonly string[]).includes(target)) {
+      throw new Error(`'${target}' is not on the improve roster (${ROSTER.join(", ")}). Nothing was changed.`);
+    }
+    const key = driverKey(target);
+    if (opts.release === true) {
+      await env.APP_KV.delete(key);
+      await env.DB.batch([improveAudit(env.DB, "improve-driver-released", target, {})]);
+      return { action: "claim", namespace: target, held: false, holder: null, expires_in_seconds: null, reason: "released" };
+    }
+    const holder = await env.APP_KV.get(key);
+    if (holder !== null) {
+      // REFUSED, and the holder is NOT overwritten. A claim that took the lease
+      // anyway would turn a lock into a log line.
+      return {
+        action: "claim",
+        namespace: target,
+        held: false,
+        holder,
+        expires_in_seconds: null,
+        reason: `the driver lease for ${target} is already held (claimed ${holder}). Another /improve session is running, or one died without releasing and the lease expires within ${DRIVER_LEASE_TTL_SECONDS / 3600} hours.`,
+      };
+    }
+    const claimedAt = new Date().toISOString();
+    await env.APP_KV.put(key, claimedAt, { expirationTtl: DRIVER_LEASE_TTL_SECONDS });
+    await env.DB.batch([improveAudit(env.DB, "improve-driver-claimed", target, { claimed_at: claimedAt })]);
+    return {
+      action: "claim",
+      namespace: target,
+      held: true,
+      holder: claimedAt,
+      expires_in_seconds: DRIVER_LEASE_TTL_SECONDS,
+      reason: null,
     };
   }
 

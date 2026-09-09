@@ -65,6 +65,28 @@ export const anchorKey = (namespace: string) => `improve:anchor:${namespace}`;
 // meta-loop reasons across all of them at once.
 export const META_LAST_KEY = "improve:meta:last";
 
+// THE SUBSCRIPTION-MODE DRIVER LEASE (residual 9, closed 2026-09-08).
+//
+// API mode cannot run twice for one namespace because a partial unique index on
+// improve_runs refuses a second open run. Subscription mode creates NO run row,
+// so that index does not reach it at all: two `/improve` sessions, on one laptop
+// or two, would both read the same task document and both start pushing branches
+// to the same five clones. The index being real (proved by
+// test-integration/scheduled.test.ts) is exactly what made the gap clearer.
+//
+// So the driver claims this key first and releases it at the end. It is the SAME
+// SHAPE as the backup lease and carries the same honest limit: KV has no
+// compare-and-set, so a get-then-put is best-effort mutual exclusion, not a lock.
+// It closes the window that actually exists here (a second session started while
+// the first is working, minutes or hours apart) and does not close two claims
+// landing in the same millisecond. Said plainly, because a lock described as
+// stronger than it is becomes the reason nobody checks.
+//
+// SIX HOURS because that is well past the longest observed driver run and well
+// under a day, so a session that dies without releasing costs at most one night.
+export const driverKey = (namespace: string) => `improve:driver:${namespace}`;
+export const DRIVER_LEASE_TTL_SECONDS = 6 * 60 * 60;
+
 // THE BUDGET KILL SWITCH (Cloudflare platform arc, 2026-09-06). Cloudflare's
 // budget alerts are informational and cannot stop a Worker, so the loop carries
 // its own hard stop: monthly caps on GitHub Actions minutes and model spend,
@@ -325,6 +347,22 @@ export const PROTECTED_PATH_PATTERNS: Array<{ pattern: RegExp; why: string }> = 
   { pattern: /(^|\/)scripts\//i, why: "scripts CI executes" },
   { pattern: /(^|\/)Makefile$/i, why: "build glue CI executes" },
 ];
+
+// THE LIST, SERVED (residual 10). The subscription-mode driver runs outside this
+// Worker and cannot import a RegExp, so improve_status hands it the source and
+// flags of every pattern and the driver rebuilds them. Serving it is what stops
+// the driver holding a copy: a pattern added above appears in the next call, and
+// test/improve-driver-lock.test.ts derives the served list from this one in both
+// directions so a hand-maintained second list cannot appear.
+export interface ServedProtectedPath {
+  pattern: string;
+  flags: string;
+  why: string;
+}
+
+export function servedProtectedPaths(): ServedProtectedPath[] {
+  return PROTECTED_PATH_PATTERNS.map(({ pattern, why }) => ({ pattern: pattern.source, flags: pattern.flags, why }));
+}
 
 // Returns the reasons a change set is disqualified, or an empty array.
 export function protectedHits(paths: string[]): Array<{ path: string; why: string }> {
