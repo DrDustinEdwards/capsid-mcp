@@ -27,6 +27,7 @@
 import { writeFileSync } from "node:fs";
 import { CANARY_CLIENT, OAUTH_KV } from "./bindings.mjs";
 import { canaryReport, checkCanary } from "./canary-lib.mjs";
+import { checkBackupFreshness } from "./freshness-lib.mjs";
 
 const ORIGIN = (process.argv[2] ?? "https://capsid.dustin-edwards.workers.dev").replace(/\/$/, "");
 // Overridable because CI needs a longer budget than an interactive run: the sha
@@ -198,6 +199,33 @@ function authorizeUrl(clientId) {
   return u.href;
 }
 
+// Gate 1c: BACKUP FRESHNESS (residual 7). /health has reported backup.last_ok
+// since 2026-09-07 and nothing read it, so the backup cron could fail every night
+// and the only signal would be a JSON key nobody fetches. Measured on live during
+// the audit: null, silently.
+//
+// ASSERTED ON SCHEDULED RUNS ONLY, because a push runs minutes after a deploy and
+// says nothing about last night's backup, while the six-hourly schedule exists
+// precisely to bound time-to-detect. A non-scheduled run reports SKIPPED and says
+// what it did not assert; it never passes quietly. The threshold and the arithmetic
+// live in scripts/freshness-lib.mjs so a test can drive them.
+async function gateBackupFreshness() {
+  const assertFresh = process.env.ASSERT_BACKUP_FRESH === "1";
+  let data = null;
+  try {
+    const resp = await fetch(`${ORIGIN}/health`, { headers: { "Cache-Control": "no-cache" } });
+    data = await resp.json().catch(() => null);
+  } catch (err) {
+    data = null;
+    if (assertFresh) {
+      record("1c backup freshness", false, `/health could not be read: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+  }
+  const verdict = checkBackupFreshness(data, { assert: assertFresh });
+  record("1c backup freshness", verdict.passed, verdict.detail);
+}
+
 // Gate 3: the consent FORM renders. A 302 here means the fast path was taken and
 // the whole run is void, so that is reported as VOID rather than a plain fail.
 async function gateConsentForm(clientId) {
@@ -366,6 +394,7 @@ async function gateGithubRedirect(clientId, form) {
 const clientId = await (async () => {
   await gateHealth();
   await gateStore();
+  await gateBackupFreshness();
   await gateCanary();
   return gateRegister();
 })();

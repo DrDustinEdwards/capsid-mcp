@@ -132,7 +132,6 @@ const KNOWN_SUSPECTS = [
   "src/github.ts: assertRepoArg",
   "src/github.ts: workflowRunsForBranch",
   "src/headers.ts: REPORTING_ENDPOINTS",
-  "src/health.ts: BACKUP_STALE_HOURS",
   "src/improve-anthropic.ts: clientFor",
   "src/improve-anthropic.ts: costOf",
   "src/improve-run.ts: DEFAULT_RUN_PROMPT",

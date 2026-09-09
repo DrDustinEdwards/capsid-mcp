@@ -162,10 +162,14 @@ test("gate 2b is wired into the run and counted", () => {
     gate.indexOf("await gateCanary()") < gate.indexOf("return gateRegister()"),
     "the canary is checked after this run registers its own client"
   );
-  // The gate total moved 9 to 10 with this gate. counts.ts is the authority and
-  // test/counts.test.ts already compares it to the distinct labels in the script;
-  // this asserts the number itself moved, which is the part a reader checks.
-  assert.equal(AUTHORITATIVE.capsid.liveGates, 10);
+  // The gate total moved 9 to 10 with this gate, and 10 to 11 when the backup
+  // freshness gate landed. counts.ts is the authority and test/counts.test.ts
+  // compares it to the distinct labels in the script; what THIS asserts is that
+  // the canary is one of them, which is the claim this file is about. Pinning the
+  // total here made an unrelated eleventh gate fail the canary's test.
+  const labels = new Set([...gate.matchAll(/record\(\s*"([^"]+)"/g)].map((m) => m[1]));
+  assert.ok(labels.has("2b canary client record"), "the canary gate is no longer one of the counted gates");
+  assert.equal(labels.size, AUTHORITATIVE.capsid.liveGates);
 });
 
 test("the credentials the gate needs are supplied to it in CI", () => {

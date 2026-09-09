@@ -252,6 +252,14 @@ jobs:
           # Gate 2 writes the client id it registered here, and the reap step below
           # deletes exactly that key. The file is the whole channel between them.
           PROBE_CLIENT_FILE: ${{ runner.temp }}/probe-client-id
+          # GATE 1c ASSERTS BACKUP FRESHNESS ON THE SCHEDULED RUN ONLY (residual
+          # 7). /health has reported backup.last_ok since 2026-09-07 and nothing
+          # read it. A push runs minutes after a deploy and says nothing about
+          # last night's backup, so asserting there would attach noise to the
+          # wrong event; the six-hourly schedule is the run whose whole purpose is
+          # time-to-detect, and it bounds this at six hours. Off, the gate reports
+          # SKIPPED and says what it did not assert.
+          ASSERT_BACKUP_FRESH: ${{ github.event_name == 'schedule' && '1' || '0' }}
           # Gate 2b READS one long-lived canary record straight out of OAUTH_KV.
           # It reads KV rather than asking the Worker because a missing client and
           # a KV outage are the same error page through /authorize, and the whole
@@ -260,6 +268,49 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: npm run verify:live
+
+      # ROLL BACK A BAD DEPLOY (residual 7). Until this step, a push that broke
+      # production stayed broken until a human noticed the red run and typed the
+      # command from the README: the gate detected the failure and then did
+      # nothing about it.
+      #
+      # GUARDED TO THIS RUN'S OWN DEPLOY, which is the half that matters. On a
+      # SCHEDULED run the deploy job is skipped and a red gate usually means the
+      # live sha is BEHIND master (a docs-only push whose deploy failed, a hand
+      # deploy that never happened); rolling back there would move production
+      # further from master rather than closer, and would undo a good deploy
+      # because a later gate went red. So it runs only when the deploy job in
+      # THIS run succeeded and a gate then failed, which is exactly "we shipped
+      # this and it is bad".
+      #
+      # BOTH SHAS ARE REPORTED, from /health before and after, because a rollback
+      # that does not say what it left running is one nobody can check. wrangler
+      # is pinned to the same version the deploy job uses: this job runs without
+      # npm ci on purpose, so an unpinned npx would float to whatever latest is on
+      # the day production is already broken.
+      #
+      # It does NOT touch master. The next push redeploys HEAD and supersedes it,
+      # and the scheduled sha-equality gate goes red meanwhile, which is correct:
+      # production is deliberately behind master until the fix ships.
+      - name: Roll back the deploy this run shipped
+        if: failure() && needs.deploy.result == 'success'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          HEALTH_URL=https://capsid.dustin-edwards.workers.dev/health
+          ROLLBACK_FROM=$(curl -fsS "$HEALTH_URL" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).sha??"unknown")}catch{process.stdout.write("unreadable")}})')
+          echo "::warning::the live gate failed against ${ROLLBACK_FROM}; rolling back to the previous version"
+          npx --yes wrangler@4.107.0 rollback --name capsid --message "live gate failed for ${GITHUB_SHA}" --yes
+          # The rollout is not instant, so read the sha back rather than assuming.
+          for i in $(seq 1 20); do
+            ROLLBACK_TO=$(curl -fsS "$HEALTH_URL" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).sha??"unknown")}catch{process.stdout.write("unreadable")}})')
+            if [ "${ROLLBACK_TO}" != "${ROLLBACK_FROM}" ]; then break; fi
+            sleep 3
+          done
+          echo "::error::rolled back: was ${ROLLBACK_FROM} (this run's commit ${GITHUB_SHA}), now ${ROLLBACK_TO}. master still points at the bad commit; land a fix or revert it."
+          echo "rollback_from=${ROLLBACK_FROM} rollback_to=${ROLLBACK_TO}" >> "$GITHUB_STEP_SUMMARY"
 
       # Gate 2 registers a fresh client every run, and it must: reusing one would
       # take the approved-client fast path that hid the 26-day outage, and the run

@@ -54,3 +54,30 @@ test("README documents wrangler rollback as the code-recovery path", () => {
   assert.match(readme, /wrangler rollback/, "the rollback command is undocumented");
   assert.match(readme, /wrangler deployments list/, "the version-listing step is missing");
 });
+
+// ---- rollback on a failed gate (residual 7) ---------------------------------
+
+test("the live job rolls back when a gate fails on a run that deployed", () => {
+  const ci = read(".github/workflows/ci.yml");
+  assert.match(ci, /wrangler@[\d.]+ rollback/, "the live job has no rollback step");
+  // GUARDED TO THIS RUN'S OWN DEPLOY. On a scheduled run the deploy job is
+  // skipped and a red gate usually means the live sha is BEHIND master; rolling
+  // back there would move production further from master, not closer.
+  const step = ci.slice(ci.indexOf("Roll back"), ci.indexOf("Reap this run's probe client"));
+  assert.match(step, /failure\(\)/, "the rollback step is not conditioned on a failure");
+  assert.match(step, /needs\.deploy\.result == 'success'/, "the rollback runs on runs that did not deploy");
+  // BOTH SHAS. A rollback that does not say what it left running is a rollback
+  // nobody can check afterwards.
+  assert.match(step, /ROLLBACK_FROM|before/i, "the rollback does not report the sha it rolled back from");
+  assert.match(step, /ROLLBACK_TO|after/i, "the rollback does not report the sha now live");
+});
+
+test("the rollback pins the same wrangler version the deploy uses", () => {
+  const ci = read(".github/workflows/ci.yml");
+  const pkg = JSON.parse(read("package.json")) as { devDependencies?: Record<string, string> };
+  const pinned = pkg.devDependencies?.wrangler;
+  assert.ok(pinned, "wrangler is no longer a pinned devDependency");
+  // The live job runs without npm ci on purpose, so its wrangler comes from npx
+  // and would otherwise float to whatever latest is on the day production breaks.
+  assert.match(ci, new RegExp(`wrangler@${pinned.replace(/\./g, "\.")} rollback`), `the rollback does not pin wrangler ${pinned}`);
+});
