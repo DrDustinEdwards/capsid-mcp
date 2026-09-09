@@ -70,6 +70,12 @@ jobs:
   checks:
     name: checks
     runs-on: ubuntu-latest
+    # TIMEOUTS ON EVERY JOB (residual 6). Without one a job inherits GitHub's
+    # 360-minute default, so a hung test or a wedged wrangler call burns six hours
+    # of the Actions budget the improve loop's kill switch is metered against, and
+    # holds the concurrency group against every later push. Each number is roughly
+    # four times the job's observed run, so a slow runner never trips it.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
@@ -141,6 +147,7 @@ jobs:
   deploy:
     name: deploy
     needs: checks
+    timeout-minutes: 15
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     steps:
@@ -197,6 +204,8 @@ jobs:
   live:
     name: live gate
     needs: [checks, deploy]
+    # Above the poll budget (40 x 3s per polling gate) with room for every gate.
+    timeout-minutes: 15
     # Never on pull_request. A PR head sha is not deployed and never will be, so
     # asserting anything about production from one is meaningless.
     #
