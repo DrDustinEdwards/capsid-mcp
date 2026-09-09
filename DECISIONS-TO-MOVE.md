@@ -11,3 +11,7 @@ Rulings, measurements, and refusal reasons that were recorded only in Worker com
 ## src/encoding.ts
 
 - **:1-7** Before this module there were three base64url encoders and two hex encoders across `src/github.ts` and `src/routes.ts`. Duplicated crypto-adjacent helpers drift; the copy nobody looked at is the one that mishandles padding or the high byte. Audit 2, F22 and F23.
+
+## src/store-probe.ts
+
+- **:1-13** One FTS probe, two callers (`/health` and backup preflight) must share the definition so they cannot drift. Why MATCH pinned to `capsid/conventions.md` rather than a count, measured 2026-07-27: `DELETE FROM documents_fts` corrupts the index, `COUNT(*)` on an external-content FTS5 table reads through to the content table so it cannot detect drift, and `integrity-check` passes on an emptied index. A MATCH that has to find a specific row is the cheap check that fails when the index is empty.
