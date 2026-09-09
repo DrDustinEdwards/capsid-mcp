@@ -459,8 +459,18 @@ async function handleCspReport(request: Request, env: Env): Promise<Response> {
       headers: { "Content-Type": "text/plain;charset=utf-8" },
     });
   }
-  const raw = await request.text();
-  if (raw.length > CSP_REPORT_MAX_BYTES) return new Response(null, { status: 413 });
+  // BOUNDED AT THE STREAM, IN BYTES (residual 11, closed 2026-09-08). This was
+  // `await request.text()` followed by a length check, which had two faults and
+  // only one of them was visible from outside. It buffered the WHOLE body before
+  // deciding whether to accept it, on the one public unauthenticated write path
+  // with no body cap in front of it; and `raw.length` counts UTF-16 code units,
+  // so 16,384 three-byte characters measured 16,384 against a cap named in bytes
+  // and a 48KB body was written to R2. readBoundedText is what the three signed
+  // endpoints already use: it pulls from the stream and cancels on the chunk that
+  // crosses the cap.
+  const bounded = await readBoundedText(request, CSP_REPORT_MAX_BYTES);
+  if (!bounded.ok) return new Response(null, { status: 413 });
+  const raw = bounded.text;
 
   let parsed: unknown = null;
   try {
