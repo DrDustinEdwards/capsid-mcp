@@ -24,7 +24,7 @@
 import { hmacHex, timingSafeEqual } from "./auth";
 import type { Env } from "./env";
 import { dispatchWorkflow } from "./github";
-import { HOLDOUT_PREFIX, holdoutManifestKey, SCORER_WORKFLOW, type HoldoutManifest } from "./improve-schema";
+import { HOLDOUT_PREFIX, holdoutManifestKey, ROSTER, SCORER_WORKFLOW, type HoldoutManifest } from "./improve-schema";
 import type { MetricMap } from "./improve-scores";
 
 // Re-exported from improve-schema (moved there so ci_dispatch can refuse it
@@ -312,6 +312,27 @@ export async function readHoldoutManifest(env: Env, namespace: string): Promise<
   } catch {
     return null;
   }
+}
+
+// EVERY ROSTER NAMESPACE'S MANIFEST, for the nightly dump (residual 4). The
+// manifest is a COUNT and a date, never a test, so putting it in a backup that
+// leaves the account discloses nothing the loop's own refusals do not already
+// state out loud. It is here rather than in src/backup.ts because only this
+// module may name the HOLDOUT binding (test/improve-holdout.test.ts), and the
+// dump is the only copy of the hidden suites' sizes outside one R2 bucket: lose
+// the bucket and every namespace scores as "no manifest", which is a refusal.
+export async function readHoldoutManifests(env: Env): Promise<Record<string, HoldoutManifest | null>> {
+  const manifests: Record<string, HoldoutManifest | null> = {};
+  for (const namespace of ROSTER) {
+    try {
+      manifests[namespace] = await readHoldoutManifest(env, namespace);
+    } catch {
+      // A bucket that cannot be read is a null beside the others rather than a
+      // thrown backup: the D1 dump is the part that must not be lost.
+      manifests[namespace] = null;
+    }
+  }
+  return manifests;
 }
 
 export interface HoldoutVerdict {

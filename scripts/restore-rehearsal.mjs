@@ -27,6 +27,22 @@
 //   COUNT(*) on an external-content FTS5 table reads through to the content
 //   table and cannot detect drift (measured 2026-07-27, capsid/core.md).
 // - A MATCH probe on a word taken from a restored document returns it.
+// - The two SIDECARS are present and are exactly the two expected (_kv.json,
+//   _holdout-manifests.json). They are not tables and restore into no table; a
+//   missing one means the loop's memory is not in the backup.
+// - CROSS-TABLE CONSISTENCY (residual 4). The dump is one D1 batch, so it is one
+//   transaction and the table objects must agree with each other. What is checked
+//   is the TEARING SIGNATURE, not plain referential integrity: measured live on
+//   2026-09-08, the real store holds 205 document_versions rows and 2,060
+//   audit_log rows whose document is not in the store at all, every one of them
+//   explained by a deletion, by lint finalize rewriting a path, or by the
+//   recova-to-foxhound namespace rename. Failing on those would be red on every
+//   good dump forever. So the orphans are COUNTED AND REPORTED, and what FAILS is
+//   the pair of shapes a torn read produces and a deletion cannot: a version row
+//   whose document_id is above the highest id in the documents object with no
+//   delete or move recorded for its path, and a `write` audit row newer than
+//   every row in the documents object naming a path that is not there. Both
+//   measured zero against the live store before they were written.
 
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -45,6 +61,9 @@ export function deriveTables(migrationsDir) {
   return tables;
 }
 
+// The sidecars src/backup.ts writes beside the table objects.
+export const SIDECARS = ["_holdout-manifests.json", "_kv.json"];
+
 function fail(reason) {
   const err = new Error(reason);
   err.rehearsal = true;
@@ -55,7 +74,17 @@ export function rehearse(dumpDir, migrationsDir) {
   const tables = deriveTables(migrationsDir);
   if (tables.length === 0) fail(`no tables derived from ${migrationsDir}; the rehearsal read nothing`);
 
-  const dumped = readdirSync(dumpDir).filter((f) => f.endsWith(".json")).map((f) => f.replace(/\.json$/, ""));
+  const files = readdirSync(dumpDir).filter((f) => f.endsWith(".json"));
+  // Sidecars are underscore-prefixed so they can never collide with a table name.
+  // Checked in BOTH directions: a missing one is a dump that lost the loop's
+  // memory, an unexpected one is a file nothing here knows how to verify.
+  const sidecars = files.filter((f) => f.startsWith("_")).sort();
+  const missingSidecars = SIDECARS.filter((f) => !sidecars.includes(f));
+  const unknownSidecars = sidecars.filter((f) => !SIDECARS.includes(f));
+  if (missingSidecars.length > 0) fail(`the dump is missing sidecars: ${missingSidecars.join(", ")}`);
+  if (unknownSidecars.length > 0) fail(`the dump carries sidecars nothing verifies: ${unknownSidecars.join(", ")}`);
+
+  const dumped = files.filter((f) => !f.startsWith("_")).map((f) => f.replace(/\.json$/, ""));
   const missing = tables.filter((t) => !dumped.includes(t));
   const extra = dumped.filter((d) => !tables.includes(d));
   if (missing.length > 0) fail(`the dump is missing tables the migrations create: ${missing.join(", ")}`);
@@ -102,8 +131,47 @@ export function rehearse(dumpDir, migrationsDir) {
     .get(`"${word}"`);
   if (matched === 0) fail(`the FTS probe for '${word}' matched nothing although the word came from a restored document`);
 
+  // ---- cross-table consistency ---------------------------------------------
+  const { n: orphanVersions } = db
+    .prepare(`SELECT COUNT(*) AS n FROM document_versions v WHERE NOT EXISTS (SELECT 1 FROM documents d WHERE d.id = v.document_id)`)
+    .get();
+  const { n: orphanAudits } = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM audit_log a WHERE a.namespace IS NOT NULL AND a.path IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM documents d WHERE d.namespace = a.namespace AND d.path = a.path)`
+    )
+    .get();
+
+  const torn = [];
+  const tornVersions = db
+    .prepare(
+      `SELECT v.id, v.namespace, v.path, v.document_id FROM document_versions v
+        WHERE v.document_id > (SELECT COALESCE(MAX(id), 0) FROM documents)
+          AND NOT EXISTS (SELECT 1 FROM audit_log a WHERE a.namespace = v.namespace AND a.path = v.path AND a.action IN ('delete', 'move'))
+        LIMIT 5`
+    )
+    .all();
+  for (const row of tornVersions) {
+    torn.push(`document_versions ${row.id} snapshots document ${row.document_id}, above the highest id in the documents object, and its path ${row.namespace}/${row.path} was never deleted or moved`);
+  }
+  const tornAudits = db
+    .prepare(
+      `SELECT a.id, a.namespace, a.path, a.at FROM audit_log a
+        WHERE a.action = 'write' AND a.namespace IS NOT NULL AND a.path IS NOT NULL
+          AND a.at > (SELECT COALESCE(MAX(updated_at), '') FROM documents)
+          AND NOT EXISTS (SELECT 1 FROM documents d WHERE d.namespace = a.namespace AND d.path = a.path)
+        LIMIT 5`
+    )
+    .all();
+  for (const row of tornAudits) {
+    torn.push(`audit_log ${row.id} records a write to ${row.namespace}/${row.path} at ${row.at}, later than every row in the documents object, and that document is not in the dump`);
+  }
+  if (torn.length > 0) {
+    fail(`the dump is TORN: its tables do not describe one instant. ${torn.join("; ")}`);
+  }
+
   db.close();
-  return { tables: tables.length, totalRows, docCount, probe: word };
+  return { tables: tables.length, totalRows, docCount, probe: word, orphanVersions, orphanAudits };
 }
 
 const invokedDirectly = process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, "/").split("/").pop());
@@ -116,7 +184,8 @@ if (invokedDirectly) {
   try {
     const summary = rehearse(dumpDir, join(import.meta.dirname, "..", "migrations"));
     console.log(
-      `restore rehearsal PASSED: ${summary.tables} tables, ${summary.totalRows} rows, ${summary.docCount} documents, FTS probe '${summary.probe}' found`
+      `restore rehearsal PASSED: ${summary.tables} tables, ${summary.totalRows} rows, ${summary.docCount} documents, FTS probe '${summary.probe}' found, ` +
+        `cross-table consistent (${summary.orphanVersions} version and ${summary.orphanAudits} audit rows reference documents no longer in the store, all explained by deletions, archiving or the namespace rename)`
     );
   } catch (e) {
     console.error(`restore rehearsal FAILED: ${e.message}`);

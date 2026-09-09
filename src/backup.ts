@@ -1,6 +1,8 @@
 import type { Env } from "./env";
 import { BACKUP_LAST_OK_KEY } from "./health";
 import { REPORT_PREFIX } from "./headers";
+import { anchorKey, bestKey, BUDGET_KEY, META_LAST_KEY, MODE_KEY, pausedKey, ROSTER } from "./improve-schema";
+import { readHoldoutManifests } from "./improve-scorer";
 import { probeFts } from "./store-probe";
 
 const JSON_PREFIX = "backups/json/";
@@ -196,43 +198,97 @@ export async function runBackup(env: Env): Promise<BackupResult> {
   }
 }
 
+// THE KV PINS, BY ALLOWLIST AND NEVER BY PREFIX SWEEP.
+//
+// APP_KV holds the loop's control state AND the GitHub installation-token cache,
+// in the same namespace. A dump leaves the account, so a `list({ prefix })` sweep
+// here would put a live credential in a git mirror the moment someone added a key
+// under a prefix nobody re-read. The keys are therefore enumerated: every one is
+// a control value a human set, and none of them is a secret.
+//
+// backup:lease is deliberately absent: it is this run's own bookkeeping and means
+// nothing an hour later.
+function kvPinKeys(): string[] {
+  const keys = [MODE_KEY, BUDGET_KEY, META_LAST_KEY, BACKUP_LAST_OK_KEY];
+  for (const namespace of ROSTER) keys.push(bestKey(namespace), pausedKey(namespace), anchorKey(namespace));
+  return keys;
+}
+
+async function readKvPins(env: Env): Promise<Record<string, string | null>> {
+  const pins: Record<string, string | null> = {};
+  for (const key of kvPinKeys()) {
+    try {
+      pins[key] = await env.APP_KV.get(key);
+    } catch {
+      // An unreadable key is a null beside the others. The D1 dump is the half
+      // that must not be lost to a KV hiccup.
+      pins[key] = null;
+    }
+  }
+  return pins;
+}
+
 async function exportAndPrune(env: Env, now: string): Promise<BackupSummary> {
-  // THE DUMP LOOP STAYS SEQUENTIAL, and this is a ruling rather than an oversight
-  // (quality audit 9.1, which proposed making the five tables concurrent since
-  // they are independent).
+  // ONE BATCH, ONE SNAPSHOT (residual 4, closed 2026-09-08).
   //
-  // MEASURED 2026-08-17, live: document_versions holds 25.8MB of body text and
-  // documents 5.4MB, on a 38.5MB database. `docs` is retained across the whole
-  // loop because the preflight and the markdown mirror both need it, so the peak
-  // today is documents + one table + that table's JSON string: roughly 57MB while
-  // document_versions is in hand, against a 128MB isolate.
+  // This was a sequential `for` loop of `SELECT * FROM <table>`, and it carried a
+  // long comment ruling AGAINST making the reads concurrent on isolate-memory
+  // grounds. That ruling answered the wrong question. The problem is not latency,
+  // it is that ten reads at ten instants are ten snapshots: a write landing
+  // between the documents read and the document_versions read puts a version row
+  // in the dump whose document is not in it, `exported_at` says otherwise on every
+  // object, and nothing downstream could tell. The restore rehearsal now checks
+  // for exactly that signature, and it can only be meaningful if the dump is
+  // supposed to be consistent in the first place.
   //
-  // Running the five concurrently does not reduce that peak, it GUARANTEES the
-  // worst case: all five row sets and up to five JSON strings alive at once, on
-  // the table that grows with every write and is only pruned at 90 days. The
-  // finding named isolate memory as the risk, and concurrency spends memory to buy
-  // latency on a cron job that nothing waits for.
+  // D1's batch is ONE TRANSACTION executed in order, so the ten reads agree with
+  // each other by construction and `exported_at` is finally a fact.
   //
-  // Streaming is the fix that would actually bound this, and it is NOT free here:
-  // .all() has already materialized the rows, so a streamed dump means paging the
-  // SELECT, and pages are not a consistent snapshot. A backup that can tear while
-  // a write lands is worse than one that is merely large. Revisit when D1 offers a
-  // consistent paged read, or by moving versions and audit to their own cadence.
-  //
-  // One object per table under a per-run prefix. The dump is the prefix; see the
-  // retention note on runIdOf above for how ageing works now that it is not one key.
+  // THE COST IS REAL AND IS ACCEPTED, not glossed. The old loop held one table's
+  // rows at a time; this holds all of them at once, which is the peak the earlier
+  // ruling refused. Measured live 2026-08-17: document_versions 25.8MB and
+  // documents 5.4MB on a 38.5MB database, against a 128MB isolate. The JSON
+  // strings are the other half, so each result set is stringified, written, and
+  // DROPPED (the slot is nulled) before the next one is touched, which keeps at
+  // most one serialized copy alive on top of the row sets. If this ever pushes an
+  // isolate over, the fix is to move document_versions and audit_log to their own
+  // cadence, not to go back to a dump that silently tears.
   const jsonPrefix = `${JSON_PREFIX}${now.replace(/[:.]/g, "-")}/`;
   const jsonKeys: string[] = [];
+  const snapshot = await env.DB.batch(TABLES.map((table) => env.DB.prepare(`SELECT * FROM ${table}`)));
   let docs: Array<{ namespace: string; path: string; body: string | null }> = [];
-  for (const table of TABLES) {
-    const { results } = await env.DB.prepare(`SELECT * FROM ${table}`).all();
+  const rowsPerTable: Array<unknown[] | null> = TABLES.map((_, i) => (snapshot[i]?.results ?? []) as unknown[]);
+  for (let i = 0; i < TABLES.length; i++) {
+    const table = TABLES[i];
+    const results = rowsPerTable[i] ?? [];
     if (table === "documents") docs = results as typeof docs;
     const key = `${jsonPrefix}${table}.json`;
     await env.MEDIA.put(key, JSON.stringify({ exported_at: now, table, rows: results }), {
       httpMetadata: { contentType: "application/json" },
     });
     jsonKeys.push(key);
+    // documents is retained: the preflight and the markdown mirror both read it.
+    if (table !== "documents") rowsPerTable[i] = null;
   }
+
+  // THE TWO SIDECARS. Underscore-prefixed so they can never collide with a table
+  // name, and so the restore rehearsal can tell a sidecar from a table file
+  // without a hardcoded list of exceptions.
+  //
+  // Neither is D1, and the dump was D1 only. A restore from it rebuilt the store
+  // and left the improve loop with no memory: no mode, no anchor pins, no pause
+  // reasons, no best commits, and no holdout manifests, which means every
+  // namespace scores as "no manifest" and every run refuses.
+  await env.MEDIA.put(`${jsonPrefix}_kv.json`, JSON.stringify({ exported_at: now, keys: await readKvPins(env) }), {
+    httpMetadata: { contentType: "application/json" },
+  });
+  jsonKeys.push(`${jsonPrefix}_kv.json`);
+  await env.MEDIA.put(
+    `${jsonPrefix}_holdout-manifests.json`,
+    JSON.stringify({ exported_at: now, manifests: await readHoldoutManifests(env) }),
+    { httpMetadata: { contentType: "application/json" } }
+  );
+  jsonKeys.push(`${jsonPrefix}_holdout-manifests.json`);
 
   // PREFLIGHT BEFORE ANYTHING DESTRUCTIVE (audit 2, F16).
   //

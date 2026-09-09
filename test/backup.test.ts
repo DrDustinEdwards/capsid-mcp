@@ -101,8 +101,14 @@ test("a healthy run dumps one object per table, keyed by TABLES", async () => {
   if (!result.ran) return;
 
   // Derived from TABLES in both directions: a table added to the export without an
-  // object, or an object with no table, fails here.
-  const expected = TABLES.map((t) => `${result.json_prefix}${t}.json`).sort();
+  // object, or an object with no table, fails here. The two underscore-prefixed
+  // sidecars (the KV pins and the holdout manifests) are named explicitly rather
+  // than matched by shape, so dropping one is a failure here too.
+  const expected = [
+    ...TABLES.map((t) => `${result.json_prefix}${t}.json`),
+    `${result.json_prefix}_kv.json`,
+    `${result.json_prefix}_holdout-manifests.json`,
+  ].sort();
   assert.deepEqual([...result.json_keys].sort(), expected);
   assert.deepEqual([...r2.objects.keys()].filter((k) => k.startsWith(result.json_prefix)).sort(), expected);
   // Each object carries its own table's rows, not the whole database.
@@ -140,7 +146,7 @@ test("an empty documents read refuses the prune, loudly, and deletes nothing", a
   assert.ok(logged.some((line) => line.includes("BACKUP_PREFLIGHT_REFUSED")), logged.join("\n"));
   // The dumps are still written: an export deletes nothing, and an empty dump is
   // the evidence of the day the store looked empty.
-  assert.equal(result.json_keys.length, TABLES.length);
+  assert.equal(result.json_keys.length, TABLES.length + 2);
   for (const key of result.json_keys) assert.ok(r2.objects.has(key));
 });
 
@@ -209,9 +215,13 @@ test("versions_pruned and audit_pruned come from a COUNT, not meta.changes", asy
   assert.equal(result.versions_pruned, 3);
   assert.equal(result.audit_pruned, 7);
   // The count and the delete must carry the identical predicate, or the count is of
-  // a different set of rows than the one that leaves.
-  assert.equal(batches.length, 1);
-  const [countVersions, deleteVersions, countAudit, deleteAudit] = batches[0];
+  // a different set of rows than the one that leaves. TWO batches now: the export
+  // snapshot and this one. The prune batch is found by what it contains rather than
+  // by position, so a third batch cannot silently retarget these assertions.
+  assert.equal(batches.length, 2);
+  const pruneBatch = batches.find((b) => b.some((sql) => sql.startsWith("DELETE FROM document_versions")));
+  assert.ok(pruneBatch, "no batch carried the prune");
+  const [countVersions, deleteVersions, countAudit, deleteAudit] = pruneBatch;
   assert.match(countVersions, /^SELECT COUNT\(\*\) AS n FROM document_versions WHERE snapshot_at < /);
   assert.equal(deleteVersions.replace(/^DELETE FROM/, "SELECT COUNT(*) AS n FROM"), countVersions);
   assert.match(countAudit, /^SELECT COUNT\(\*\) AS n FROM audit_log WHERE at < /);
@@ -351,4 +361,64 @@ test("the dump prune chunks too, not just the mirror", async () => {
   assert.deepEqual(r2.deleted.filter((c) => c.length > R2_DELETE_CEILING).map((c) => c.length), []);
   assert.equal(result.reports_pruned, 1200);
   assert.deepEqual([...r2.objects.keys()].filter((k) => k.startsWith("reports/csp/")), []);
+});
+
+// ---- one consistent snapshot (residual 4) -----------------------------------
+//
+// The export used to be a `for` loop of `SELECT * FROM <table>`, each its own
+// round trip. Ten reads at ten different instants is ten snapshots, not one: a
+// write landing between the documents read and the document_versions read puts a
+// version row in the dump whose document is not in it, and NOTHING could see that
+// afterwards. D1's batch is one transaction, so the ten reads now agree with each
+// other by construction and `exported_at` is finally true rather than decorative.
+
+test("every table is read in ONE D1 batch, not ten round trips", async () => {
+  const { env, batches } = makeEnv({ documents: DOCS }, MIRROR);
+  const result = await runBackup(env);
+  assert.equal(result.ran, true);
+
+  const exportBatch = batches.find((b) => b.includes("SELECT * FROM documents"));
+  assert.ok(exportBatch, "no batch carried the export; the tables are still read one at a time");
+  assert.deepEqual(
+    exportBatch,
+    TABLES.map((t) => `SELECT * FROM ${t}`),
+    "the export batch is not exactly the table list, in order"
+  );
+});
+
+test("the dump carries the loop's KV pins, by allowlist and never by prefix sweep", async () => {
+  const { env, r2 } = makeEnv({ documents: DOCS }, MIRROR, {
+    improve_mode: "subscription",
+    "improve:budget": '{"actions_minutes_month":300,"model_usd_month":50}',
+    "improve:anchor:capsid": "sha256-of-the-anchor-block",
+    "improve:paused:foxing": "paused by hand",
+    // A CACHED GITHUB TOKEN. It lives in the same namespace as the pins and must
+    // never reach a dump: the dump leaves the account, and an installation token
+    // is a credential.
+    "gh:token:DrDustinEdwards": "ghs-not-a-real-token",
+  });
+  const result = await runBackup(env);
+  assert.equal(result.ran, true);
+  if (!result.ran) return;
+
+  const raw = r2.objects.get(`${result.json_prefix}_kv.json`);
+  assert.ok(raw, "the dump carries no KV pins; the loop's memory is not in the backup");
+  const dumped = JSON.parse(raw as string) as { keys: Record<string, string | null> };
+  assert.equal(dumped.keys.improve_mode, "subscription");
+  assert.equal(dumped.keys["improve:anchor:capsid"], "sha256-of-the-anchor-block");
+  assert.equal(dumped.keys["improve:paused:foxing"], "paused by hand");
+  const leaked = Object.keys(dumped.keys).filter((k) => k.startsWith("gh:"));
+  assert.deepEqual(leaked, [], "the KV dump swept a prefix and carried a cached credential out of the account");
+});
+
+test("the dump carries the holdout manifests, which are counts and never tests", async () => {
+  const { env, r2 } = makeEnv({ documents: DOCS }, MIRROR);
+  const result = await runBackup(env);
+  assert.equal(result.ran, true);
+  if (!result.ran) return;
+
+  const raw = r2.objects.get(`${result.json_prefix}_holdout-manifests.json`);
+  assert.ok(raw, "the dump carries no holdout manifests; the hidden suites' sizes exist in one place only");
+  const dumped = JSON.parse(raw as string) as { manifests: Record<string, unknown> };
+  assert.equal(dumped.manifests.capsid !== undefined, true, "capsid's manifest is missing from the dump");
 });

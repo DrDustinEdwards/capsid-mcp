@@ -581,7 +581,17 @@ export function fakeD1(opts: FakeD1Options = {}): FakeD1 {
         // Inflated on purpose: FTS5 triggers inflate meta.changes on this schema,
         // which is why the code counts with a SELECT instead of reading it.
         meta: { changes: 999 },
-        results: /SELECT COUNT/i.test(s.sql) ? [{ n: opts.dueCounts?.[countCall++] ?? 0 }] : [],
+        // A BATCHED READ ANSWERS FROM THE ROWS, like a direct one. Added when the
+        // backup export moved into a single batch (residual 4): a batch that
+        // returned [] for every SELECT would have made "the dump is one snapshot"
+        // pass against a dump with no rows in it, which is the vacuous shape this
+        // repo keeps being bitten by. COUNT keeps its own branch, because
+        // dueCounts is how the prune's counters are driven.
+        results: /SELECT COUNT/i.test(s.sql)
+          ? [{ n: opts.dueCounts?.[countCall++] ?? 0 }]
+          : /^\s*SELECT/i.test(s.sql)
+            ? answerAll(s.sql, s.params)
+            : [],
       }));
     },
   } as unknown as D1Database;
