@@ -294,3 +294,61 @@ test("a preflight-refused run does NOT stamp backup:last-ok", async () => {
   await captureErrors(() => runBackup(env));
   assert.equal(kv.puts.some((p) => p.key === "backup:last-ok"), false, "a refused run stamped itself as fresh");
 });
+
+// ---- the 1000-key delete ceiling (residual 5) --------------------------------
+//
+// R2's bulk delete takes at most 1000 keys per call and throws on the 1001st. All
+// three of the run's deletes handed it an unbounded array, so the first day the
+// mirror shed more than a thousand documents, or the day a backlog of aged dumps
+// came due, the backup threw AFTER writing its dumps and BEFORE stamping
+// backup:last-ok. The failure would have been loud, which is the only good part.
+//
+// 1001 rather than a round 1000 because the boundary is where an off-by-one lives:
+// a chunker written with `<` instead of `<=` passes at exactly 1000.
+const R2_DELETE_CEILING = 1000;
+
+test("no single R2 delete call exceeds R2's 1000-key ceiling", async () => {
+  const seed: Record<string, string> = {};
+  for (let i = 0; i < 1001; i++) {
+    seed[`backups/markdown/capsid/stale-${String(i).padStart(5, "0")}.md`] = "gone";
+  }
+  const { env, r2 } = makeEnv({ documents: DOCS }, seed);
+  const result = await runBackup(env);
+  assert.equal(result.ran, true);
+  if (!result.ran) return;
+
+  const oversized = r2.deleted.filter((call) => call.length > R2_DELETE_CEILING);
+  assert.deepEqual(
+    oversized.map((call) => call.length),
+    [],
+    `an R2 delete call carried more than ${R2_DELETE_CEILING} keys, which R2 refuses`
+  );
+  // NOT VACUOUS: the chunking must still delete everything it was asked to. A
+  // chunker that dropped the tail would satisfy the assertion above.
+  assert.equal(result.markdown_pruned, 1001);
+  const leftover = [...r2.objects.keys()].filter((k) => k.includes("/stale-"));
+  assert.deepEqual(leftover, [], "chunking lost keys: stale mirror objects survived the prune");
+});
+
+test("the dump prune chunks too, not just the mirror", async () => {
+  // 22 aged runs x 10 tables is 220 keys, which is under the ceiling, so the dump
+  // prune is exercised for CHUNK SHAPE rather than for overflow: every call it
+  // makes must come from the same chunker. The guard is that the run's delete
+  // calls are all within the ceiling AND that the aged dumps are all gone.
+  const seed: Record<string, string> = { ...MIRROR };
+  for (let day = 1; day <= 22; day++) {
+    const id = `2020-01-${String(day).padStart(2, "0")}T00-00-00-000Z`;
+    for (const table of TABLES) seed[`backups/json/${id}/${table}.json`] = "{}";
+  }
+  for (let i = 0; i < 1200; i++) {
+    seed[`reports/csp/2020-01-01/${String(i).padStart(5, "0")}.json`] = "{}";
+  }
+  const { env, r2 } = makeEnv({ documents: DOCS }, seed);
+  const result = await runBackup(env);
+  assert.equal(result.ran, true);
+  if (!result.ran) return;
+
+  assert.deepEqual(r2.deleted.filter((c) => c.length > R2_DELETE_CEILING).map((c) => c.length), []);
+  assert.equal(result.reports_pruned, 1200);
+  assert.deepEqual([...r2.objects.keys()].filter((k) => k.startsWith("reports/csp/")), []);
+});

@@ -149,6 +149,25 @@ export interface BackupSkipped {
 
 export type BackupResult = BackupSummary | BackupSkipped;
 
+// R2's bulk delete takes at most 1000 keys per call and REFUSES the 1001st; it
+// does not silently truncate. All three of this run's deletes handed it an
+// unbounded array, so the first day the mirror shed more than a thousand
+// documents (a namespace archived, a lint consolidation) or a backlog of aged
+// dumps came due, the backup threw AFTER writing its dumps and BEFORE stamping
+// backup:last-ok: no prune, and a freshness stamp that stayed stale until someone
+// read /health. Residual 5, closed 2026-09-08.
+const R2_DELETE_MAX = 1000;
+
+// One chunker, used by all three prunes, so a fourth delete site cannot be
+// written unchunked beside three that are. Returns what it deleted so a caller
+// still counts from one place.
+async function deleteInChunks(bucket: R2Bucket, keys: string[]): Promise<number> {
+  for (let i = 0; i < keys.length; i += R2_DELETE_MAX) {
+    await bucket.delete(keys.slice(i, i + R2_DELETE_MAX));
+  }
+  return keys.length;
+}
+
 async function listAllKeys(bucket: R2Bucket, prefix: string): Promise<string[]> {
   const keys: string[] = [];
   let cursor: string | undefined;
@@ -276,7 +295,7 @@ async function exportAndPrune(env: Env, now: string): Promise<BackupSummary> {
 
   const existingMarkdown = await listAllKeys(env.MEDIA, MARKDOWN_PREFIX);
   const staleMarkdown = existingMarkdown.filter((key) => !currentKeys.has(key));
-  if (staleMarkdown.length > 0) await env.MEDIA.delete(staleMarkdown);
+  if (staleMarkdown.length > 0) await deleteInChunks(env.MEDIA, staleMarkdown);
 
   // Group objects into runs, newest run first, so the floor is runs and not objects.
   const runs = new Map<string, string[]>();
@@ -290,13 +309,13 @@ async function exportAndPrune(env: Env, now: string): Promise<BackupSummary> {
   const dumpCutoff = cutoffDay(new Date(now), JSON_RETENTION_DAYS);
   const staleRunIds = runIds.slice(JSON_MIN_KEPT).filter((id) => isOlderThan(id, "", dumpCutoff));
   const staleDumpKeys = staleRunIds.flatMap((id) => runs.get(id) ?? []);
-  if (staleDumpKeys.length > 0) await env.MEDIA.delete(staleDumpKeys);
+  if (staleDumpKeys.length > 0) await deleteInChunks(env.MEDIA, staleDumpKeys);
 
   const reportCutoff = cutoffDay(new Date(now), REPORT_RETENTION_DAYS);
   const staleReports = (await listAllKeys(env.MEDIA, REPORT_PREFIX)).filter((key) =>
     isOlderThan(key, REPORT_PREFIX, reportCutoff)
   );
-  if (staleReports.length > 0) await env.MEDIA.delete(staleReports);
+  if (staleReports.length > 0) await deleteInChunks(env.MEDIA, staleReports);
 
   // Prune history AFTER the export above, so the rows leaving D1 are in today's dump.
   //
