@@ -108,7 +108,6 @@ const provider = new OAuthProvider({
   tokenEndpoint: "/token",
   clientRegistrationEndpoint: "/register",
   clientRegistrationTTL: CLIENT_REGISTRATION_TTL_SECONDS,
-  // Bind and check the access-token audience against this exact resource.
   resourceMetadata: { resource: CANONICAL_MCP_URL },
   // Rate limit on the one unauthenticated write path this Worker exposes, and cap
   // the redirect set. Returning an object rejects with the library's own error
@@ -142,7 +141,6 @@ const provider = new OAuthProvider({
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    // Seen by the registration callback, which the library calls without an env.
     currentEnv = env;
     const pathname = new URL(request.url).pathname;
     // The Origin allowlist runs BEFORE the provider so a refused browser request

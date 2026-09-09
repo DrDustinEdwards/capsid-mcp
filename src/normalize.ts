@@ -19,9 +19,6 @@ function applyDashes(text: string, sep: string): string {
   return text.replace(EN_RANGE, "$1-$2").replace(EM_OR_BAR, sep).replace(EN_DASH, sep);
 }
 
-// mode "title" uses a spaced hyphen throughout. mode "prose" uses a comma-space,
-// except markdown heading lines, which take the spaced hyphen so a body's
-// heading matches the title field.
 export function normalizeDashes(text: string, mode: "prose" | "title" = "prose"): string {
   if (!text) return text;
   if (mode === "title") return applyDashes(text, " - ");

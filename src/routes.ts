@@ -373,9 +373,6 @@ async function handleBackup(request: Request, env: Env): Promise<Response> {
 // a rolling week. The console.log is so a live tail still shows a violation the
 // moment it lands.
 //
-// Bounded on purpose: this is a public unauthenticated write path with no rate
-// limit in front of it, so an oversized body is refused rather than stored, and
-// the key is one object per ray id rather than per report.
 // Bounded and TYPED. This is a public, unauthenticated write path into R2 with no
 // rate limit in front of it, so what it accepts is the whole of its defence:
 //
@@ -391,10 +388,6 @@ async function handleBackup(request: Request, env: Env): Promise<Response> {
 //           ruling depends on can be filled with whatever a stranger sends.
 //   key   - one object per ray id, so a flood of reports from one request cannot
 //           fan out into many objects.
-//
-// STILL OPEN, and Dustin's task in the dashboard rather than a code change: a WAF
-// rate-limiting rule on this path. Everything above bounds what one request can
-// store; none of it bounds how many requests arrive. That belongs at the edge.
 const CSP_REPORT_MAX_BYTES = 16384;
 // application/csp-report is the legacy report-uri type; application/reports+json is
 // the Reporting API type, which is what the COOP trial sends.

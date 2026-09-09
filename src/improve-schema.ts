@@ -256,7 +256,6 @@ export const RUN_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 export const DRIFT_REVERT_RATIO = 0.6;
 export const DRIFT_RUN_WINDOW = 3;
 
-// The meta-loop's cadence.
 export const META_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
 
 // ---- model routing ----------------------------------------------------------

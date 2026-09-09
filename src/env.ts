@@ -7,10 +7,6 @@
 // imports were type-only and erased, but the TYPE graph was, and the practical
 // cost was that the environment contract could not be read without opening the
 // largest file in the repo.
-//
-// Nothing here is behaviour. It is the shape of the bindings wrangler injects plus
-// the props an admitted OAuth session carries, and it belongs in a leaf that
-// everything can depend on.
 
 import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 

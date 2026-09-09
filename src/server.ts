@@ -406,11 +406,6 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
       // the trim arithmetic below needs all four before it can do anything, so
       // there is nothing to interleave with and nothing to lose by waiting once.
       const [openTasksResult, recentEpisodicsResult, coreOutResult, coreInResult] = await Promise.all([
-        // Not filtered on status, and it must stay that way: same ruling as the
-        // unconsolidated counter and the gather query (2aefceb). status records
-        // editorial state, it does not mark a task done, so filtering on
-        // 'published' here hid 21 of 32 non-archived task docs, including every
-        // 'active' and 'ready' one. archive/ is the only exclusion.
         db
           .prepare(
             // The closure predicate below is the ONLY status filter in this
@@ -823,7 +818,6 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
           ? { bytes_before: new TextEncoder().encode(prior.body ?? "").length }
           : {}),
         snapshotted: Boolean(prior),
-        // Only when the caller did not already guard the write.
         ...(prior && if_match === undefined
           ? (() => {
               const warning = concurrentEditWarning(atCommit?.updated_at ?? prior.updated_at, Date.now());

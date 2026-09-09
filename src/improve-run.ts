@@ -309,7 +309,6 @@ async function openOne(
     return { namespace, opened: false, runId: null, note: "subscription mode: task document written for a session to execute" };
   }
 
-  // api mode.
   const runIdValue = makeRunId(namespace, now);
   await env.DB.batch([
     env.DB
@@ -1719,7 +1718,6 @@ ${next.join(",")}`,
     return { action, namespaces, paused };
   }
 
-  // budget
   const { actions_minutes_month, model_usd_month } = opts;
   for (const [label, n] of [["actions_minutes_month", actions_minutes_month], ["model_usd_month", model_usd_month]] as const) {
     if (typeof n !== "number" || !Number.isFinite(n) || n <= 0) {

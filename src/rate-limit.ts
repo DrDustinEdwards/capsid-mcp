@@ -78,8 +78,6 @@ export interface DcrRefusal {
   description: string;
 }
 
-// Returns a refusal when clientMetadata declares more than one non-loopback
-// redirect_uri, or null when the registration may proceed.
 export function dcrRedirectRefusal(clientMetadata: unknown): DcrRefusal | null {
   const raw = (clientMetadata as { redirect_uris?: unknown } | null | undefined)?.redirect_uris;
   const uris = Array.isArray(raw) ? raw.filter((u): u is string => typeof u === "string") : [];

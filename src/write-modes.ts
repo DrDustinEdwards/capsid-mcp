@@ -100,7 +100,6 @@ export function narrowWrite(req: WriteRequest): AssembleInput | { error: string 
     return { mode, exists, priorBody, body };
   }
 
-  // patch
   if (find === undefined || replace_with === undefined) {
     return { error: "mode 'patch' needs find and replace_with." };
   }
