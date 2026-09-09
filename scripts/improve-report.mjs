@@ -217,13 +217,22 @@ export function importedNames(text) {
   // regex above: a token that is not one is a parse artefact, and letting one
   // through means the manifest is compared against garbage.
   //
-  // THE SPREAD IS LOAD-BEARING. The loop DELETES from `names` while iterating it,
-  // and iterating a Set that is being mutated is exactly the case the spread
-  // exists for: it takes a snapshot so the deletions cannot disturb the walk.
-  // dustinedwards-info lints this file more strictly than the repo it is authored
-  // in and flagged it as useless, which it is not.
-  // eslint-disable-next-line unicorn/no-useless-spread -- the Set is mutated inside the loop, so the copy is the point
-  for (const name of [...names]) {
+  // THE SNAPSHOT IS LOAD-BEARING, and it is a NAMED CONST rather than a spread in
+  // the for-of head. The loop DELETES from `names` while walking it, so it has to
+  // walk a copy; the copy was written inline as `for (const name of [...names])`,
+  // which is the exact shape unicorn/no-useless-spread reports, because the rule
+  // cannot see that the iterable is mutated underneath it.
+  //
+  // THE SUPPRESSION IS GONE RATHER THAN CARRIED. This file is copied
+  // BYTE-IDENTICAL into five repos and they do not all load the same lint plugins:
+  // an `eslint-disable` naming unicorn/no-useless-spread is itself an error
+  // ("Definition for rule was not found") in every repo whose config lacks the
+  // plugin, which is what turned foxhound's main red. A disable comment is a
+  // dependency on another repo's plugin list, and this file cannot afford one.
+  // Lifting the copy out of the loop head removes the finding instead of hiding
+  // it, and reads better besides.
+  const scanned = [...names];
+  for (const name of scanned) {
     if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name)) names.delete(name);
   }
   return names;
