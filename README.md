@@ -125,11 +125,11 @@ curl -X POST https://capsid.<your-subdomain>.workers.dev/ops/backup -H "Authoriz
 
 ## Restore
 
-Three paths, in the order to try them. Path 2 has been executed end to end against a scratch database: all table counts matched the source and search worked on the restored copy. The nine-table form below is also exercised weekly by `restore-rehearsal.yml`, which pulls the newest R2 dump and rebuilds it into a fresh FTS5 database, documents first.
+Three paths, in the order to try them. Path 2 has been executed end to end against a scratch database: all table counts matched the source and search worked on the restored copy. The ten-table form below is also exercised weekly by `restore-rehearsal.yml`, which pulls the newest R2 dump and rebuilds it into a fresh FTS5 database, documents first, and then checks the dump is internally consistent.
 
 1. **D1 Time Travel** (last 30 days, fastest), for fat-finger recovery or a bad bulk change. `wrangler d1 time-travel info capsid`, then `wrangler d1 time-travel restore capsid --bookmark=<bookmark>`. This rewinds the live database in place, so take a fresh bookmark first to keep the restore itself reversible.
 
-2. **Table-scoped export and import**, for rebuilding into a new database (migration, region move, corruption). Note that `wrangler d1 export` fails outright on this database, because D1 cannot export databases with FTS5 virtual tables. Export the nine real tables individually and data-only, taking the schema from the migrations instead:
+2. **Table-scoped export and import**, for rebuilding into a new database (migration, region move, corruption). Note that `wrangler d1 export` fails outright on this database, because D1 cannot export databases with FTS5 virtual tables. Export the ten real tables individually and data-only, taking the schema from the migrations instead:
 
    ```
    wrangler d1 export capsid --remote --no-schema --table <table> --output export-<table>.sql
@@ -137,9 +137,16 @@ Three paths, in the order to try them. Path 2 has been executed end to end again
 
    The ten tables are `documents`, `namespaces`, `document_versions`, `audit_log`, `document_links`, the four improve-loop tables `improve_scores`, `improve_attempts`, `improve_runs`, `improve_skills` (added by `migrations/0003_improve.sql`), and `improve_jti`, the signed-request replay cache (added by `migrations/0004_improve_jti.sql`). `src/backup.ts` `TABLES` is the authoritative list, derived-checked against `migrations/` by `test/backup.test.ts`. Never export `documents_fts` or its `documents_fts_*` shadow tables: FTS5 derives them from `documents`, and they are what makes a whole-database export fail.
 
-   Create the new database, apply **every** migration in `migrations/` in order (`0001_init.sql`, then `0002_document_links.sql`, then `0003_improve.sql`; stopping early leaves later tables missing for the import to land in), then execute the nine exports with `documents` first. Importing `documents` fires the FTS sync triggers, so `documents_fts` rebuilds itself and needs no separate step. The other eight tables have no triggers and no foreign keys, so their import order does not matter. Verify with count queries against both databases and one MATCH query on the new one, then point `wrangler.jsonc` at the new `database_id` and deploy.
+   Create the new database, apply **every** migration in `migrations/` in order (`0001_init.sql`, then `0002_document_links.sql`, `0003_improve.sql`, `0004_improve_jti.sql` and `0005_query_plan_indexes.sql`; stopping early leaves later tables missing for the import to land in), then execute the exports with `documents` first. Importing `documents` fires the FTS sync triggers, so `documents_fts` rebuilds itself and needs no separate step. The remaining tables have no triggers and no foreign keys, so their import order does not matter. Verify with count queries against both databases and one MATCH query on the new one, then point `wrangler.jsonc` at the new `database_id` and deploy.
 
 3. **The R2 JSON dump**, for anything beyond the 30-day Time Travel window. Wrangler cannot list R2 objects, so get the exact keys from the Cloudflare dashboard or from the `json_keys` field of a `/ops/backup` response, then fetch each table's object: `wrangler r2 object get capsid-media/backups/json/<timestamp>/<table>.json --file <table>.json`. Convert each object's `rows` to INSERT statements and follow path 2 from the create step, `documents` first. The same dumps are mirrored off-account in the private `capsid-backups` repository, so this path still works if the Cloudflare account is gone. The `backups/markdown/` mirror is the last-resort human-readable copy: bodies only, no metadata.
+
+   **A dump run is not only tables.** Two underscore-prefixed sidecars ride beside them and neither is D1, so a restore that rebuilds the database and stops is not a full restore:
+
+   - `_kv.json` holds the improve loop's control pins, by allowlist: `improve_mode`, `improve:budget`, `improve:meta:last`, `backup:last-ok`, and per roster namespace its best record, pause reason and anchor checksum. Put them back with `wrangler kv key put` before turning the loop on, or every namespace runs unanchored. Deliberately NOT a prefix sweep of APP_KV: that namespace also holds cached GitHub installation tokens, and a dump leaves the account.
+   - `_holdout-manifests.json` holds each namespace's hidden-suite COUNT (never a test). Without them every namespace scores as "no holdout manifest", which the scorer refuses, so the loop stops rather than scores wrongly.
+
+   The dump is written as a single D1 batch, so its tables describe one instant. `scripts/restore-rehearsal.mjs` checks that weekly and refuses a torn one.
 
 Single-document recovery rarely needs any of this. Every overwrite and delete snapshots the prior row into `document_versions` first, so recovering one document is usually just reading its latest snapshot back.
 

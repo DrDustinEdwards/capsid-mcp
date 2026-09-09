@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { TABLES } from "../src/backup.ts";
@@ -47,4 +47,46 @@ test("CLAUDE.md no longer prescribes the withdrawn end-of-session episodic", () 
   // The episodic ritual was withdrawn portfolio-wide 2026-08-21; the session
   // ritual here must not still instruct writing one.
   assert.doesNotMatch(claude, /write a `session-YYYY-MM-DD\.md` episodic/i, "the episodic ritual is still prescribed");
+});
+
+// ---- the dump's real shape, and every migration (residual 14) ----------------
+
+test("the restore runbook states the table count TABLES actually has", () => {
+  const readme = read("README.md");
+  const restore = readme.slice(readme.indexOf("## Restore"), readme.indexOf("## Rollback"));
+  // The count is spelled out in prose in three places and drifted twice already:
+  // "five real tables" when there were nine, then "the nine real tables" beside a
+  // sentence enumerating ten. Derived from TABLES, so the next addition fails here
+  // rather than being found during a restore.
+  const words = ["five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve"];
+  const correct = words[TABLES.length - 5];
+  for (const [i, word] of words.entries()) {
+    if (i === TABLES.length - 5) continue;
+    assert.doesNotMatch(
+      restore,
+      new RegExp(`\\b${word} (real )?tables?\\b`, "i"),
+      `the runbook says "${word} tables" and there are ${TABLES.length}`
+    );
+    assert.doesNotMatch(restore, new RegExp(`\\b${word} exports\\b`, "i"), `the runbook says "${word} exports"`);
+  }
+  assert.match(restore, new RegExp(`\\b${correct} `, "i"), `the runbook never states the count as ${correct}`);
+});
+
+test("the restore runbook applies EVERY migration, derived from the directory", () => {
+  const readme = read("README.md");
+  const migrations = readdirSync(join(ROOT, "migrations")).filter((f) => f.endsWith(".sql")).sort();
+  assert.ok(migrations.length >= 4, "the migration scan found almost nothing");
+  for (const file of migrations) {
+    assert.ok(readme.includes(file), `the runbook never names ${file}, so a restore that follows it stops short`);
+  }
+});
+
+test("the restore runbook names the two dump sidecars", () => {
+  // The dump has carried the KV pins and the holdout manifests since residual 4.
+  // A restore that rebuilds D1 and stops leaves the improve loop with no mode, no
+  // anchor pins and no manifests, which is a loop that refuses every run.
+  const readme = read("README.md");
+  const restore = readme.slice(readme.indexOf("## Restore"), readme.indexOf("## Rollback"));
+  assert.match(restore, /_kv\.json/, "the runbook does not mention the KV pins sidecar");
+  assert.match(restore, /_holdout-manifests\.json/, "the runbook does not mention the holdout manifests sidecar");
 });
