@@ -19,3 +19,8 @@ Rulings, measurements, and refusal reasons that were recorded only in Worker com
 ## src/normalize.ts
 
 - **:31-40** `hasWideDash` was moved to `test/` on 2026-09-07 as an export with no caller in `src/` or `test/`. The holdout suite imports it; with this and `seedScoresDoc` removed the holdout scored 28/30, restoring both took it to 30/30 against an anchor of min 1.0 (2026-09-08). "No caller in src/ or test/" is not dead in this repo. An export removal is checked by scoring a branch, not by grepping.
+
+## src/doc-meta.ts
+
+- **:1-11** Types `session` and `handoff` were invisible to gather and to the counts, which is why the type list is validated at write. Then 22 recova episodics stored as status `active` went invisible the same way, because unconsolidated count and gather filtered on `status = 'published'`. Those queries are archive-path-only now: the `archive/` prefix is the only thing that takes a doc out of the lint loop.
+- **:18-30** Status `closed` added 2026-08-12 (batch-two item 5). Task closure had been unrepresentable, so it was written into bodies as prose and brief returned every non-archived task forever. Ruled a status value rather than a new column; TEXT column, no CHECK, no migration. Closure is going-forward only: backfilling would invent an editorial judgement about work nobody reviewed.
