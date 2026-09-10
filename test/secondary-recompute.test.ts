@@ -311,8 +311,8 @@ test("PLANT: the sandbox is a real git repository, with one commit and no histor
   // tell an attempt anything about the actual repository.
   assert.ok(!/git remote add/.test(container), "the sandbox must have no remote");
   assert.ok(!/git fetch|git clone|git pull/.test(container), "and no network operation, behind --network none");
-  // It runs BEFORE the phases that might ask, and the holdout is not in the tree
-  // yet, which is why the exclude entry is belt and braces rather than the fix.
+  // It runs BEFORE the phases that might ask, and the holdout is not in the tree yet, so
+  // the exclude entry is a second check rather than the fix.
   assert.ok(
     container.indexOf("git init") < container.indexOf("secondary-test.sh"),
     "the repository must exist before any repo command runs"
