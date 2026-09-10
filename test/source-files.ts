@@ -27,11 +27,10 @@ export interface SourceFile {
   text: string;
 }
 
-// A floor, not a count. It exists so a walk that silently returns nothing fails
-// loudly instead of making every assertion downstream vacuously true, which is
-// the failure mode this repo has been bitten by four times. It is deliberately
-// well below the real file count so adding or removing a module is not a test
-// edit; it only catches a walk that broke.
+// A floor, not a count. It exists so a walk that silently returns nothing fails loudly
+// instead of making every assertion downstream vacuously true, which has happened four
+// times in this repo. It is deliberately well below the real file count so adding or
+// removing a module is not a test edit; it only catches a walk that broke.
 const MIN_SOURCE_FILES = 10;
 
 // RECURSIVE, so a tool moved into a subdirectory cannot hide from the guards
