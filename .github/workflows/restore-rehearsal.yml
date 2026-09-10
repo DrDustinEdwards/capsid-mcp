@@ -1,14 +1,11 @@
-# The restore rehearsal (session 3, group 2). Weekly, and on demand: pull the
-# newest JSON dump from R2 with a minted one-hour credential and prove it
-# restores into a fresh FTS5 database. A backup nobody has restored is a hope;
-# this turns the restore into a scheduled job that fails loudly when a dump
-# cannot be rebuilt, long before an incident makes it urgent.
+# The restore rehearsal (session 3, group 2). Weekly and on demand: pull the newest
+# JSON dump from R2 with a minted one-hour credential and prove it restores into a
+# fresh FTS5 database. It fails loudly when a dump cannot be rebuilt.
 #
-# It uses the SAME /backup/credential mint as the off-account mirror, signed
-# with BACKUP_CREDENTIAL_KEY. This repo is the restore-rehearsal consumer the
-# derive script names alongside the mirror, so BACKUP_CREDENTIAL_KEY belongs on
-# capsid-mcp as well as capsid-backups. The rehearsal reads only the newest run
-# (object-read-only), never writes, and needs no D1 or account access.
+# It uses the SAME /backup/credential mint as the off-account mirror, signed with
+# BACKUP_CREDENTIAL_KEY, so that secret belongs on capsid-mcp as well as
+# capsid-backups. The rehearsal reads only the newest run (object-read-only), never
+# writes, and needs no D1 or account access.
 name: restore-rehearsal
 on:
   schedule:
@@ -22,8 +19,8 @@ jobs:
   rehearse:
     runs-on: ubuntu-latest
     # A hung aws sync or a wedged node process would otherwise run to GitHub's
-    # 360-minute default while holding BACKUP_CREDENTIAL_KEY. The rehearsal
-    # downloads one dump and rebuilds it in memory; ten minutes is generous.
+    # 360-minute default while holding BACKUP_CREDENTIAL_KEY. The rehearsal downloads
+    # one dump and rebuilds it in memory.
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
