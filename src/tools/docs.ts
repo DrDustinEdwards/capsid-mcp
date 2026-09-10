@@ -497,8 +497,8 @@ export function registerDocTools(server: McpServer, ctx: ToolCtx): void {
 
       // append is exempt from confirmation. Confirmation exists to stop an accidental
       // clobber of existing text, and an append destroys none: the prior body is still
-      // snapshotted and the addition goes after it. Requiring a confirm here would
-      // make the safe operation more ceremonious than the dangerous one. patch and
+      // snapshotted and the addition goes after it. Requiring a confirm here would put
+      // more friction on the safe operation than on the dangerous one. patch and
       // replace both mutate existing text and are NOT exempt.
       //
       // `elicited` is whether a human answered a prompt, reported by the helper rather
