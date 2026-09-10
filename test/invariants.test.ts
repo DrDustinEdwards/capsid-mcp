@@ -25,8 +25,7 @@ import { sourceFiles, toolBlocks, type ToolBlock } from "./source-files.ts";
 // are properties of a TOOL, and server.ts is only where the tools happen to live
 // today. A tool registered from a new module was invisible here and the suite
 // reported green over a surface it had never read. Widening it is also what lets
-// server.ts be split later without blinding the guard, which is the whole point
-// of this batch.
+// server.ts be split later without blinding the guard.
 
 const MUTATING_SQL = /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\b/i;
 const OPERATOR_GATE = "if (!mayWrite)";
