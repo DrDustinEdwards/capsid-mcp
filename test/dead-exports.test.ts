@@ -53,10 +53,9 @@ function exportsOfSrc(): Export[] {
   return out;
 }
 
-// Everything that could be a caller: the rest of src/, both test suites, and
-// scripts/. The whole point of the ruling is that "no caller" is a claim about
-// THREE places, and a scan that read one of them is how two live exports were
-// declared dead.
+// Everything that could be a caller: the rest of src/, both test suites, and scripts/.
+// The ruling is that "no caller" is a claim about THREE places, and a scan that read
+// one of them is how two live exports were declared dead.
 function otherReaders(): Array<{ name: string; text: string }> {
   const out: Array<{ name: string; text: string }> = [];
   for (const dir of ["test", "test-integration", "scripts"]) {
