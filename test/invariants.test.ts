@@ -10,11 +10,10 @@ import { sourceFiles, toolBlocks, type ToolBlock } from "./source-files.ts";
 //   2. Every mutating tool is gated on the write grant, so an `ro:` key cannot
 //      reach it.
 //
-// Until 2026-08-13 both were enforced by nothing but review. They are exactly the
-// kind of rule that survives every session until the session that adds a fifth
-// mutating tool in a hurry, and the failure is silent in both directions: a write
-// path with no snapshot works perfectly until someone needs the snapshot, and a
-// missing operator gate is invisible because the tool it exposes does its job.
+// Until 2026-08-13 both were enforced by nothing but review, and the failure is silent in
+// both directions: a write path with no snapshot works perfectly until someone needs the
+// snapshot, and a missing operator gate is invisible because the tool it exposes does its
+// job.
 //
 // This file is the source-guard half (invariant 2, plus a structural check that
 // invariant 1's statements exist per tool). The behavioural half is
