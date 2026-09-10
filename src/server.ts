@@ -43,12 +43,11 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   const server = new McpServer(SERVER_INFO);
   const db = env.DB;
 
-  // PROVENANCE (audit 2026-09-06). The actor from the most recent audit_log entry
-  // for a document, surfaced by read and brief so a session can tell who wrote what
-  // it is about to treat as context. A document another client wrote is untrusted
-  // input, and nothing else in a tool result marks it. Kept as a separate read (not
-  // a subquery joined into the documents SELECT) so the document read stays a plain
-  // named-column projection. Returns null when the document has no audit history.
+  // PROVENANCE (audit 2026-09-06). The actor from the most recent audit_log entry for
+  // a document, surfaced by read and brief so a session can tell who wrote what it is
+  // about to treat as context. A document another client wrote is untrusted input.
+  // Kept as a separate read rather than a joined subquery so the document read stays
+  // a plain named-column projection. Null when the document has no audit history.
   const lastActor = async (ns: string, path: string): Promise<string | null> => {
     const row = await db
       .prepare("SELECT actor FROM audit_log WHERE namespace = ?1 AND path = ?2 ORDER BY id DESC LIMIT 1")
@@ -74,16 +73,15 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   server.registerResource(
     "document",
     new ResourceTemplate("capsid://{namespace}/{+path}", {
-      // LISTING IS SERVED BY THE RAW HANDLER BELOW, not from here, and the reason
-      // is worth stating: McpServer builds its ListResources reply as
-      // `{ resources: [...] }` and discards every other field the callback
-      // returns, including _meta AND nextCursor. A list callback therefore has no
-      // way to say it was truncated, so capping it here would have made document
-      // 501 unreachable with nothing in the response admitting it.
+      // LISTING IS SERVED BY THE RAW HANDLER BELOW. McpServer builds its
+      // ListResources reply as `{ resources: [...] }` and discards every other field
+      // the callback returns, including _meta AND nextCursor, so a list callback
+      // cannot say it was truncated. Capping it here would make document 501
+      // unreachable with nothing in the response admitting it.
       list: undefined,
     }),
-    // Template metadata spreads onto every listed resource, so keep it to
-    // fields that are true per document.
+    // Keep RESOURCE_METADATA to fields that are true per document: it spreads onto
+    // every listed resource.
     RESOURCE_METADATA,
     async (uri, variables) => {
       const namespace = String(variables.namespace);
@@ -103,9 +101,9 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   // ceiling on what the store can expose.
   //
   // Keyset pagination, not OFFSET: the cursor names the last (namespace, path)
-  // returned and the next page asks for rows after it, compared as a TUPLE. A
-  // single concatenated key would be wrong, because 'a-x' sorts before 'a' once a
-  // separator is glued on ('-' is below '/') and rows would be skipped.
+  // returned and the next page asks for rows after it, compared as a TUPLE. A single
+  // concatenated key would be wrong: 'a-x' sorts before 'a' once a separator is glued
+  // on ('-' is below '/') and rows would be skipped.
   //
   // This overrides the handler McpServer installs. It is safe only while every
   // resource is served by the one template below; a statically registered resource
@@ -149,25 +147,22 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
     };
   });
 
-  // Prompts: reusable templates stored as type 'prompt' documents whose bodies
-  // use {{variable}} placeholders. Handled at the protocol level (McpServer only
-  // lists prompts registered at build time) so the D1 query runs lazily, only on
+  // Prompts: reusable templates stored as type 'prompt' documents whose bodies use
+  // {{variable}} placeholders. Handled at the protocol level, since McpServer only
+  // lists prompts registered at build time, so the D1 query runs lazily on
   // prompts/list and prompts/get.
   //
-  // A prompt is named "<namespace>/<path without .md>", which is how every other
-  // tool in this server addresses a document. It used to be the bare path, and a
-  // bare path is not a document key: two namespaces can both hold prompts/brief.md
-  // and the lookup ended in `LIMIT 1`, so it would answer with whichever row
-  // SQLite reached first and the caller could not tell which one it got. One
-  // prompt document exists today, so this collides with nothing yet.
+  // A prompt is named "<namespace>/<path without .md>", the way every other tool
+  // addresses a document. It used to be the bare path, which is not a document key:
+  // two namespaces can both hold prompts/brief.md and the lookup ended in `LIMIT 1`.
+  // One prompt document exists today, so this collides with nothing yet.
   const PLACEHOLDER = /\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g;
   const promptVariables = (body: string) => [...new Set([...body.matchAll(PLACEHOLDER)].map((m) => m[1]))];
   // TITLES ARE STORED TEXT AND REACH THE CLIENT'S MODEL AS A DESCRIPTION (audit
   // 2026-09-06, Grok MAJOR 8). A description is trusted UI text the way a tool
-  // description is, and a D1 row is writable by any write-grant session, so the
-  // title passes a CHARACTER ALLOWLIST: enough for a human-legible name, no
-  // backticks, no braces, no control characters, nothing a description-reading
-  // model can be steered with, capped well under the title bound.
+  // description is, and a D1 row is writable by any write-grant session, so the title
+  // passes a CHARACTER ALLOWLIST: no backticks, no braces, no control characters,
+  // capped well under the title bound.
   const PROMPT_TITLE_DISALLOWED = /[^A-Za-z0-9 ,.;:()'"!?_/-]+/g;
   const promptSafeTitle = (title: string | null): string | undefined => {
     if (!title) return undefined;
@@ -222,13 +217,11 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
     }
     return {
       description: promptSafeTitle(row.title),
-      // THE BODY IS DATA, NOT THE USER'S OWN WORDS (audit 2026-09-06, Grok MAJOR
-      // 8; the Fable audit's "prompts/get as role:user"). A document body is
-      // writable by any write-grant session, and returning it as plain user text
-      // hands whoever last wrote the row a message the client's model reads as
-      // its human speaking. An embedded resource is the protocol's shape for
-      // "content from a store": same body, same substitution, but carried as a
-      // cited document rather than as authored instructions.
+      // THE BODY IS DATA, NOT THE USER'S OWN WORDS (audit 2026-09-06, Grok MAJOR 8;
+      // the Fable audit's "prompts/get as role:user"). A document body is writable by
+      // any write-grant session, and returning it as plain user text hands whoever
+      // last wrote the row a message the client's model reads as its human speaking.
+      // An embedded resource is the protocol's shape for content from a store.
       messages: [
         {
           role: "user" as const,
