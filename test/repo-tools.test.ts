@@ -722,8 +722,8 @@ test("manage_pr leaves a FORK's head branch alone", async () => {
 });
 
 test("A FAILED BRANCH DELETE DOES NOT FAIL THE MERGE, because the merge already landed", async () => {
-  // Reporting the whole call as failed because a cleanup step failed would be a lie
-  // about the merge. Same rule invalidateRepoReads follows.
+  // Reporting the whole call as failed because a cleanup step failed would misreport the
+  // merge. Same rule invalidateRepoReads follows.
   await withFetch(
     {
       "PUT /repos/o/r/pulls/5/merge": { body: { sha: "merged-sha", merged: true, message: "merged" } },
