@@ -71,3 +71,10 @@ Rulings, measurements, and refusal reasons that were recorded only in Worker com
 - **:67-69** `GATHER_BUDGET` 150_000: real packets measured 213KB and 330KB; a warning that fires on the normal case is not a bound. Enforced by trimming.
 - **:72-75** `LINT_CONSUMED_MAX` 20 is 81 statements, under D1's 100-statement batch ceiling. Chunking was rejected because a partial archive silently drops documents out of the lint loop.
 - **:114-124** Repo path grammar is a whole-segment check, not `includes("..")`, because `a..b` is a legal file name. Closed a real traversal: `encodeURIComponent` leaves `.` and `..` untouched, so `../../other-repo/contents/x` reached fetch() and URL-normalized into an unmapped repo.
+
+## src/store-guards.ts
+
+- **:8-19** Guard is a statement, not an `if`: the pre-read is a different transaction and the row can go between them (move answered "moved" and delete answered "deleted" over missing documents). `meta.changes` is inflated by FTS5 triggers (measured 2026-08-10: one repointed edge reported as five). Mechanism: INSERT that violates NOT NULL, guarded by NOT EXISTS; SQLite has no RAISE outside a trigger body.
+- **:38-51** `if_match` used to be a pre-read; the window includes the 90-second overwrite confirmation. Body equality rather than a stored sha column (a second source of truth that drifts). `IS` rather than `=` because a NULL body is legitimate and `body = NULL` is never true.
+- **:67-70** Create-path guard fires when the row DOES exist, so a racing create aborts instead of falling into ON CONFLICT and overwriting a body that was never snapshotted.
+- **:86-102** Four-step commit protocol, order load-bearing. Copies had drifted on step 2's consent condition. Unguarded update keeps last-writer-wins on purpose: requiring `if_match` everywhere would refuse every legitimate rapid edit and break append.
