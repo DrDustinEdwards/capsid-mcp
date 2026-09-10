@@ -9,12 +9,11 @@ import { describe, expect, it } from "vitest";
 // after the parse, and a caller can obtain one by fetching the form), so an
 // oversized POST spent parse time and memory before the first refusal.
 //
-// SEPARATE FROM /csp-report ON PURPOSE. That endpoint's fix was the same
-// primitive, but this one is the OAuth consent path, which is where a "small,
-// obviously safe" change broke logins for 26 days in 2026-08. So the behaviour
-// that must not change is asserted here in the same file as the new bound: an
-// ordinary form still reaches its CSRF check and is refused for the CSRF reason,
-// not for a size reason.
+// SEPARATE FROM /csp-report ON PURPOSE. That endpoint's fix was the same primitive, but
+// this one is the OAuth consent path, where a small, safe-looking change broke logins
+// for 26 days in 2026-08. The behaviour that must not change is asserted here in the
+// same file as the new bound: an ordinary form still reaches its CSRF check and is
+// refused for the CSRF reason, not for a size reason.
 
 const ORIGIN = "https://capsid.test";
 
