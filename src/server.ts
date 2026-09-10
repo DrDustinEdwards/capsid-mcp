@@ -56,16 +56,7 @@ function ok(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
 }
 
-// A BOUNDED READ, defined once.
-//
-// Every read that can return an unknown number of rows asks the store for one MORE
-// row than it will return. That extra row is the only reliable way to distinguish
-// "there were exactly `limit` rows" from "there were more and you are holding a
-// prefix", and it costs one row.
-//
-// Shape follows search_code, which already got this right: the count, the cap that
-// produced it, a truncated flag, and when it fires, a note saying what to do. A
-// boolean alone is not actionable, and a bare array cannot say anything at all.
+// Ask for one extra row so "exactly limit" is distinguishable from "there are more".
 function boundedRows<T>(rows: T[], limit: number, advice: string) {
   const truncated = rows.length > limit;
   const kept = truncated ? rows.slice(0, limit) : rows;
@@ -85,25 +76,10 @@ function fail(message: string) {
 const DENIED = "unauthorized: this tool requires a write-grant operator key; read-only (ro:) keys can only use the read tools";
 
 // PATH_MUTATION_HELPER_START
-// The ONLY place in this worker that mutates documents.path or removes a
-// documents row. Every such operation drags document_links with it, because
-// document_links stores (ns, path) strings rather than documents.id and the
-// table carries no foreign key, so nothing at the database level keeps them in
-// step. test/path-mutation.test.ts asserts this helper stays the only site.
-//
-// It exists because the same defect shipped three times: delete removed the row
-// and orphaned every edge touching it, move renamed the document and left its
-// edges on the old path, and lint finalize archived with an inline
-// "UPDATE ... SET path = 'archive/' || path" that was a move by another name.
-// All three are now callers.
-//
-// newPath null means delete. Otherwise the document is renamed to newPath and
-// edges are repointed on both sides.
-//
-// Statement order is part of the contract, because callers read counts off the
-// batch results positionally:
-//   rename: [0] documents, [1] document_links.from_path, [2] document_links.to_path
-//   delete: [0] document_links (both directions), [1] documents
+// The only site that mutates documents.path or deletes a documents row.
+// document_links stores (ns, path) strings, no FK. newPath null means delete.
+// Statement order is positional: rename [0] documents [1] from_path [2] to_path;
+// delete [0] document_links [1] documents.
 function pathMutation(
   db: D1Database,
   namespace: string,
@@ -145,18 +121,6 @@ function edgesTouching(db: D1Database, namespace: string, path: string): D1Prepa
 }
 // PATH_MUTATION_HELPER_END
 
-// Documents may only be written to a namespace that has a `namespaces` row.
-//
-// Writing to a namespace label does not create it, so a typo in `namespace` used
-// to open a shadow namespace: documents that `namespaces` cannot see, that the
-// unconsolidated counter never counts, that no repo tool can resolve, and that
-// `brief` will not assemble because there is no core.md and never will be. It is
-// invisible by construction, which is the whole failure mode. Measured
-// 2026-08-13 before this landed: zero ghost namespaces live, so this closes the
-// hole rather than cleaning one up.
-//
-// register_namespace stays the only way to create one, deliberately: a namespace
-// is a repo mapping and an authorization boundary, not a string a write can coin.
 async function requireRegisteredNamespace(db: D1Database, namespace: string): Promise<string | null> {
   const row = await db.prepare("SELECT namespace FROM namespaces WHERE namespace = ?1").bind(namespace).first();
   if (row) return null;
@@ -167,25 +131,7 @@ async function requireRegisteredNamespace(db: D1Database, namespace: string): Pr
   );
 }
 
-// A write that overwrites a document touched in the last hour, WITHOUT if_match, gets
-// a warning on the response. It is never refused.
-//
-// MOTIVATING INCIDENT, 2026-08-14: dustinedwards/core.md. One session patched it at
-// 13:29 and a second session rewrote it at 14:13 from a body it had read earlier,
-// dropping 2,253 bytes of consolidation work. The prior body survives only because
-// every overwrite snapshots (document_versions 1142). Nothing anywhere said anything
-// was wrong: the write succeeded, the response was clean, and the loss was found days
-// later by someone re-reading the document for an unrelated reason.
-//
-// if_match already prevents this, and it could not have prevented THAT: it is opt-in,
-// so it protects only the caller who passes it, and the overwriting client's cached
-// tool schema predated the parameter entirely. A warning reaches the client that did
-// not know to ask.
-//
-// WARN, NEVER REFUSE, and the asymmetry is deliberate. Refusing would break every
-// legitimate rapid edit, and the common case for two writes inside an hour is one
-// agent working. The warning costs a caller nothing and tells the one who is about to
-// lose someone else's work that there is someone else.
+// Warn, never refuse, when overwriting a document touched in the last hour without if_match.
 const CONCURRENT_EDIT_WINDOW_MS = 60 * 60 * 1000;
 
 export function concurrentEditWarning(updatedAt: string | null | undefined, now: number): string | null {

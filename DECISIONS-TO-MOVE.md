@@ -203,3 +203,10 @@ Rulings, measurements, and refusal reasons that were recorded only in Worker com
 
 - **:1-10** Named github-handler.ts until 2026-08-17; it also owns /health, /csp-report, /ops/mcp, /ops/backup.
 - **:374-401** CSP report sink. R2 is the record (Observability retention is 7 days; 2026-08-10 actor investigation). The old comment claiming "no rate limit in front of it" was false: `handleCspReport` rate-limits first. Bounded by size, type, shape, and one object per ray id.
+
+## src/server.ts
+
+- **:59-68** Bounded read asks for one extra row to distinguish "exactly limit" from "there are more".
+- **:87-106** `pathMutation` is the only site that mutates `documents.path` or deletes a documents row (`test/path-mutation.test.ts`). Same defect shipped three times: delete orphaned edges, move left edges on the old path, lint finalize archived with an inline UPDATE. Statement order is positional.
+- **:148-159** A typo in `namespace` used to open a shadow namespace. Measured 2026-08-13: zero ghost namespaces live. `register_namespace` is the only creator.
+- **:170-188** Concurrent-edit warning, never a refusal. Motivating incident 2026-08-14: dustinedwards/core.md, 2,253 bytes dropped. D1 datetime is UTC; Date.parse needs the Z.
