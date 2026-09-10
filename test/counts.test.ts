@@ -65,10 +65,9 @@ test("live gate count matches the distinct gates in verify-live.mjs", () => {
 // separately and withSecurityHeaders deliberately preserves a header that is
 // already present.
 //
-// This used to read `enforced.length + 1`, and the "+ 1" was the bug in miniature:
-// it hardcoded the very number the test exists to derive. A seventh enforced header
-// added to the consent dialog would have left 5 + 1 = 6 and passed, with
-// counts.ts's authoritative 6 now wrong and nothing saying so. Deriving the union
+// This used to read `enforced.length + 1`, hardcoding the number the test exists to
+// derive. A seventh enforced header added to the consent dialog would have left
+// 5 + 1 = 6 and passed, with counts.ts's authoritative 6 now wrong. Deriving the union
 // means an enforced header added to EITHER file moves the number.
 const NOT_SECURITY_HEADERS = new Set(["Content-Type", "Set-Cookie", "Location", "Reporting-Endpoints"]);
 const isEnforcedSecurityHeader = (name: string) =>
