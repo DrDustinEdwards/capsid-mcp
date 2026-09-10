@@ -1,28 +1,27 @@
 #!/usr/bin/env node
-// verify-live: exercises capsid's OAuth consent surface against a deployed
-// worker. Read-only. Stops at the GitHub 302 and never drives GitHub.
+// verify-live: exercises capsid's OAuth consent surface against a deployed worker.
+// Read-only. Stops at the GitHub 302 and never drives GitHub.
 //
 // Usage: node scripts/verify-live.mjs [origin]
 //        npm run verify:live
 //
-// Why this exists: on 2026-08-09 the consent flow was found broken for 26 days.
-// A "form-action 'self'" CSP landed as a side change in 423bbd6 and silently
-// blocked the form submission's redirect to github.com. Nothing detected it,
-// because tsc and node --test never touch a live surface.
+// On 2026-08-09 the consent flow was found broken for 26 days. A "form-action 'self'"
+// CSP landed as a side change in 423bbd6 and blocked the form submission's redirect to
+// github.com. tsc and node --test never touch a live surface.
 //
-// Two hard requirements, both learned by measurement that day. Violating either
-// makes this gate pass against a fully broken server:
+// Two hard requirements. Violating either makes this gate pass against a fully broken
+// server:
 //
 //   1. FRESH CLIENT EVERY RUN. handleAuthorizeGet short-circuits for a client id
-//      already in the capsid_approved cookie and 302s straight out of the GET,
-//      never rendering a form. That fast path is exactly what hid the bug: grant
-//      WiEb7bF_80YyO88H kept refreshing normally the whole time. So this
-//      registers a new client per run and asserts the consent FORM renders. A
-//      302 at gate 3 means the fast path was hit and the run is VOID, not green.
+//      already in the capsid_approved cookie and 302s straight out of the GET, never
+//      rendering a form. That fast path hid the bug: grant WiEb7bF_80YyO88H kept
+//      refreshing normally the whole time. This registers a new client per run and
+//      asserts the consent FORM renders. A 302 at gate 3 means the fast path was hit
+//      and the run is VOID, not green.
 //
-//   2. POLL, NEVER SINGLE-FETCH, on header assertions. The first post-deploy
-//      read returned the previous CSP and would have produced a false pass.
-//      Cloudflare propagation is not instant. Gate 4 polls to an expected value.
+//   2. POLL, NEVER SINGLE-FETCH, on header assertions. The first post-deploy read
+//      returned the previous CSP and would have produced a false pass. Cloudflare
+//      propagation is not instant. Gate 4 polls to an expected value.
 
 import { writeFileSync } from "node:fs";
 import { CANARY_CLIENT, OAUTH_KV } from "./bindings.mjs";
@@ -30,10 +29,9 @@ import { canaryReport, checkCanary } from "./canary-lib.mjs";
 import { checkBackupFreshness } from "./freshness-lib.mjs";
 
 const ORIGIN = (process.argv[2] ?? "https://capsid.dustin-edwards.workers.dev").replace(/\/$/, "");
-// Overridable because CI needs a longer budget than an interactive run: the sha
-// gate there is waiting on a rollout that has only just been triggered, and a
-// budget that expires early would report a correct deploy as a failure. That is
-// the same trap as a single fetch, just with more steps.
+// Overridable because CI needs a longer budget than an interactive run: the sha gate
+// there waits on a rollout that has only just been triggered, and a budget that expires
+// early reports a correct deploy as a failure.
 const POLL_ATTEMPTS = Number(process.env.VERIFY_POLL_ATTEMPTS ?? 10);
 const POLL_INTERVAL_MS = Number(process.env.VERIFY_POLL_INTERVAL_MS ?? 3000);
 
@@ -45,10 +43,10 @@ function record(gate, passed, detail) {
   console.log(`${passed ? "PASS" : "FAIL"}  ${gate}\n      ${detail}`);
 }
 
-// Gate 1: liveness, and deploy provenance. /health returns the git sha stamped
-// at deploy time, so this also reports WHICH commit is live. An expected sha can
-// be passed to assert it, which is what makes "the deployed worker is this
-// commit" checkable instead of inferred from a clean working tree.
+// Gate 1: liveness, and deploy provenance. /health returns the git sha stamped at deploy
+// time, so this reports WHICH commit is live. An expected sha can be passed to assert
+// it, which makes "the deployed worker is this commit" checkable rather than inferred
+// from a clean working tree.
 async function gateHealth() {
   const expected = process.env.EXPECT_SHA;
   let data = null;
@@ -56,12 +54,10 @@ async function gateHealth() {
   for (attempt = 1; attempt <= POLL_ATTEMPTS; attempt++) {
     const resp = await fetch(`${ORIGIN}/health`, { headers: { "Cache-Control": "no-cache" } });
     data = await resp.json().catch(() => null);
-    // Keep polling through EVERY not-yet-converged state, including a response
-    // that is not JSON at all: immediately after a deploy the previous version
-    // is still serving, and before this commit that version answered /health
-    // with the plain text "ok". An earlier draft of this loop broke out on a
-    // null parse, which defeated the polling it exists for and failed the gate
-    // against a deploy that was in fact correct.
+    // Keep polling through EVERY not-yet-converged state, including a response that is
+    // not JSON at all: immediately after a deploy the previous version is still serving,
+    // and before this commit that version answered /health with the plain text "ok". An
+    // earlier draft broke out on a null parse, which defeated the polling it exists for.
     const converged = resp.status === 200 && data?.status === "ok" && (!expected || data.sha === expected);
     if (converged) break;
     if (attempt < POLL_ATTEMPTS) await sleep(POLL_INTERVAL_MS);
@@ -105,44 +101,39 @@ async function gateRegister() {
 
 // Gate 2b: the canary client record is still there.
 //
-// WHAT IT BUYS. On 2026-08-17 a client: record vanished from OAUTH_KV with no
-// request in the window that could account for it. Nothing watched that keyspace,
-// so the only way such a loss surfaces is the user-visible symptom: 400 on
-// /authorize, invalid_client on /token, at the moment the owner next connects.
-// Reading one long-lived record every run bounds time-to-detect at the schedule
-// interval, six hours.
+// On 2026-08-17 a client: record vanished from OAUTH_KV with no request in the window
+// that could account for it. Nothing watched that keyspace, so the only way such a loss
+// surfaces is the user-visible symptom: 400 on /authorize, invalid_client on /token, at
+// the moment the owner next connects. Reading one long-lived record every run bounds
+// time-to-detect at the schedule interval, six hours.
 //
-// WHY IT READS KV DIRECTLY RATHER THAN ASKING THE WORKER. Driving /authorize with
-// the canary id would be the more end-to-end check and a strictly worse signal: a
-// missing client and a KV outage both come back as an error page, so the gate could
-// not say which it saw. The KV REST API answers with a STATUS, and the status is
-// the whole distinction:
+// IT READS KV DIRECTLY RATHER THAN ASKING THE WORKER. Driving /authorize with the canary
+// id would be more end-to-end and a worse signal: a missing client and a KV outage both
+// come back as an error page. The KV REST API answers with a STATUS:
 //
 //   200        the record is there                    PASS
 //   404        the record is GONE                     FAIL, and it is data loss
 //   anything   the store could not be read at all     FAIL, and it is NOT data loss
 //
-// That third case is the one worth being careful about. A bad token, an expired
-// secret or a Cloudflare API blip says nothing about whether the record exists, and
-// reporting it as "canary missing" would manufacture an anomaly out of an
-// infrastructure hiccup. Same distinction the reaper now makes, for the same reason.
+// The third case matters: a bad token, an expired secret or a Cloudflare API blip says
+// nothing about whether the record exists, and reporting it as "canary missing" would
+// manufacture an anomaly out of an infrastructure hiccup. Same distinction the reaper
+// makes.
 //
-// NO CREDENTIALS means the gate asserts nothing and says so, rather than passing
-// quietly or failing an interactive run that was never going to have a token.
-// The gate label is written out at every record() call rather than held in a
-// variable. test/counts.test.ts counts DISTINCT literal labels to check the gate
-// total, so a label behind a variable is a gate the count cannot see.
+// The gate label is written out at every record() call rather than held in a variable.
+// test/counts.test.ts counts DISTINCT literal labels to check the gate total, so a label
+// behind a variable is a gate the count cannot see.
 //
-// The decision itself lives in ./canary-lib.mjs so it can be tested; this function
-// is the wiring, and it does the one thing the library cannot: decide what to do
-// when there are no credentials to read KV with.
+// The decision lives in ./canary-lib.mjs so it can be tested; this function is the
+// wiring, and it does the one thing the library cannot: decide what to do when there
+// are no credentials to read KV with.
 async function gateCanary() {
   const account = process.env.CLOUDFLARE_ACCOUNT_ID;
   const token = process.env.CLOUDFLARE_API_TOKEN;
   const key = `client:${CANARY_CLIENT.id}`;
 
-  // NO CREDENTIALS means the gate asserts nothing and SAYS so, rather than passing
-  // quietly or failing an interactive run that was never going to have a token.
+  // No credentials: assert nothing and SAY so, rather than passing quietly or failing an
+  // interactive run that was never going to have a token.
   if (!account || !token) {
     record("2b canary client record", true, `SKIPPED: no CLOUDFLARE_ACCOUNT_ID/CLOUDFLARE_API_TOKEN, so ${key} was not read. This run asserts nothing about it.`);
     return;
@@ -160,19 +151,18 @@ async function gateCanary() {
 
 // Gate 1b: the store is bound and the FTS index is intact.
 //
-// Provenance proves WHICH commit is live. It cannot prove the deployed Worker can
-// reach its data, and that is a live failure mode rather than a hypothetical one:
-// every binding is resolved by name at deploy time, so a Worker deployed against a
-// stale or hand-edited wrangler.jsonc starts happily with DB pointing at nothing,
-// answers /health with ok, and then errors on every single read tool. Nothing else
-// in the gate family would notice. tsc passes, the tests are offline, and gates 2
-// through 7 exercise the OAuth surface, which never touches D1.
+// Provenance proves WHICH commit is live. It cannot prove the deployed Worker can reach
+// its data: every binding is resolved by name at deploy time, so a Worker deployed
+// against a stale or hand-edited wrangler.jsonc starts happily with DB pointing at
+// nothing, answers /health with ok, and then errors on every read tool. Nothing else in
+// the gate family notices: tsc passes, the tests are offline, and gates 2 through 7
+// exercise the OAuth surface, which never touches D1.
 //
-// The FTS half is separate because it fails separately, and it has failed: DELETE
-// FROM documents_fts corrupts the index, COUNT(*) on an external-content table reads
-// through to the content table and so cannot detect drift, and integrity-check
-// passes on an emptied index. /health's probe is a MATCH pinned to one document, so
-// an empty index cannot satisfy it.
+// The FTS half is separate because it fails separately, and it has failed: DELETE FROM
+// documents_fts corrupts the index, COUNT(*) on an external-content table reads through
+// to the content table and cannot detect drift, and integrity-check passes on an emptied
+// index. /health's probe is a MATCH pinned to one document, so an empty index cannot
+// satisfy it.
 async function gateStore() {
   let data = null;
   let attempt = 0;
@@ -199,16 +189,15 @@ function authorizeUrl(clientId) {
   return u.href;
 }
 
-// Gate 1c: BACKUP FRESHNESS (residual 7). /health has reported backup.last_ok
-// since 2026-09-07 and nothing read it, so the backup cron could fail every night
-// and the only signal would be a JSON key nobody fetches. Measured on live during
-// the audit: null, silently.
+// Gate 1c: BACKUP FRESHNESS (residual 7). /health has reported backup.last_ok since
+// 2026-09-07 and nothing read it, so the backup cron could fail every night with the
+// only signal a JSON key nobody fetches. Measured on live during the audit: null.
 //
-// ASSERTED ON SCHEDULED RUNS ONLY, because a push runs minutes after a deploy and
-// says nothing about last night's backup, while the six-hourly schedule exists
-// precisely to bound time-to-detect. A non-scheduled run reports SKIPPED and says
-// what it did not assert; it never passes quietly. The threshold and the arithmetic
-// live in scripts/freshness-lib.mjs so a test can drive them.
+// ASSERTED ON SCHEDULED RUNS ONLY: a push runs minutes after a deploy and says nothing
+// about last night's backup, while the six-hourly schedule exists to bound
+// time-to-detect. A non-scheduled run reports SKIPPED and says what it did not assert.
+// The threshold and the arithmetic live in scripts/freshness-lib.mjs so a test can
+// drive them.
 async function gateBackupFreshness() {
   const assertFresh = process.env.ASSERT_BACKUP_FRESH === "1";
   let data = null;
@@ -256,9 +245,9 @@ async function gateCsp(clientId) {
     if (!csp || !/form-action/i.test(csp)) break;
     if (attempt < POLL_ATTEMPTS) await sleep(POLL_INTERVAL_MS);
   }
-  // The consent form's redirect chain terminates at a dynamically registered
-  // client redirect_uri, so no static form-action allowlist can be correct.
-  // Absent is the ruled state (e7a0dff). Present is a fail regardless of value.
+  // The consent form's redirect chain terminates at a dynamically registered client
+  // redirect_uri, so no static form-action allowlist can be correct. Absent is the ruled
+  // state (e7a0dff). Present is a fail regardless of value.
   const passed = !csp || !/form-action/i.test(csp);
   record("4 consent CSP permits the chain", passed, passed ? `polls=${attempt} csp=${csp ?? "(none)"}` : `polls=${attempt} form-action present after ${POLL_ATTEMPTS} polls: ${csp}`);
 }
@@ -286,18 +275,17 @@ async function gateCacheControl(clientId) {
 
 // Gate 6: security headers, asserted per route class rather than per path.
 //
-// The unit half of this lives in test/headers.test.ts and runs offline in CI.
-// This half exists because the offline test can only prove the header FUNCTION
-// is right; it cannot prove the function is actually reached by every response.
-// It is not reached by inspection either: workers-oauth-provider generates
-// /token, /register and both .well-known documents itself, and none of them
-// appear anywhere in src/. Those four are in this list for exactly that reason.
+// The unit half lives in test/headers.test.ts and runs offline in CI. This half exists
+// because the offline test can only prove the header FUNCTION is right; it cannot prove
+// the function is reached by every response. Inspection cannot either:
+// workers-oauth-provider generates /token, /register and both .well-known documents
+// itself, and none of them appear anywhere in src/. Those four are in this list for that
+// reason.
 //
-// Measured before the fix, 2026-08-12: HSTS and Permissions-Policy absent on 12
-// of 12 surfaces, nosniff absent on 11 of 12.
+// Measured before the fix, 2026-08-12: HSTS and Permissions-Policy absent on 12 of 12
+// surfaces, nosniff absent on 11 of 12.
 //
-// Polls, like every other header assertion here, because a single fetch after a
-// deploy reads the previous version.
+// Polls, because a single fetch after a deploy reads the previous version.
 async function gateSecurityHeaders(clientId) {
   const consent = authorizeUrl(clientId);
   const surfaces = [
@@ -356,9 +344,9 @@ async function gateSecurityHeaders(clientId) {
   );
 }
 
-// Gate 7: the CSP report sink accepts a report. Report-Only headers are worth
-// nothing if the endpoint they name does not answer, and that failure is
-// invisible: the browser posts once, gets an error, and never retries.
+// Gate 7: the CSP report sink accepts a report. Report-Only headers are worth nothing if
+// the endpoint they name does not answer, and that failure is invisible: the browser
+// posts once, gets an error, and never retries.
 async function gateReportSink() {
   const resp = await fetch(`${ORIGIN}/csp-report`, {
     method: "POST",
