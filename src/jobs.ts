@@ -381,3 +381,56 @@ export async function expireJobLeases(env: Env, now: Date): Promise<{ requeued: 
   }
   return { requeued };
 }
+
+// ---- the improve_status block --------------------------------------------------
+//
+// Counted per namespace, plus what a human has to look at: the blocked jobs, with
+// the command each is waiting on. Blocked is the only status whose ROWS come back
+// rather than a count, because a count of blocked jobs tells nobody what to run,
+// and the console shows exactly these.
+//
+// done_today rather than done: a lifetime total only ever goes up and stops being
+// information. What the seat wants to know is whether the queue moved today.
+export interface JobsSummary {
+  queued: number;
+  claimed: number;
+  blocked: number;
+  done_today: number;
+  blocked_jobs: Array<{ id: string; title: string; waiting_on: string | null }>;
+}
+
+export async function jobsSummary(db: D1Database, namespace: string, now: Date): Promise<JobsSummary> {
+  const day = now.toISOString().slice(0, 10);
+  const counts = await db
+    .prepare(
+      `SELECT status, COUNT(*) AS n FROM jobs
+       WHERE namespace = ?1 AND status IN ('queued', 'claimed', 'blocked') GROUP BY status`
+    )
+    .bind(namespace)
+    .all<{ status: string; n: number }>();
+  const byStatus = new Map((counts.results ?? []).map((r) => [r.status, r.n]));
+  // substr on the stored timestamp rather than a range: updated_at is written as an
+  // ISO string by this module and as datetime('now') by the table default, and the
+  // two agree on the first ten characters and nothing else.
+  const doneToday = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM jobs
+       WHERE namespace = ?1 AND status = 'done' AND substr(updated_at, 1, 10) = ?2`
+    )
+    .bind(namespace, day)
+    .first<{ n: number }>();
+  const blocked = await db
+    .prepare(
+      `SELECT id, title, result_summary FROM jobs
+       WHERE namespace = ?1 AND status = 'blocked' ORDER BY updated_at DESC LIMIT 20`
+    )
+    .bind(namespace)
+    .all<{ id: string; title: string; result_summary: string | null }>();
+  return {
+    queued: byStatus.get("queued") ?? 0,
+    claimed: byStatus.get("claimed") ?? 0,
+    blocked: byStatus.get("blocked") ?? 0,
+    done_today: doneToday?.n ?? 0,
+    blocked_jobs: (blocked.results ?? []).map((r) => ({ id: r.id, title: r.title, waiting_on: r.result_summary })),
+  };
+}

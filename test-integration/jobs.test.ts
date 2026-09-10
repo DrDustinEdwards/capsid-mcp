@@ -1,6 +1,7 @@
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
-import { blockJob, claimJob, completeJob, expireJobLeases, failJob, heartbeatJob, listJobs, postJob } from "../src/jobs";
+import { blockJob, claimJob, completeJob, expireJobLeases, failJob, heartbeatJob, jobsSummary, listJobs, postJob } from "../src/jobs";
+import { improveStatus } from "../src/improve-run";
 import { JOB_LEASE_SECONDS, jobDocPath } from "../src/jobs-schema";
 import { splitSignedTask, verifyTaskDoc } from "../src/improve-task";
 
@@ -312,5 +313,66 @@ describe("list", () => {
     expect(claimed.job!.title).toBe("high");
     const stillQueued = await listJobs(jobsEnv(), { namespace: "capsid", status: "queued" });
     expect(stillQueued.jobs!.map((j) => j.title)).toEqual(["low"]);
+  });
+});
+
+describe("the improve_status jobs block", () => {
+  it("counts the open states per namespace and hands back the blocked jobs themselves", async () => {
+    // Four jobs in three states, plus one in another namespace that must not be
+    // counted here. The namespace filter is the assertion: a summary that summed the
+    // whole table would report the same numbers for every project.
+    await post({ title: "waiting" });
+    const running = await post({ title: "running" });
+    const stuck = await post({ title: "stuck", gate_required: true });
+    const finished = await post({ title: "finished" });
+    await post({ title: "elsewhere", namespace: "germomics" });
+
+    await claimJob(jobsEnv(), DRIVER, NOW, { id: running.job!.id });
+    await claimJob(jobsEnv(), OTHER, NOW, { id: stuck.job!.id });
+    await blockJob(jobsEnv(), OTHER, NOW, stuck.job!.id, {
+      reason: "the deploy needs confirming",
+      command: "npm run deploy",
+    });
+    await claimJob(jobsEnv(), OTHER, NOW, { id: finished.job!.id });
+    await completeJob(jobsEnv(), OTHER, NOW, finished.job!.id, { result_summary: "done" });
+
+    const summary = await jobsSummary(env.DB, "capsid", NOW);
+    expect(summary.queued).toBe(1);
+    expect(summary.claimed).toBe(1);
+    expect(summary.blocked).toBe(1);
+    // done_today keys on the day the row was last touched, and completeJob stamped
+    // it with the clock this test passed in.
+    expect(summary.done_today).toBe(1);
+
+    // THE BLOCKED JOBS COME BACK AS ROWS, with the command in them. A count would
+    // tell the console there is something to look at and nothing about what to run.
+    expect(summary.blocked_jobs).toHaveLength(1);
+    expect(summary.blocked_jobs[0].id).toBe(stuck.job!.id);
+    expect(summary.blocked_jobs[0].title).toBe("stuck");
+    expect(String(summary.blocked_jobs[0].waiting_on)).toContain("npm run deploy");
+
+    // The other namespace is not in these numbers.
+    const other = await jobsSummary(env.DB, "germomics", NOW);
+    expect(other.queued).toBe(1);
+    expect(other.blocked_jobs).toEqual([]);
+  });
+
+  it("a namespace with no jobs reports zeroes, not an absent block", async () => {
+    // A missing block and an empty queue are different facts, and the console has to
+    // tell them apart. Zeroes are the honest answer.
+    const summary = await jobsSummary(env.DB, "foxing", NOW);
+    expect(summary).toEqual({ queued: 0, claimed: 0, blocked: 0, done_today: 0, blocked_jobs: [] });
+  });
+
+  it("improve_status carries the block for every namespace it reports", async () => {
+    await post({ title: "visible in status" });
+    const status = await improveStatus(jobsEnv(), "capsid");
+    expect(status.namespaces).toHaveLength(1);
+    expect(status.namespaces[0].jobs.queued).toBe(1);
+    // Every namespace in the report has one, so a consumer never has to check.
+    const all = await improveStatus(jobsEnv());
+    for (const ns of all.namespaces) {
+      expect(ns.jobs, `${ns.namespace} has no jobs block`).toBeTruthy();
+    }
   });
 });
