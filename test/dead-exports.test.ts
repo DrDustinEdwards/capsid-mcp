@@ -80,10 +80,23 @@ function otherReaders(): Array<{ name: string; text: string }> {
 
 const READERS = otherReaders();
 
+// A BARREL RE-EXPORT IS NOT A CALLER. `export { x } from "./y"` names x in order
+// to forward it, not to use it, so counting it hides exactly what this file
+// exists to surface: put a module behind a barrel and every symbol under it
+// looks called by the barrel. A plain `import { x } from` is left alone, because
+// importing a name in order to use it is what a caller does. This lands before
+// any barrel exists, where it is a no-op, so the guard is already correct on the
+// day one appears.
+const RE_EXPORT_FROM = /export\s+(?:type\s+)?\{[^}]*\}\s*from\s*["'][^"']+["'];?/g;
+const RE_EXPORT_STAR = /export\s+\*(?:\s+as\s+[A-Za-z0-9_]+)?\s+from\s*["'][^"']+["'];?/g;
+function withoutReExports(text: string): string {
+  return text.replace(RE_EXPORT_FROM, "").replace(RE_EXPORT_STAR, "");
+}
+
 function hasCallerElsewhere(name: string, ownFile: string): boolean {
   const re = new RegExp(`\\b${name}\\b`);
-  if (sourceFiles().some((f) => f.name !== ownFile && re.test(f.text))) return true;
-  return READERS.some((f) => re.test(f.text));
+  if (sourceFiles().some((f) => f.name !== ownFile && re.test(withoutReExports(f.text)))) return true;
+  return READERS.some((f) => re.test(withoutReExports(f.text)));
 }
 
 test("the scan finds the exports at all, so nothing here can pass by reading nothing", () => {
@@ -128,43 +141,87 @@ test("PLANT: the two exports the holdout imports are still exported from src", (
 // it appears, so it is reviewed while somebody still remembers writing it; and
 // removing one means editing this list, which is the moment to ask whether a
 // branch was scored.
+// KEYED BY EXPORT NAME, NOT BY FILE. The name is what is under review; the file
+// holding it is not. Keying on "src/<file>: <name>" turned every module move into
+// a apparent change in the no-caller set, and the scorer sandbox runs the DEFAULT
+// branch's tests against an attempt's src/, so a move surfaced there as a test
+// regression no edit to the attempt could clear. Both directions are still
+// asserted, and the failure message still prints where each one currently lives.
 const KNOWN_SUSPECTS = [
-  "src/github.ts: assertRepoArg",
-  "src/github.ts: workflowRunsForBranch",
-  "src/headers.ts: REPORTING_ENDPOINTS",
-  "src/improve-anthropic.ts: clientFor",
-  "src/improve-anthropic.ts: costOf",
-  "src/improve-run.ts: DEFAULT_RUN_PROMPT",
-  "src/improve-run.ts: verifyTaskDocument",
-  "src/improve-schema.ts: ATTEMPT_STATUSES",
-  "src/improve-scorer.ts: BACKUP_BUCKET_NAME",
-  "src/improve-scorer.ts: BACKUP_DUMP_PREFIX",
-  "src/improve-scorer.ts: HOLDOUT_BUCKET_NAME",
-  "src/improve-scorer.ts: HOLDOUT_CREDENTIAL_TTL_SECONDS",
-  "src/store-probe.ts: HEALTH_PROBE_NS",
-  "src/store-probe.ts: HEALTH_PROBE_PATH",
-  "src/store-probe.ts: HEALTH_PROBE_TERM",
+  "ATTEMPT_STATUSES",
+  "BACKUP_BUCKET_NAME",
+  "BACKUP_DUMP_PREFIX",
+  "DEFAULT_RUN_PROMPT",
+  "HEALTH_PROBE_NS",
+  "HEALTH_PROBE_PATH",
+  "HEALTH_PROBE_TERM",
+  "HOLDOUT_BUCKET_NAME",
+  "HOLDOUT_CREDENTIAL_TTL_SECONDS",
+  "REPORTING_ENDPOINTS",
+  "assertRepoArg",
+  "clientFor",
+  "costOf",
+  "verifyTaskDocument",
+  "workflowRunsForBranch",
 ];
 
-test("the set of exports with no caller anywhere is exactly the reviewed list", () => {
+// TWO CHECKS, AND NEITHER IS "the set still matches exactly".
+//
+// The exact-match form was wrong in a way only a module split reveals. Splitting
+// a file turns intra-file usage into cross-file usage, so an export used only
+// inside one big module legitimately STOPS being caller-less the day that module
+// is split: assertRepoArg went from suspect to non-suspect on the 2026-09-10
+// split without a line of its own changing. Exact match called that a regression.
+// Worse, the scorer sandbox runs the DEFAULT branch's tests against an attempt's
+// src/, so that false regression was unfixable from inside the attempt: it scored
+// 845 of 846 with nothing actually wrong.
+//
+// What the guard is for, kept in full and split apart:
+//
+//   (a) A reviewed name must still be EXPORTED. This is the direction that cost
+//       an anchor: on 2026-09-07 seedScoresDoc and hasWideDash were deleted as
+//       dead, the hidden holdout imports both, and master scored 28 of 30 against
+//       an anchor of min 1.0. Deleting an export is the danger, and this checks it
+//       directly rather than inferring it from a set difference.
+//   (b) No NEW no-caller export may appear unreviewed, so dead code still fails
+//       the build the day it is written, while somebody remembers writing it.
+//
+// Deliberately NOT checked any more: that a reviewed name is STILL caller-less.
+// Gaining a caller is good news and was never a defect.
+test("every reviewed suspect is still exported from src/", () => {
+  const names = new Set(exportsOfSrc().map((e) => e.name));
+  const gone = KNOWN_SUSPECTS.filter((n) => !names.has(n));
+  assert.deepEqual(
+    gone,
+    [],
+    `these reviewed exports are no longer exported from src/: ${gone.join(", ")}.
+` +
+      `An export is dead only with no caller in src/, none in test/, AND no entry in the holdout manifest. ` +
+      `The holdout is a consumer no scan here can see: score a branch without it and read holdout_pass_rate ` +
+      `before deleting it. That is how seedScoresDoc and hasWideDash were declared dead on 2026-09-07.`
+  );
+});
+
+test("no new no-caller export appears without review", () => {
   const declared = new Set(declaredByHoldout());
-  const suspects: string[] = [];
+  const reviewed = new Set(KNOWN_SUSPECTS);
+  const unreviewed: string[] = [];
   for (const { file, name } of exportsOfSrc()) {
     if (hasCallerElsewhere(name, file)) continue;
     // The manifest is the third place to look, and it is the one that cost an
     // anchor when it did not exist.
     if (declared.has(name)) continue;
-    suspects.push(`src/${file}: ${name}`);
+    if (reviewed.has(name)) continue;
+    unreviewed.push(`${name} (src/${file})`);
   }
   assert.deepEqual(
-    suspects.sort(),
-    [...KNOWN_SUSPECTS].sort(),
-    `the no-caller set moved. New entries are unreviewed; missing ones were removed or gained a caller.\n` +
-      `Before deleting any of these, score a branch without it: the holdout is a consumer no scan here can see, ` +
-      `and that is exactly how seedScoresDoc and hasWideDash were declared dead on 2026-09-07.`
+    unreviewed.sort(),
+    [],
+    `these exports have no caller in src/, none in test/, test-integration/ or scripts/, and no holdout ` +
+      `manifest entry, and are not in the reviewed list: ${unreviewed.join(", ")}. ` +
+      `Add them to KNOWN_SUSPECTS after looking, or give them a caller.`
   );
 });
-
 test("PLANT: a name in the holdout manifest is never reported as a suspect", () => {
   // The manifest earning its keep. Both incident exports have no caller in src/
   // or test/ either, and only the manifest keeps them off the list above.
@@ -173,7 +230,7 @@ test("PLANT: a name in the holdout manifest is never reported as a suspect", () 
     const own = exportsOfSrc().find((e) => e.name === name);
     assert.ok(own, `${name} is declared in the manifest and is not an export of src/`);
     assert.ok(
-      !KNOWN_SUSPECTS.some((s) => s.endsWith(`: ${name}`)),
+      !KNOWN_SUSPECTS.includes(name),
       `${name} is vouched for by ${MANIFEST} and must not also be listed as a suspect`
     );
   }
