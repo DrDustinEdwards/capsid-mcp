@@ -15,3 +15,7 @@ Rulings, measurements, and refusal reasons that were recorded only in Worker com
 ## src/store-probe.ts
 
 - **:1-13** One FTS probe, two callers (`/health` and backup preflight) must share the definition so they cannot drift. Why MATCH pinned to `capsid/conventions.md` rather than a count, measured 2026-07-27: `DELETE FROM documents_fts` corrupts the index, `COUNT(*)` on an external-content FTS5 table reads through to the content table so it cannot detect drift, and `integrity-check` passes on an emptied index. A MATCH that has to find a specific row is the cheap check that fails when the index is empty.
+
+## src/normalize.ts
+
+- **:31-40** `hasWideDash` was moved to `test/` on 2026-09-07 as an export with no caller in `src/` or `test/`. The holdout suite imports it; with this and `seedScoresDoc` removed the holdout scored 28/30, restoring both took it to 30/30 against an anchor of min 1.0 (2026-09-08). "No caller in src/ or test/" is not dead in this repo. An export removal is checked by scoring a branch, not by grepping.
