@@ -122,3 +122,7 @@ Rulings, measurements, and refusal reasons that were recorded only in Worker com
 ## src/tool-annotations.ts
 
 - **:1-31** Annotations are a cache; `test/tool-annotations.test.ts` derives each flag from the handler. `readOnlyHint` is the negation of the write gate. `destructiveHint` is true iff a write-gated handler can overwrite or remove existing state. `idempotentHint` and `openWorldHint` were written and then removed: a "calls github.ts" scan disagreed twice (`register_namespace` / `update_namespace` reach GitHub through `repoTokenOk`; `improve_run` reads as closed-world while dispatching a workflow). A hint nothing checks is the kind of claim this file exists to stop. `write` is destructive because one tool gets one hint and replace/patch overwrite. `lint` is destructive because finalize archives. `ci_dispatch` is additive (the workflow's later work is not this tool's). Fail-closed on a missing table entry: under-claimed, not over-claimed. `Object.hasOwn` because `"constructor"` is not nullish (measured 2026-09-06).
+
+## src/improve-skills.ts
+
+- **:1-14** A kept attempt's specific diff is worthless elsewhere; the reason it worked might not be. A skill is a candidate, not an instruction: it goes through the identical attempt path, so a skill that does not transfer is reverted. Wins and losses accumulate per skill so "does cross-project transfer work" is answerable. Candidate order is Laplace-smoothed win rate; a skill sourced from this namespace is excluded.
