@@ -1,41 +1,13 @@
-// SIGNING THE NIGHTLY TASK DOCUMENT.
-//
-// In subscription mode the Worker writes `<ns>/improve/run-<day>.md` and stops,
-// and a Claude Code session executes it with local shell, local git, five repo
-// clones and a Capsid write grant. Both 2026-09-07 audits rated that the whole
-// lethal trifecta (Opus 3.1 / 22.1, Grok MAJOR 8): the task document was an
-// ordinary D1 row, so any write-grant key could rewrite it, and `/improve` is
-// instructed to "execute the attempts exactly as the task doc describes".
-//
-// Two independent things now have to hold before a driver executes a task doc,
-// and they fail in different directions on purpose:
-//
-//   1. THE SIGNATURE. The Worker HMACs the body with a key derived from
-//      IMPROVE_SCORE_SECRET under its own context string, so a document the
-//      Worker did not author cannot carry a valid line. This is the half that
-//      survives an attacker who can also write audit rows.
-//   2. THE PROVENANCE. The document's last audit actor must be `improve-loop`.
-//      This is the half that survives a signing key leaking out of the Worker,
-//      because a leaked key still cannot make D1 record a different actor.
-//
-// Neither is sufficient alone and the driver checks both. The signature covers
-// the body BELOW the frontmatter block, so the block itself can carry the
-// signature without signing itself.
-
 import { hmacHex, timingSafeEqual } from "./auth";
 
-// The context string. Different from the score-report and backup-credential
-// contexts by construction, so a leak of one derived key opens nothing else.
-// scripts/improve-derive-key.mjs performs the identical computation; the two are
-// pinned against each other by test/improve-derive-key.test.ts.
+// Distinct from the score-report and backup-credential contexts on purpose.
+// scripts/improve-derive-key.mjs must match; test/improve-derive-key.test.ts pins both.
 export const TASK_KEY_CONTEXT = "capsid-improve-task:v1";
 
 export async function deriveTaskKey(rootSecret: string): Promise<string> {
   return hmacHex(rootSecret, TASK_KEY_CONTEXT);
 }
 
-// The frontmatter key. One spelling, here, because the writer and the reader are
-// in different modules and a typo would mean every doc silently unsigned.
 export const TASK_SIGNATURE_FIELD = "capsid-task-signature";
 
 const FRONTMATTER = /^---\n([\s\S]*?)\n---\n/;
@@ -61,14 +33,8 @@ export async function signTaskBody(rootSecret: string, body: string): Promise<st
 
 export type TaskVerification = { ok: true } | { ok: false; reason: string };
 
-// VERIFY BOTH HALVES. `actor` is the document's last audit actor, which the
-// caller reads from audit_log; passing null means "no audit row", which is a
-// refusal rather than a pass, because an unaudited document is one nothing can
-// attribute.
-//
-// UNCONFIGURED IS A REFUSAL, not a skip. If IMPROVE_SCORE_SECRET is unset the
-// Worker cannot have signed anything, so every document is unverifiable and the
-// honest answer is to refuse them all rather than to wave them through.
+// Two halves: HMAC of the body below the frontmatter, and last audit actor
+// improve-loop. Unconfigured (no IMPROVE_SCORE_SECRET) is a refusal, not a skip.
 export async function verifyTaskDoc(
   rootSecret: string | undefined,
   stored: string,
