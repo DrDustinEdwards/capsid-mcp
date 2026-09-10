@@ -41,3 +41,8 @@ Rulings, measurements, and refusal reasons that were recorded only in Worker com
 ## src/improve-task.ts
 
 - **:1-23** Subscription-mode task docs were an ordinary D1 row, so any write-grant key could rewrite them, and `/improve` is instructed to execute the attempts exactly as the task doc describes. Both 2026-09-07 audits rated that the lethal trifecta (Opus 3.1 / 22.1, Grok MAJOR 8). Two independent checks: HMAC of the body below the frontmatter (survives an attacker who can also write audit rows) and last audit actor `improve-loop` (survives a leaked signing key, which still cannot make D1 record a different actor). Unconfigured (`IMPROVE_SCORE_SECRET` unset) is a refusal, not a skip.
+
+## src/links.ts
+
+- **:7-10** `LinkEdge.type` used to be `string` (quality audit 3.5). Derived from the same array the runtime check uses.
+- **:23-49** Edge endpoints are document keys, ruled 2026-08-17 (quality audit 3.6). `write` refused `..` while an edge to `../x` stored fine. A comment on the dangling-edge warning offered the looseness as deliberate ("may also address repo files"). Ruled the other way: an edge is `(to_ns, to_path)` and `to_ns` is a namespace, with nowhere to put a repo selector or ref; every consumer JOINs documents; `move` repoints edges on rename. Measured live 2026-08-17: all 96 edges resolve to real documents, zero `..`, zero absolute, zero not `.md`. Behaviour change: a write whose links carry a traversal, absolute path, or over-long path is refused at parse time.
