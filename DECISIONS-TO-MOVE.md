@@ -46,3 +46,11 @@ Rulings, measurements, and refusal reasons that were recorded only in Worker com
 
 - **:7-10** `LinkEdge.type` used to be `string` (quality audit 3.5). Derived from the same array the runtime check uses.
 - **:23-49** Edge endpoints are document keys, ruled 2026-08-17 (quality audit 3.6). `write` refused `..` while an edge to `../x` stored fine. A comment on the dangling-edge warning offered the looseness as deliberate ("may also address repo files"). Ruled the other way: an edge is `(to_ns, to_path)` and `to_ns` is a namespace, with nowhere to put a repo selector or ref; every consumer JOINs documents; `move` repoints edges on rename. Measured live 2026-08-17: all 96 edges resolve to real documents, zero `..`, zero absolute, zero not `.md`. Behaviour change: a write whose links carry a traversal, absolute path, or over-long path is refused at parse time.
+
+## src/env.ts
+
+- **:1-9** `Env` lived in `src/server.ts` until 2026-08-17 (quality audit 1.3). Every leaf imported the root; the type graph was cyclic even though the runtime graph was not, because the imports were type-only.
+- **:34-43** HOLDOUT is a second R2 bucket, not a prefix in MEDIA: attempt code holds MEDIA and would be able to read a prefix inside it. Exactly two modules may name it (this file's declaration and `src/improve-scorer.ts`); `test/improve-holdout.test.ts` pins the two lines rather than granting the filename.
+- **:54-64** Score job no longer holds a long-lived S3 key (platform arc 2026-09-06). It POSTs `/improve/holdout-credential`; the Worker mints a one-hour object-read-only credential. Parent token secret never leaves the dashboard. Omitted from AttemptEnv. Only `improve-scorer.ts` may name the token.
+- **:68-72** Backup mint parent is a separate R2 token, object-read-only on capsid-media, so neither credential family can read the other bucket.
+- **:76-86** AttemptEnv is the type-level half of isolation. Three layers: type, separate bucket, source scan. A type can be cast away, a scan can be evaded by an alias, and a shared bucket defeats both.
