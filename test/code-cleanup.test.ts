@@ -25,18 +25,26 @@ test("the anchor KV key literal lives only in the improve-schema constant", () =
   assert.ok(sourceFiles().some((f) => f.name === "improve-schema.ts" && /anchorKey = /.test(f.text)));
 });
 
-test("the write-integrity core lives in store-guards.ts, and server.ts imports it", () => {
+test("the write-integrity core lives in store-guards.ts, and the write path imports it", () => {
   const guards = sourceFiles().find((f) => f.name === "store-guards.ts");
   assert.ok(guards, "src/store-guards.ts is missing; the write-integrity core was not extracted");
   // The commit protocol and its guards are defined there.
   for (const symbol of ["export function guardedCommit", "export function requireExists", "export function requireBodyUnchanged", "export function isMissingRowAbort"]) {
     assert.ok(guards.text.includes(symbol), `store-guards.ts no longer defines ${symbol}`);
   }
-  // server.ts imports them rather than redefining them: a redefinition would give
-  // the store two commit protocols that could drift.
-  const server = sourceFiles().find((f) => f.name === "server.ts")!.text;
-  assert.match(server, /import \{[^}]*guardedCommit[^}]*\} from "\.\/store-guards"/, "server.ts does not import the extracted core");
-  assert.doesNotMatch(server, /function guardedCommit\(/, "server.ts redefines guardedCommit instead of importing it");
+  // The write path imports them rather than redefining them: a redefinition would
+  // give the store two commit protocols that could drift. Located by search so a
+  // split of the write handler cannot hide the import behind a filename pin.
+  const importers = sourceFiles().filter((f) =>
+    /import \{[^}]*guardedCommit[^}]*\} from "\.\.?\/store-guards"/.test(f.text)
+  );
+  assert.ok(importers.length >= 1, "no src/ module imports the extracted guardedCommit");
+  const redefiners = sourceFiles().filter((f) => f.name !== "store-guards.ts" && /function guardedCommit\(/.test(f.text));
+  assert.deepEqual(
+    redefiners.map((f) => f.name),
+    [],
+    "a src/ module redefines guardedCommit instead of importing it"
+  );
 });
 
 test("the source walk descends into subdirectories", () => {

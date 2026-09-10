@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { join } from "node:path";
+import { sourceFiles } from "./source-files.ts";
 
 // document_links stores (namespace, path) strings, not documents.id, and the
 // table carries no foreign key, so the database will not keep edges in step with
@@ -23,28 +24,23 @@ import { join } from "node:path";
 // defect arrived three times in places nobody predicted. A path mutation in
 // backup.ts, or in a new module, was invisible to it. Nothing stops a helper in
 // links.ts from renaming a document.
-const SRC_DIR = join(import.meta.dirname, "..", "src");
-
-function sourceFiles(): Array<{ name: string; text: string }> {
-  return readdirSync(SRC_DIR)
-    .filter((f) => f.endsWith(".ts"))
-    .sort()
-    .map((name) => ({ name, text: readFileSync(join(SRC_DIR, name), "utf8") }));
-}
-
 const SOURCES = sourceFiles();
-const SERVER = SOURCES.find((f) => f.name === "server.ts")!.text;
 
 const HELPER_START = "// PATH_MUTATION_HELPER_START";
 const HELPER_END = "// PATH_MUTATION_HELPER_END";
 
-function helperRange(): { start: number; end: number } {
-  const start = SERVER.indexOf(HELPER_START);
-  const end = SERVER.indexOf(HELPER_END);
-  assert.ok(start !== -1, `${HELPER_START} marker is missing from src/server.ts`);
-  assert.ok(end !== -1, `${HELPER_END} marker is missing from src/server.ts`);
+function helperOwner(): { name: string; text: string } {
+  const found = SOURCES.find((f) => f.text.includes(HELPER_START) && f.text.includes(HELPER_END));
+  assert.ok(found, `${HELPER_START} / ${HELPER_END} markers are missing from src/`);
+  return found;
+}
+
+function helperRange(): { file: string; text: string; start: number; end: number } {
+  const owner = helperOwner();
+  const start = owner.text.indexOf(HELPER_START);
+  const end = owner.text.indexOf(HELPER_END);
   assert.ok(end > start, "helper end marker precedes its start marker");
-  return { start, end };
+  return { file: owner.name, text: owner.text, start, end };
 }
 
 // Every SQL fragment that renames a document or removes a documents row.
@@ -94,17 +90,17 @@ test("the scan reads a plausible number of source files", () => {
   // An assertion that can pass by reading nothing is not an assertion. If the
   // directory walk broke, every offender check below would pass over an empty list.
   assert.ok(SOURCES.length >= 10, `expected to scan the src/ modules, found ${SOURCES.length}`);
-  assert.ok(SOURCES.some((f) => f.name === "server.ts"));
+  assert.ok(SOURCES.some((f) => f.text.includes(HELPER_START)));
 });
 
 test("every documents.path mutation in src/ lives inside pathMutation()", () => {
-  const { start, end } = helperRange();
+  const { file, start, end } = helperRange();
   const offenders: string[] = [];
 
   for (const { name, text } of SOURCES) {
     for (const { label, find } of MUTATION_PATTERNS) {
       for (const index of find(text)) {
-        const inHelper = name === "server.ts" && index > start && index < end;
+        const inHelper = name === file && index > start && index < end;
         if (!inHelper) {
           const line = text.slice(0, index).split("\n").length;
           offenders.push(`${label} at src/${name}:${line}`);
@@ -121,8 +117,8 @@ test("every documents.path mutation in src/ lives inside pathMutation()", () => 
 });
 
 test("the helper actually contains both mutation shapes", () => {
-  const { start, end } = helperRange();
-  const body = SERVER.slice(start, end);
+  const { text, start, end } = helperRange();
+  const body = text.slice(start, end);
   // Guards the guard: if the helper stopped containing these, the test above would
   // pass vacuously over a file that no longer mutates anything here.
   for (const { label, find } of MUTATION_PATTERNS) {
@@ -148,8 +144,9 @@ test("the UPDATE pattern does not fire on path in a WHERE clause", () => {
 });
 
 test("all three known callers route through the helper", () => {
+  const all = SOURCES.map((f) => f.text).join("\n");
   for (const caller of ["pathMutation(db, namespace, path, null)", "pathMutation(db, namespace, path, new_path)", "pathMutation(db, namespace, path, `archive/${path}`)"]) {
-    assert.ok(SERVER.includes(caller), `expected a pathMutation call site: ${caller}`);
+    assert.ok(all.includes(caller), `expected a pathMutation call site: ${caller}`);
   }
 });
 

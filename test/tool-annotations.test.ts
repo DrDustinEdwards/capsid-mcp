@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { hintsFor, TOOL_HINTS } from "../src/tool-annotations.ts";
-import { sourceFile } from "./source-files.ts";
+import { allSourceText, toolBlocks } from "./source-files.ts";
 
 // TOOL ANNOTATIONS ARE DERIVED, NOT DECLARED.
 //
@@ -14,23 +14,6 @@ import { sourceFile } from "./source-files.ts";
 // Every scan below fails in BOTH directions, and every one carries a vacuity guard,
 // because "0 tools disagreed" and "0 tools were read" are indistinguishable
 // otherwise (capsid/conventions.md: pair every content check with a count check).
-
-const SERVER = sourceFile("server.ts");
-
-interface ToolBlock {
-  name: string;
-  body: string;
-}
-
-// The same block-splitting shape test/mutation-guard-coverage.test.ts uses. A tool
-// block runs from its registration to the next one.
-function toolBlocks(): ToolBlock[] {
-  const starts = [...SERVER.matchAll(/server\.registerTool\(\s*\n\s*"([a-z_]+)"/g)];
-  return starts.map((m, i) => ({
-    name: m[1],
-    body: SERVER.slice(m.index ?? 0, i + 1 < starts.length ? starts[i + 1].index : SERVER.length),
-  }));
-}
 
 // A handler is write-gated iff it reaches the operator write grant. Two spellings,
 // both matched by shape: the inline refusal, and the shared repo-write wrapper that
@@ -78,7 +61,7 @@ test("PLANT: every tool is annotated at its registration, from the table and not
   assert.deepEqual(unannotated, [], `these tools carry no annotations: ${unannotated.join(", ")}`);
   // And nobody hand-wrote one, which would be the way the table stops being the
   // single place the hints live.
-  const inline = [...SERVER.matchAll(/annotations:\s*\{/g)];
+  const inline = [...allSourceText().matchAll(/annotations:\s*\{/g)];
   assert.equal(inline.length, 0, "an inline annotation literal bypasses the table this file checks");
 });
 

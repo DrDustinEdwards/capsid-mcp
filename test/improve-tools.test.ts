@@ -6,7 +6,7 @@ import { buildServer, type ToolGrant } from "../src/server.ts";
 import { anchorChecksum, parseScoresDoc } from "../src/improve-scores.ts";
 import { ROSTER } from "../src/improve-schema.ts";
 import { fakeD1, fakeEnv, fakeKv, fakeR2, withFetch } from "./fakes.ts";
-import { sourceFile } from "./source-files.ts";
+import { toolBlocks } from "./source-files.ts";
 import { seedScoresDoc } from "./seed-scores.ts";
 
 // THE TWO TOOLS, over a real MCP connection.
@@ -129,20 +129,14 @@ test("improve_run carries the operator gate IN ITS OWN BLOCK", () => {
   // test/invariants.test.ts finds mutating tools by scanning for SQL inside a
   // registerTool block. improve_run's SQL is in a helper, so that scan cannot see
   // it and cannot demand the gate. Asserted here instead, by name.
-  const server = sourceFile("server.ts");
-  const start = server.indexOf('"improve_run"');
-  const end = server.indexOf('"improve_status"');
-  assert.ok(start !== -1 && end > start, "could not bound the improve_run registration");
-  const block = server.slice(start, end);
-  assert.match(block, /if \(!mayWrite\) return fail\(DENIED\);/, "improve_run lost its write gate");
+  const block = toolBlocks().find((b) => b.name === "improve_run");
+  assert.ok(block, "could not bound the improve_run registration");
+  assert.match(block.body, /if \(!mayWrite\) return fail\(DENIED\);/, "improve_run lost its write gate");
 });
 
 test("improve_status carries NO gate, and no mutating SQL, because it is a read tool", () => {
-  const server = sourceFile("server.ts");
-  const start = server.indexOf('"improve_status"');
-  const end = server.indexOf("const RESOURCE_METADATA", start);
-  assert.ok(start !== -1 && end > start, "could not bound the improve_status registration");
-  const block = server.slice(start, end);
-  assert.equal(/if \(!mayWrite\)/.test(block), false, "improve_status gained a write gate; it is a read tool");
-  assert.equal(/\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\b/i.test(block), false, "improve_status contains mutating SQL");
+  const block = toolBlocks().find((b) => b.name === "improve_status");
+  assert.ok(block, "could not bound the improve_status registration");
+  assert.equal(/if \(!mayWrite\)/.test(block.body), false, "improve_status gained a write gate; it is a read tool");
+  assert.equal(/\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\b/i.test(block.body), false, "improve_status contains mutating SQL");
 });
