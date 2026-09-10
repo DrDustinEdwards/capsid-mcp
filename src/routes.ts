@@ -1,14 +1,3 @@
-// THE WORKER'S HTTP SURFACE that is not the MCP protocol itself.
-//
-// Named github-handler.ts until 2026-08-17, which described about a third of it
-// (quality audit 1.4): it also owns /health, /csp-report, /ops/mcp and
-// /ops/backup. A file named after one of its jobs is a file people stop reading
-// when looking for the other three, and /health and the report sink had both been
-// added here precisely because nobody wanted to argue about where they belonged.
-//
-// What is still true to the old name: the OAuth defaultHandler below drives the
-// GitHub login and approval flow, which is how a human client is admitted.
-
 import type { AuthRequest } from "@cloudflare/workers-oauth-provider";
 import { createMcpHandler } from "agents/mcp";
 import { APPROVAL_MAX_AGE_SECONDS, approvalTag } from "./approval";
@@ -382,34 +371,6 @@ async function handleBackup(request: Request, env: Env): Promise<Response> {
   return Response.json(result, { status: result.ran ? 200 : 409 });
 }
 
-// Item 9 report sink. Unauthenticated by necessity: a browser posts a violation
-// report with no credentials and will not retry.
-//
-// R2 IS THE RECORD, THE LOG IS THE CONVENIENCE. Ruled 2026-08-12. Workers
-// Observability alone was rejected because its retention is 7 days and that
-// ceiling has already bitten once: the 2026-08-10 actor investigation cleared
-// only because the window happened to still be open. This surface fails
-// sparsely by nature, since the approved-client fast path means the consent form
-// rarely renders, which is exactly how a total outage hid for 26 days. A
-// promotion ruling for the CSP and COOP trials needs the whole soak record, not
-// a rolling week. The console.log is so a live tail still shows a violation the
-// moment it lands.
-//
-// Bounded and TYPED. This is a public, unauthenticated write path into R2 with no
-// rate limit in front of it, so what it accepts is the whole of its defence:
-//
-//   size  - an oversized body is refused rather than stored.
-//   type  - the two content types browsers actually send for these reports, and
-//           nothing else. A plain POST of arbitrary JSON is refused with 415.
-//   shape - the body must parse AND look like a report: {"csp-report": {...}} from
-//           report-uri, or a non-empty array of {type, body} from the Reporting
-//           API. This replaces "keep the raw body even if it does not parse",
-//           which was the right instinct (an unparseable report still says a
-//           violation fired) applied to the wrong surface: on an endpoint anyone
-//           can post to, accept-anything means the soak record that a promotion
-//           ruling depends on can be filled with whatever a stranger sends.
-//   key   - one object per ray id, so a flood of reports from one request cannot
-//           fan out into many objects.
 const CSP_REPORT_MAX_BYTES = 16384;
 // application/csp-report is the legacy report-uri type; application/reports+json is
 // the Reporting API type, which is what the COOP trial sends.

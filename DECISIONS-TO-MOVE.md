@@ -198,3 +198,8 @@ Rulings, measurements, and refusal reasons that were recorded only in Worker com
 - **:11-18** AttemptEnv, not Env, so this module cannot name HOLDOUT.
 - **:25-38** All APP_KV keys built here. install key v2 is a rollout guard: until 2026-08-17 a pinned GITHUB_APP_INSTALLATION_ID was written under every owner. Token key v3 is per owner AND repo (audit 2026-09-06 MAJOR 10). Trailing slash on readPrefix: without it, owner/r would match owner/repo2.
 - **:95-107** Installation resolved per owner and repo always (audit 2, F20). The pin is gone; a mirror of GitHub's answer eventually disagrees.
+
+## src/routes.ts
+
+- **:1-10** Named github-handler.ts until 2026-08-17; it also owns /health, /csp-report, /ops/mcp, /ops/backup.
+- **:374-401** CSP report sink. R2 is the record (Observability retention is 7 days; 2026-08-10 actor investigation). The old comment claiming "no rate limit in front of it" was false: `handleCspReport` rate-limits first. Bounded by size, type, shape, and one object per ray id.
