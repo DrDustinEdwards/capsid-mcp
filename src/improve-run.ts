@@ -167,7 +167,7 @@ export async function checkBudget(env: Env, now: Date): Promise<BudgetStatus> {
         (overMinutes ? `${spend.ci_minutes.toFixed(1)} of ${caps.actions_minutes_month} Actions minutes` : "") +
         (overMinutes && overUsd ? ", " : "") +
         (overUsd ? `$${spend.cost_usd.toFixed(2)} of $${caps.model_usd_month} model spend` : "") +
-        `. Raise the caps in KV ${"improve:budget"} or wait for the month to turn.`
+        `. Raise the caps in KV ${BUDGET_KEY} or wait for the month to turn.`
       : null,
   };
 }

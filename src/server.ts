@@ -330,7 +330,6 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
       inputSchema: { namespace: nsName },
     },
     async ({ namespace }) => {
-      const BUDGET = BRIEF_BUDGET;
       const doc = (ns: string, path: string) =>
         db
           .prepare("SELECT namespace, path, title, type, body, updated_at FROM documents WHERE namespace = ?1 AND path = ?2")
@@ -423,12 +422,12 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
         bodyChars(recentEpisodicsA as Row[]);
       let episodicsOut: unknown[] = recentEpisodicsA;
       let tasksOut: unknown[] = openTasksA;
-      if (total > BUDGET) {
+      if (total > BRIEF_BUDGET) {
         total -= bodyChars(recentEpisodicsA as Row[]);
         episodicsOut = toStub(recentEpisodicsA as Row[]);
         trimmed.push(`${recentEpisodicsA.length} episodic bodies`);
       }
-      if (total > BUDGET) {
+      if (total > BRIEF_BUDGET) {
         total -= bodyChars(openTasksA as Row[]);
         tasksOut = toStub(openTasksA as Row[]);
         trimmed.push(`${openTasksA.length} task bodies`);
@@ -720,7 +719,6 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
       // The lint loop reports these per namespace; this is the same check at
       // the moment the edge is created.
       let danglingTargets: string[] = [];
-      let danglingCheckFailed: string | null = null;
       if (parsedLinks && "edges" in parsedLinks && parsedLinks.edges.length > 0) {
         // This read runs AFTER the commit, so a failure here must not be reported
         // as a failed write: the document is stored. Same shape as the audit
@@ -736,8 +734,8 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
           danglingTargets = parsedLinks.edges
             .filter((_, i) => (checks[i].results?.length ?? 0) === 0)
             .map((edge) => `${edge.to_ns}/${edge.to_path}`);
-        } catch (err) {
-          danglingCheckFailed = err instanceof Error ? err.message : String(err);
+        } catch {
+          // A failed dangling-edge read cannot fail a write that already committed.
         }
       }
       // The read-back. sha256 and byte length of the body that is now stored, so

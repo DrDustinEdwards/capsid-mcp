@@ -4,10 +4,6 @@ import { dispatchWorkflow } from "./github";
 import { HOLDOUT_PREFIX, holdoutManifestKey, ROSTER, SCORER_WORKFLOW, type HoldoutManifest } from "./improve-schema";
 import type { MetricMap } from "./improve-scores";
 
-// Re-exported from improve-schema (moved there so ci_dispatch can refuse it
-// without an import cycle); existing importers keep this path.
-export { SCORER_WORKFLOW };
-
 // HMAC, not operator key: an /ops/ path would invite adding the operator-key check.
 export const SCORE_PATH = "/improve/score";
 
