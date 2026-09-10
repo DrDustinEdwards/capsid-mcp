@@ -131,8 +131,8 @@ test("THE CACHED PREFIX IS BYTE-IDENTICAL ACROSS ATTEMPTS, which is what makes i
 
 test("the prefix is large enough to be worth caching", () => {
   // Below the model's minimum cacheable prefix nothing caches, silently, and the
-  // breakpoint is decoration. This is a floor rather than an exact figure: the
-  // context is bounded elsewhere and the minimum is model-dependent.
+  // breakpoint has no effect. This is a floor rather than an exact figure: the context
+  // is bounded elsewhere and the minimum is model-dependent.
   assert.ok(CONTEXT.length > 4000, "the fixture context is too small to exercise the case this guards");
 });
 
