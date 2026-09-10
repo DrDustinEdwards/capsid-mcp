@@ -1,14 +1,6 @@
-// Server-side punctuation normalization.
-//
-// The no-em-dash rule is enforced at the Claude Code layer by a hook, but any
-// document written straight into D1 through the MCP write tool bypasses that
-// hook (claude.ai, agents, direct API). This runs in the Worker on every write
-// so no document can store an em dash regardless of which client wrote it.
-//
-// Prose separators collapse to a comma-space. Titles and markdown heading lines
-// use a spaced hyphen instead, so a doc's H1 and its title field read the same
-// ("capsid - core", not "capsid, core"). Numeric en-dash ranges (2014-2018)
-// become a plain hyphen; en dashes used as em dashes collapse like em dashes.
+// Worker-side: the hook only sees Claude Code, not claude.ai or operator writes.
+// Prose separators become ", "; titles and markdown headings become " - ".
+// Numeric en-dash ranges (2014-2018) become a hyphen.
 
 const EM_OR_BAR = /\s*[—―]\s*/g; // em dash (U+2014), horizontal bar (U+2015)
 const EN_RANGE = /(\d)\s*–\s*(\d)/g; // numeric en-dash range -> hyphen
@@ -28,16 +20,8 @@ export function normalizeDashes(text: string, mode: "prose" | "title" = "prose")
     .join("\n");
 }
 
-// NOT DEAD, AND THE SCAN THAT SAID SO COULD NOT HAVE KNOWN. This was moved to
-// test/ on 2026-09-07 as an export with no caller in src/ or test/. The holdout
-// suite imports it, and the holdout is structurally invisible to anything that
-// runs here: that is the whole point of it. The measurement, 2026-09-08: with
-// this and seedScoresDoc removed the holdout scored 28/30, and restoring both
-// took it back to 30/30 against an anchor of min 1.0.
-//
-// THE GENERAL RULE, worth more than the two functions: "no caller in src/ or
-// test/" is not "dead" in this repo. The hidden suite is a consumer no local scan
-// can see, so an export removal is checked by scoring a branch, not by grepping.
+// Not dead: the holdout suite imports this. "No caller in src/ or test/" is not
+// dead in this repo; confirm an export removal by scoring a branch, not grepping.
 export function hasWideDash(text: string): boolean {
   return /[–—―]/.test(text ?? "");
 }

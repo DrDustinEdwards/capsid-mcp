@@ -1,30 +1,9 @@
-// Generating one scoped change, and putting it on a branch.
-//
-// THIS MODULE TAKES AttemptEnv, NOT Env.
-//
-// AttemptEnv is Omit<Env, "HOLDOUT">, so the holdout bucket is not merely unused
-// here, it does not exist on the type and `env.HOLDOUT` does not compile. That is
-// the type-level third of the isolation the arc asked for. The other two thirds
-// are the separate bucket (infrastructure: attempt code holds no binding to it)
-// and test/improve-holdout.test.ts (a source scan: no file but the scorer may
-// name it). All three are needed, because a type can be cast away, a scan can be
-// evaded by an alias, and a shared bucket would defeat both.
-//
-// The CI runner reads the holdout set with its own read-only R2 token, held as a
-// repo secret. That token is never in this Worker's environment at all, so the
-// attempt path could not leak it even if it wanted to. The guard test asserts
-// that too.
-
 import type { AttemptEnv } from "./env";
 import { callModelStreaming } from "./improve-anthropic";
 import { createBranchAt, writeRepoFile } from "./github";
 import { isImproveBranch } from "./improve-schema";
 
-// The change the model is constrained to produce. Whole files rather than a
-// patch format, deliberately: a unified diff has to apply, and a diff that fails
-// to apply is a failure mode with no good recovery inside a cron job. Whole file
-// contents always apply. The cost is bandwidth on large files, and the loop is
-// told to make scoped changes, so the files it touches should be few.
+// Whole files, not a patch: a unified diff that fails to apply has no recovery in a cron job.
 const CHANGE_SCHEMA = {
   type: "object",
   properties: {
@@ -96,12 +75,8 @@ export async function proposeChange(env: AttemptEnv, input: ProposeInput): Promi
     "Do not add features nobody asked for, do not refactor around the change, and do not add error handling for cases that cannot happen.",
   ].join("\n");
 
-  // THE REPOSITORY CONTEXT IS THE CACHED PREFIX, passed separately rather than
-  // concatenated into `user`. It used to be the LAST thing in the user message,
-  // after the attempt history, which is the worst possible order for a prefix
-  // cache: the history grows by a line every attempt, so every request would have
-  // been a fresh prefix and the cache would have read zero forever. Stable content
-  // first, volatile content after the breakpoint.
+  // Cached prefix: stable content first. History used to go first, so every
+  // attempt busted the prefix cache.
   const cachedPrefix = ["## Repository context", input.context].join("\n");
 
   const user = [
@@ -162,34 +137,12 @@ export interface PushResult {
   changedPaths: string[];
 }
 
-// Put the change on its own branch, one commit per file.
-//
-// ONE COMMIT PER FILE rather than one commit for the change, because the GitHub
-// contents API commits a single file at a time and building a multi-file commit
-// means constructing a tree and a commit object by hand. That is a second write
-// path into these repos, and this repo's rules are explicit that a second write
-// path is where the invariants get lost. The cost is a slightly noisier branch
-// history on an attempt branch that is either merged as one squashed PR or
-// abandoned.
-//
-// The branch is created at an EXACT SHA, the one lineage selection picked, which
-// is frequently not the tip of any branch.
+// One contents-API commit per file, onto a branch created at an exact sha.
 export async function pushAttempt(
   env: AttemptEnv,
   input: { namespace: string; branch: string; baseSha: string; summary: string; files: Array<{ path: string; content: string }> }
 ): Promise<PushResult> {
-  // EVERY WRITE GOES TO THE ATTEMPT BRANCH, NAMED, ALWAYS (audit 2026-09-07).
-  //
-  // writeRepoFile's "direct" mode falls back to the repo's DEFAULT branch when no
-  // branch is passed, so the loop's safety here rests entirely on the branch
-  // argument being present. That is a property worth asserting rather than
-  // assuming: on the capsid namespace the default branch is this server's own
-  // master, and a dropped branch would be a production deploy rather than a bad
-  // attempt. Checked once, here, before any network call.
-  //
-  // NOT a second write path. capsid/repo-structure.md and this module's own
-  // header both rule that a second way to write a repo is where the invariants
-  // get lost, so the fix is a precondition on the one path, not a new one.
+  // direct mode falls back to the default branch if this is missing.
   if (!input.branch || !isImproveBranch(input.branch)) {
     throw new Error(
       `pushAttempt refuses: '${input.branch}' is not an improve-loop branch. An attempt is only ever committed to its own branch, never to a repo's default branch.`
@@ -214,10 +167,6 @@ export async function pushAttempt(
   return { branch: input.branch, headSha, changedPaths: input.files.map((f) => f.path) };
 }
 
-// A diff-shaped rendering of the change, for the monitor and for the archive
-// document. Not a real unified diff: the model returns whole files, so what is
-// available is the new contents, and pretending otherwise by synthesising hunk
-// headers would produce something that looks like a diff and is not one.
 export function renderChange(files: Array<{ path: string; content: string }>): string {
   return files
     .map((f) => `=== ${f.path} (${f.content.length} bytes, complete new contents) ===\n${f.content}`)

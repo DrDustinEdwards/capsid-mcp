@@ -1,21 +1,3 @@
-// The state machine's storage layer: KV for the small facts, D1 for the run.
-//
-// EVERY TRANSITION IS IDEMPOTENT AND KEYED ON THE STATUS IT EXPECTS. A tick that
-// finds a row already advanced does nothing and says so. This is not defensive
-// coding, it is the contract the tick cron needs: ticks overlap (a slow one is
-// still running when the next fires), an isolate can die between a GitHub call
-// and the row update, and a hand-run improve_run can land in the middle of both.
-// Any of those replays a transition, and a replayed transition that is not
-// idempotent double-counts an attempt or reverts a change that was kept.
-//
-// THE MECHANISM IS `UPDATE ... WHERE status = <expected> RETURNING id`, NOT
-// meta.changes. This repo's rule 7 says D1's meta.changes cannot be used to count
-// what a statement did, because the FTS5 triggers on `documents` inflate it.
-// These tables carry no triggers, so meta.changes would in fact be honest here,
-// and RETURNING is used anyway: a rule that holds only where someone remembers
-// which tables have triggers is a rule that gets broken by the next author. The
-// returned row set is unambiguous everywhere.
-
 import { sha256Hex } from "./auth";
 import type { Env } from "./env";
 import { normalizeDashes } from "./normalize";
@@ -34,9 +16,6 @@ import {
   type RunStatus,
 } from "./improve-schema";
 
-// The principal on every audit row this subsystem writes. One spelling, here,
-// because the arc asked for "full logs to audit_log with actor improve-loop" and
-// a second spelling would make that query silently incomplete.
 export const IMPROVE_ACTOR = "improve-loop";
 
 // ---- KV ---------------------------------------------------------------------

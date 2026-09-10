@@ -8,13 +8,7 @@
 import { b64urlFromBytes, b64urlEncode, base64Decode, base64Encode } from "./encoding";
 import { IMPROVE_BRANCH_PREFIX, isImproveBranch, SCORER_WORKFLOW } from "./improve-schema";
 import { DEFAULT_SCAN_FILES, DEFAULT_SCAN_RESULTS, MAX_SCAN_CAP, pathProblem, repoPathProblem } from "./limits";
-// AttemptEnv, not Env, and the narrowing is deliberate rather than cosmetic.
-//
-// Nothing in this module needs the holdout bucket, and saying so in the type is
-// what lets src/improve-attempt.ts push a branch while remaining structurally
-// unable to read the hidden suite. Env is assignable to AttemptEnv, so every
-// pre-existing caller is unaffected; what changes is that a future edit here
-// cannot quietly reach for env.HOLDOUT, because on this type it does not exist.
+// AttemptEnv, not Env: this module must not be able to name HOLDOUT.
 import type { AttemptEnv as Env } from "./env";
 
 const GH = "https://api.github.com";
@@ -28,20 +22,7 @@ const TOKEN_TTL_SECONDS = 3300; // installation tokens live 60 min; refresh a li
 const INSTALL_TTL_SECONDS = 86400; // installation id is stable
 const READ_CACHE_TTL_SECONDS = 60; // brief cache for read tools
 
-// EVERY APP_KV KEY THIS MODULE OWNS IS BUILT HERE. A call site that spells a key
-// inline is a key the invalidator below cannot find, and the read cache is exactly
-// the place where an unfindable key means serving a body that no longer exists.
-//
-// The v2 on the install and token keys is a rollout guard, not decoration. Until
-// 2026-08-17 a pinned GITHUB_APP_INSTALLATION_ID was written to gh:install:<owner>
-// for EVERY owner (see getInstallationId), so an entry written before this deploy
-// can hold one owner's installation id under another owner's name, with 24 hours
-// to run. Fixing the writer does not fix the entries it already wrote, so the
-// reader stops looking at them.
 const installKey = (owner: string) => `gh:install:v2:${owner}`;
-// v3 and keyed per owner AND repo (audit 2026-09-06, Grok MAJOR 10): tokens are
-// minted scoped to one repo below, so a cached one must never answer for a
-// sibling repo, and the v2 unscoped tokens age out rather than being reused.
 const tokenKey = (owner: string, repo: string) => `gh:token:v3:${owner}/${repo}`;
 const readKey = (path: string) => `gh:get:${path}`;
 // The trailing slash matters: without it, owner/r would also match owner/repo2.
@@ -98,19 +79,7 @@ async function appFetch(env: Env, path: string, init?: RequestInit): Promise<Res
   });
 }
 
-// RESOLVED PER OWNER AND REPO, ALWAYS (audit 2, F20).
-//
-// This used to short-circuit on a pinned GITHUB_APP_INSTALLATION_ID and write that
-// one id under gh:install:<owner> for whatever owner was asked for. One id cannot be
-// right for two owners: a namespace mapped to a second owner then minted tokens
-// against the first owner's installation and kept doing it for 24 hours, and the
-// symptom is a 404 on a repo that plainly exists.
-//
-// The pin is gone rather than kept as a hint. It was a mirror of something GitHub
-// answers authoritatively for the exact repo being asked about, one cached call per
-// owner per day, and a mirror that can disagree with the source eventually does.
-// Keeping it would have meant adding a second secret naming the owner it applies to,
-// which is more configuration for no capability.
+
 async function getInstallationId(env: Env, owner: string, repo: string): Promise<string> {
   const cached = await env.APP_KV.get(installKey(owner));
   if (cached) return cached;

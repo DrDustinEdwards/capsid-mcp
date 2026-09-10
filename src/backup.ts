@@ -9,49 +9,10 @@ const JSON_PREFIX = "backups/json/";
 const MARKDOWN_PREFIX = "backups/markdown/";
 const PUT_CONCURRENCY = 20;
 
-// OVERLAP LOCK (audit 2, F32). The cron and a hand-run POST /ops/backup are two
-// entrypoints into the same destructive routine, and nothing stopped them running
-// together: two concurrent runs each compute "stale" from their own read of
-// documents and then delete against a mirror the other is still writing.
-//
-// The lease is a KV key, and KV has no compare-and-set, so this is best-effort
-// mutual exclusion rather than a lock. It closes the window that actually exists
-// here (a human posting /ops/backup near 09:00 UTC, or twice in a minute) and does
-// NOT close a sub-millisecond simultaneous start. Said plainly because a lock that
-// is described as stronger than it is becomes the reason nobody checks.
-//
-// The TTL exists so a crashed run cannot wedge backups forever: the finally-release
-// does not run if the isolate dies. 15 minutes because that is the ceiling on a
-// scheduled invocation's wall time, so no healthy run can outlive its own lease and
-// be overtaken, and because it is far under the 24 hours to the next cron, so at
-// most one scheduled run is ever lost to a crash. (KV's minimum expirationTtl is 60
-// seconds, so the number also has a floor it must clear.)
+// KV lease is best-effort (no CAS). Export before prune. Dump TTL 90 days by age.
 const LEASE_KEY = "backup:lease";
 const LEASE_TTL_SECONDS = 900;
 
-// RETENTION ARITHMETIC. Read this before changing any number below, because the
-// four of them are a single claim and they did not add up until 2026-08-13.
-//
-// The claim, as CLAUDE.md and this file both used to state it: "pruned rows always
-// exist in a retained dump". The mechanism: the export runs FIRST and the prune
-// runs after it, so a row deleted today is in today's dump. That much was true.
-// What was missing is how long today's dump then lives. Dumps were kept 14 at a
-// time, so a version row pruned at 90 days was recoverable from R2 for 14 more
-// days and after that existed nowhere: not in D1, not in any dump. The horizons
-// were compared against each other (90 versus 180) when the number that actually
-// matters is the dump shelf life, which was 14.
-//
-// So the shelf life is what changed. Dumps are now pruned BY AGE at 90 days rather
-// than by count, which makes the guarantee legible: a row that leaves D1 is in the
-// dump taken moments earlier, and that dump is retained for 90 more days. It holds
-// for BOTH history tables regardless of their own horizons, which is why one number
-// can cover a 90-day table and a 180-day one.
-//
-// By age, not by count, deliberately. A count is only a duration if there is
-// exactly one dump per day, and there is not: /ops/backup can be called by hand any
-// number of times, and each call used to consume one of the 14 slots. Three manual
-// runs in a day silently cut the window by three days, which is the kind of erosion
-// nobody notices until they need the dump that is gone.
 const JSON_RETENTION_DAYS = 90;
 // A floor under the age rule, for the case the age rule cannot cover: if the cron
 // stops and nothing runs for months, every dump is eventually older than the cutoff

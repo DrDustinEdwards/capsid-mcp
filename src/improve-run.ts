@@ -1,33 +1,3 @@
-// The run: opening one, advancing one, finishing one.
-//
-// THE SHAPE, because it is not obvious from any single function below.
-//
-// A run is a resumable state machine in D1. Nothing here loops until a run is
-// finished, because a Cloudflare cron invocation has a wall-clock ceiling and a
-// CI scoring job takes minutes. Instead the nightly opener creates the run, and a
-// tick every five minutes advances whichever runs are not finished, ONE STEP AT A
-// TIME. Every step is idempotent and keyed on the status it expects, so a tick
-// that overlaps another tick, or an isolate that dies mid-step, costs nothing.
-//
-//   opening        -> dispatch a BASELINE scoring job, so keep/revert has
-//                     something to compare against on the very first attempt.
-//   attempting     -> propose one change, push it to a branch, dispatch the
-//                     scorer, and wait.
-//   awaiting-score -> do nothing until CI posts back, or until the 20 minute
-//                     stale guard fires and reverts that attempt.
-//   judging        -> held only inside the score ingest, which runs in an HTTP
-//                     request and therefore has time to decide.
-//   finalizing     -> open the PR for what was kept, write the run document,
-//                     run the drift gate.
-//   done | paused  -> terminal. The partial unique index frees the namespace.
-//
-// WHY A BASELINE RUN AT ALL, since it costs one extra CI job per namespace per
-// night: without it the first attempt of a namespace's first run has nothing to
-// compare against, `compare()` reports zero comparable metrics, and the attempt is
-// reverted for a reason that has nothing to do with its quality. Measuring the
-// base fresh each night also catches the metrics that move on their own (error
-// counts, latency) rather than attributing that drift to the first attempt.
-
 import { sha256Hex } from "./auth";
 import { bytesToHex } from "./encoding";
 import type { Env } from "./env";
@@ -1732,15 +1702,6 @@ ${next.join(",")}`,
   return { action: "budget", caps };
 }
 
-// READ ONLY. Every branch in here is a read: the scores document, the anchor pin,
-// the pause key, the best record, the attempt history and the repo tree. Nothing
-// is written, and test/improve-tools.test.ts asserts that by driving it against a
-// fake D1 and checking nothing was recorded.
-// ONE RESOLVER, USED BY BOTH THE REAL PATH AND THE DRY RUN, so a dry run cannot
-// report a base the real run would not pick. It fails SOFT to null: a repo lookup
-// that errors should leave selectBase to say "no base could be resolved" rather than
-// take the whole run down, because a namespace with a best record does not need the
-// default branch at all.
 async function resolveDefaultSha(env: Env, namespace: string): Promise<string | null> {
   try {
     return await defaultBranchSha(env, namespace);
@@ -1770,11 +1731,7 @@ async function dryRun(env: Env, only?: string): Promise<OpenOutcome[]> {
       continue;
     }
     const best = await readBest(env.APP_KV, namespace);
-    // THE DRY RUN RESOLVES THE BASE FOR REAL, and that is the point of it. It used to
-    // pass null here, so it reported "no base could be resolved" on every namespace
-    // and proved nothing about the resolution: the one thing a first run most needs
-    // to know is where it would branch from. Resolving is a read, so it stays inside
-    // the dry run's contract of writing nothing.
+
     const defaultSha = await resolveDefaultSha(env, namespace);
     const choice = selectBase(best, await recentAttempts(env.DB, namespace, 50), defaultSha);
     outcomes.push({

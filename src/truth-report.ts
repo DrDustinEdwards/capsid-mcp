@@ -1,29 +1,3 @@
-// THE TRUTH REPORT. One number, and the six counts it is made of.
-//
-// WHAT PROBLEM THIS IS FOR. capsid/conventions.md states the mechanism plainly:
-// "CAPSID CANNOT BE GATED. Every gate in every repo verifies DISK. So a number
-// that lives only here can be wrong forever and nothing notices." The lint loop
-// already had pieces of an answer, scattered across a gather packet nobody reads
-// end to end: count claims, dangling edges, an unconsolidated tally. What it had
-// no way to say was whether the store is getting more or less true, because
-// nothing was written down and compared.
-//
-// So `lint` gains a third mode, and it produces a DOCUMENT. The trend is the
-// point. A number in a tool response is a number one session saw; a number in
-// `<namespace>/reports/lint-<date>.md` is a series, and a series is the only form
-// in which "the canon is drifting" is visible before somebody trips over it.
-//
-// WHAT INTEGRITY IS, and it is a ratio rather than a grade. Every check below
-// counts SUBJECTS (documents, edges, claims, paths) and how many of them are in
-// good standing. Integrity is good standing over subjects, across all six checks,
-// weighted by nothing. That is deliberately crude: a weighted score invites
-// arguing with the weights instead of fixing the finding, and this number exists
-// to be looked at, not optimised.
-//
-// WHAT IT IS NOT. It does not judge whether a decision is CORRECT, whether a
-// concept doc is well written, or whether a ruling still applies. Those need a
-// reader. This counts the things a program can count without an opinion.
-
 export interface TruthFinding {
   // What was checked, and what did not pass.
   check: string;

@@ -1,49 +1,11 @@
-// The one place this Worker talks to a model.
-//
-// Only reached in improve_mode "api". In "subscription" the Worker writes a task
-// doc and a Claude Code session does the reasoning; in "off" nothing here runs at
-// all. So every function below is behind a mode check made by its caller, and the
-// key is optional in Env for exactly that reason.
-//
-// THE OFFICIAL SDK, NOT fetch. Every other outbound call in this Worker is raw
-// fetch (GitHub), and this one deliberately is not: the request surface here
-// carries model-specific rules that move (thinking config, effort, the fallback
-// beta, structured outputs), and hand-rolling it means re-deriving those rules
-// from memory every time one changes. The SDK is the contract.
-//
-// WHY NO BATCH API, recorded because "batch where possible" was the instruction
-// and this is the honest answer. The Batches API is asynchronous: results arrive
-// out of order keyed by custom_id, most batches finish within the hour and the
-// ceiling is 24. Attempts inside a run are STRICTLY SEQUENTIAL by construction:
-// attempt N+1 branches from a base chosen by lineage weighting over attempt N's
-// recorded outcome, so there is never more than one attempt in flight per
-// namespace to batch WITH. The one genuinely parallel stage is skill triage
-// across namespaces, and that is already one request scoring N skills rather than
-// N requests scoring one, which buys the same saving without a second async
-// lifecycle to carry across cron invocations. If attempts are ever made
-// independent, revisit this.
-
 import Anthropic from "@anthropic-ai/sdk";
 import type { Env } from "./env";
 import { MODEL_FOR, type ModelStage } from "./improve-schema";
 
-// THE NARROWEST ENV THIS MODULE CAN TAKE: the key and nothing else.
-//
-// It matters because src/improve-attempt.ts holds AttemptEnv (Env without the
-// holdout bucket) and has to be able to call these without a cast. A cast at that
-// boundary would erase exactly the guarantee AttemptEnv exists to provide, so the
-// callee is narrowed instead. Env and AttemptEnv both satisfy this.
 export type ModelEnv = Pick<Env, "ANTHROPIC_API_KEY">;
 
 
-// Per million tokens, from the published rates. A cache read is roughly a tenth
-// of the input rate and a cache write roughly 1.25x, applied below.
-//
-// THIS IS AN ESTIMATE AND IS LABELLED AS ONE wherever it surfaces. It is here so
-// improve_runs.cost_usd is populated with something a human can sanity-check
-// against a bill, not so it can replace the bill. A model whose price is not
-// listed is costed at the highest rate in the table rather than at zero: an
-// unknown model quietly costing nothing is how a budget gets blown.
+// Per million tokens. Estimate only. Unknown models cost at the highest listed rate, not zero.
 const RATES: Record<string, { input: number; output: number }> = {
   "claude-opus-5": { input: 5, output: 25 },
   "claude-sonnet-5": { input: 3, output: 15 },

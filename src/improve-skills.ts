@@ -1,18 +1,3 @@
-// Cross-project transfer: what one project learned, offered to the others.
-//
-// THE CLAIM BEING TESTED. When an attempt is kept in foxing, the specific diff is
-// worthless everywhere else; the reason it worked might not be. So a kept attempt
-// is abstracted into a SKILL (a short, codebase-agnostic statement of the idea),
-// and on the next run every other namespace gets the applicable skills as
-// candidate attempts, scored by its own scorer against its own anchors.
-//
-// THE SKILL IS NEVER TRUSTED. It is a candidate, not an instruction: it goes
-// through the identical attempt path (propose, monitor, score, keep or revert),
-// so a skill that does not transfer is reverted like any other bad idea and its
-// loss is recorded. Wins and losses accumulate per skill, which is what makes the
-// question "does cross-project transfer work at all" answerable rather than
-// assumed.
-
 import { callModel } from "./improve-anthropic";
 import type { Env } from "./env";
 import { skillPath } from "./improve-schema";
@@ -93,10 +78,7 @@ export async function abstractSkill(
   };
 }
 
-// Record a skill: a row in improve_skills and a document in the capsid namespace.
-// Both, in one batch, for the same reason every other write here does it: a row
-// pointing at a document that does not exist is a dangling reference nothing
-// repairs.
+// Row and document in one batch, so a skill cannot point at a missing doc.
 export async function recordSkill(
   env: Env,
   skill: { id: string; sourceNamespace: string; sourceAttempt: string; title: string; body: string }
@@ -138,12 +120,7 @@ export async function recordSkill(
   ]);
 }
 
-// The skills a namespace has not already tried, best first.
-//
-// ORDERED BY WIN RATE, with the same Laplace smoothing lineage selection uses and
-// for the same reason: a skill that is one for one should not outrank one that is
-// eight for ten. A skill sourced FROM this namespace is excluded, because
-// offering a project its own idea back is not transfer.
+// Other namespaces' skills this one has not tried, Laplace-smoothed win rate.
 export async function candidateSkills(
   db: D1Database,
   namespace: string,
@@ -169,8 +146,6 @@ export async function candidateSkills(
     .slice(0, limit);
 }
 
-// A skill's outcome in one namespace. Called once per attempt that carried a
-// skill id, when that attempt is finally kept or reverted.
 export function recordSkillOutcome(db: D1Database, skillId: string, kept: boolean): D1PreparedStatement[] {
   return [
     db

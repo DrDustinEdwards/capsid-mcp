@@ -10,10 +10,8 @@ import { buildServer } from "./server";
 import { chicagoHour } from "./improve-schema";
 import { openRuns, tickRuns } from "./improve-run";
 
-// THE CRON EXPRESSIONS, SPELLED ONCE. wrangler.jsonc declares them and this file
-// dispatches on them, so a mismatch between the two is a subsystem that never
-// runs and says nothing. test/improve-cron.test.ts derives one list from the
-// other and fails in both directions.
+// Spelled once. wrangler.jsonc declares them; test/improve-cron.test.ts derives
+// one list from the other and fails in both directions.
 export const BACKUP_CRON = "0 9 * * *";
 export const IMPROVE_OPEN_CRON = "0 8,9 * * *";
 export const IMPROVE_TICK_CRON = "*/5 * * * *";
@@ -29,28 +27,11 @@ const apiHandler = {
         status: 403,
       });
     }
-    // The admitted GitHub login is the principal for everything this session
-    // writes. isAdminUser above has already checked it against
-    // ADMIN_GITHUB_LOGIN, so this cannot be an arbitrary caller's claim.
     return createMcpHandler(buildServer(env, "write", `github:${props.login}`), { route: "/mcp" })(request, env, ctx);
   },
 };
 
-// Cache-Control is fail-closed: every response leaves with no-store unless it
-// explicitly asked for something else. Applied at the outermost exit so it
-// covers both handlers and everything workers-oauth-provider generates itself
-// (/token, /register, .well-known, its own 401s), which is the only point that
-// sees all of them.
-//
-// This exists because the consent page, which carries a CSRF cookie and a
-// single-use approval form, shipped as a 200 text/html with no cache directive
-// at all. Under heuristic caching that is a stale-token generator. Measured
-// 2026-08-09: /authorize, /health, and .well-known all returned no
-// Cache-Control; only the provider's own /mcp 401 set one, and that one is
-// preserved here rather than overwritten.
-//
-// /health is the sole opt-out: it is a liveness probe, it carries nothing
-// sensitive, and letting it cache is the point.
+// Fail-closed: every response leaves with no-store unless it asked otherwise.
 const CACHE_EXEMPT_PATHS = new Set(["/health"]);
 
 function withCacheDefault(response: Response, pathname: string): Response {
@@ -62,42 +43,11 @@ function withCacheDefault(response: Response, pathname: string): Response {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
-// clientRegistrationTTL is set to the library's own default rather than left to
-// it, and the distinction is the point. Dynamic client registration is open by
-// necessity (claude.ai's connector UI does DCR and nothing else), so this Worker
-// accepts unauthenticated writes into OAUTH_KV at /register, and the only thing
-// bounding that keyspace is an expiry. Leaving the bound to a default means it can
-// move under us on a patch bump, on a surface where "clients never expire" is a
-// one-line change upstream and invisible here.
-//
-// 90 days is safe for the real clients because every one of them re-registers on
-// reconnect: measured 2026-08-13, all 30 live registrations carry an expiry of
-// registrationDate plus 90 days, and 22 of the 24 named "Claude" were written in a
-// two-hour window on 2026-08-09 during the outage investigation rather than
-// accumulating slowly. It also retires that accumulation on its own: those 22
-// expire 2026-11-07 whether or not anything reaps them.
-//
-// This corrects the record. TASK-capsid-audit-2026-08-09.md states the client
-// registrations "carry no TTL" and projects roughly 1,460 dead keys a year. They do
-// carry one, they always have, and the projection was wrong.
 const CLIENT_REGISTRATION_TTL_SECONDS = 90 * 24 * 60 * 60;
 
-// The registration callback gets {clientMetadata, request} and NO env, and the
-// provider is constructed here at module scope where env does not exist yet. So the
-// env is stashed by the fetch handler below on its way past.
-//
-// This is safe rather than clever: every request in an isolate is handed the SAME
-// env object, so the assignment is idempotent and there is nothing per-request to
-// race. If it is somehow unset, the limiter is skipped and says so, which is the
-// same fail-open posture the limiter itself takes.
+// The DCR callback receives no env; the fetch handler stashes it.
 let currentEnv: Env | null = null;
 
-// The canonical resource identifier for this MCP server. Pinned as
-// resourceMetadata.resource so the provider binds every access-token audience to
-// this exact URL and checks it on every /mcp request (RFC 8707 / RFC 9728). Without
-// it, a token minted with no `resource` parameter is admitted unbound, which is the
-// MAJOR the 2026-09-06 audit named. A single-deployment constant, not derived,
-// because the provider is built at module scope with no request in hand.
 const CANONICAL_MCP_URL = "https://capsid.dustin-edwards.workers.dev/mcp";
 
 const provider = new OAuthProvider({
@@ -109,13 +59,7 @@ const provider = new OAuthProvider({
   clientRegistrationEndpoint: "/register",
   clientRegistrationTTL: CLIENT_REGISTRATION_TTL_SECONDS,
   resourceMetadata: { resource: CANONICAL_MCP_URL },
-  // Rate limit on the one unauthenticated write path this Worker exposes, and cap
-  // the redirect set. Returning an object rejects with the library's own error
-  // response; returning nothing allows. See src/rate-limit.ts for the measured
-  // thresholds and for why every failure path in it allows the registration.
   clientRegistrationCallback: async ({ clientMetadata, request }) => {
-    // AT MOST ONE non-loopback redirect_uri (audit 2026-09-06). The decision lives
-    // in dcrRedirectRefusal so it is testable without loading the provider.
     const redirectRefusal = dcrRedirectRefusal(clientMetadata);
     if (redirectRefusal) {
       console.error(`DCR_REDIRECT_REFUSED ${redirectRefusal.description}`);
@@ -143,8 +87,6 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     currentEnv = env;
     const pathname = new URL(request.url).pathname;
-    // The Origin allowlist runs BEFORE the provider so a refused browser request
-    // never reaches token validation. Why and what it admits: mcpOriginProblem.
     if (pathname === "/mcp") {
       const originProblem = mcpOriginProblem(request);
       if (originProblem) {
@@ -152,41 +94,17 @@ export default {
       }
     }
     const response = await provider.fetch(request, env, ctx);
-    // Both wrappers sit here, at the only point that sees every response: this
-    // handler's own, everything routes.ts returns, and everything
-    // workers-oauth-provider generates for /token, /register and .well-known.
-    // Security headers go outside Cache-Control so they are applied to the
-    // rebuilt response rather than to one that is about to be replaced.
     return withSecurityHeaders(withCacheDefault(response, pathname));
   },
-  // THREE CRON EXPRESSIONS, DISPATCHED BY WHICH ONE FIRED.
-  //
-  //   "0 9 * * *"     the daily backup. Unchanged.
-  //   "0 8,9 * * *"   the improve opener. TWO hours because Cloudflare cron
-  //                   expressions are UTC only and "03:00 America/Chicago" is
-  //                   08:00 UTC for part of the year and 09:00 for the rest. Both
-  //                   fire; chicagoHour() decides which one is really 03:00, so
-  //                   the run opens once a night year round rather than twice in
-  //                   summer and at 02:00 in winter.
-  //   "*/5 * * * *"   the improve tick. Advances any run not done or paused, one
-  //                   step per run. All day rather than only during the expected
-  //                   window, so a hand-started run advances too; a tick with
-  //                   nothing to do is two D1 reads.
-  //
-  // EVERY BRANCH IS INDIVIDUALLY GUARDED. A throwing improve tick must not stop
-  // the backup, and vice versa, so nothing here shares a try. The 09:00 UTC
-  // invocation matches all three expressions and Cloudflare delivers it once per
-  // expression, which is why the dispatch is on controller.cron rather than on
-  // the clock.
+  // Dispatch on controller.cron, not the clock: 09:00 UTC matches all three
+  // expressions and Cloudflare delivers once per expression. Open cron is two
+  // UTC hours because 03:00 America/Chicago is 08:00 or 09:00 depending on DST;
+  // chicagoHour() picks the real 03:00. Each branch is its own try so a throwing
+  // tick cannot stop the backup.
   scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
     const cron = controller.cron;
 
     if (cron === BACKUP_CRON) {
-      // A thrown runBackup used to reach nothing but the platform, which records the
-      // invocation as failed and keeps the reason to itself. The reason is the only
-      // useful part: "the cron failed" is not something anyone can act on, and nobody
-      // is watching the cron dashboard daily. Logged here, then rethrown so the
-      // invocation still counts as failed.
       ctx.waitUntil(
         runBackup(env)
           .then((result) => {
@@ -208,8 +126,6 @@ ${err.stack}` : String(err)}`);
       const now = new Date();
       const hour = chicagoHour(now);
       if (hour !== IMPROVE_OPEN_HOUR_CT) {
-        // The other of the two UTC hours. Not an error and not silent: a log line
-        // here is what proves the DST gate is working on the day it matters.
         console.log(`IMPROVE_OPEN_SKIPPED local hour is ${hour}, not ${IMPROVE_OPEN_HOUR_CT}`);
       } else {
         ctx.waitUntil(
@@ -224,9 +140,6 @@ ${err.stack}` : String(err)}`);
             .catch((err) => {
               console.error(`IMPROVE_OPEN_THREW ${err instanceof Error ? `${err.message}
 ${err.stack}` : String(err)}`);
-              // Rethrow so the invocation counts as failed, like the backup cron
-              // above. A swallowed throw records a clean run for a night the loop
-              // never opened, which is the one signal an operator has.
               throw err;
             })
         );
@@ -244,8 +157,6 @@ ${err.stack}` : String(err)}`);
           .catch((err) => {
             console.error(`IMPROVE_TICK_THREW ${err instanceof Error ? `${err.message}
 ${err.stack}` : String(err)}`);
-            // Rethrow so a throwing tick records the invocation as failed rather
-            // than as a clean run that advanced nothing.
             throw err;
           })
       );
