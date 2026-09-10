@@ -87,9 +87,8 @@ test("a MISSING canary fails, and is named as the 2026-08-17 anomaly recurring",
 });
 
 test("an UNREACHABLE store is NOT reported as data loss", async () => {
-  // The distinction the whole gate exists for. A KV blip must not read as a
-  // vanished record, or the canary cries wolf and gets ignored, which is worse
-  // than not having it.
+  // The distinction the gate exists for. A KV blip must not read as a vanished record,
+  // or the gate produces false alarms and stops being acted on.
   for (const stub of [fakeKvApi({ valueStatus: 500, value: RECORD }), fakeKvApi({ throwOnValue: "ECONNRESET" })]) {
     const result = await check(stub);
     assert.equal(result.outcome, "unreachable");
