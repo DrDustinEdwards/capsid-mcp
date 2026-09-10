@@ -45,13 +45,43 @@ function substitute(sql) {
 }
 
 /**
+ * RECURSIVE, because src/ has subdirectories. The 2026-09-10 split moved the
+ * tool, github and improve modules under src/tools, src/github and src/improve,
+ * and a flat readdirSync silently stopped seeing them: the statement count fell
+ * from over 80 to 41 and every query-plan assertion below would have been
+ * checking a third of the Worker. query-plans.test.ts has a floor assertion that
+ * caught it, which is the only reason this was a red build rather than a quiet
+ * hole. Names are returned relative to srcDir with forward slashes, so a
+ * top-level file keeps its basename (backup.ts, which the ALLOW list keys on)
+ * and a nested one is addressable as github/client.ts.
+ *
+ * @param {string} root
+ * @returns {string[]}
+ */
+function tsFilesUnder(root) {
+  /** @type {string[]} */
+  const out = [];
+  /** @param {string} rel */
+  const walk = (rel) => {
+    const dir = rel ? join(root, rel) : root;
+    for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const next = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) walk(next);
+      else if (entry.name.endsWith(".ts")) out.push(next);
+    }
+  };
+  walk("");
+  return out.sort();
+}
+
+/**
  * @param {string} srcDir
  * @returns {{ statements: { file: string; sql: string }[]; skipped: { file: string; sql: string }[] }}
  */
 export function extractStatements(srcDir) {
   const statements = [];
   const skipped = [];
-  for (const name of readdirSync(srcDir).filter((f) => f.endsWith(".ts")).sort()) {
+  for (const name of tsFilesUnder(srcDir)) {
     const text = readFileSync(join(srcDir, name), "utf8");
     // `.prepare(` followed by a string or template literal, up to its closing
     // quote. Both quote styles and backticks, and a leading newline for the
