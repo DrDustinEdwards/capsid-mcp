@@ -184,3 +184,7 @@ Rulings, measurements, and refusal reasons that were recorded only in Worker com
 ## src/improve-scores.ts
 
 - **:1-24** Referee; no model. Anchors are checksummed and may never be edited or regressed by the loop. Secondary is the optimisation surface and may be reweighted without breaking the pin. Checksum covers the anchor section, not the whole file: covering the file would refuse every legitimate secondary-weight edit at 03:00.
+
+## src/improve-state.ts
+
+- **:1-17** Every transition is `UPDATE ... WHERE status = <expected> RETURNING id`, not `meta.changes`. These tables have no FTS triggers so meta.changes would be honest here; RETURNING is used anyway so the rule does not depend on remembering which tables have triggers.
