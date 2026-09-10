@@ -3,10 +3,13 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { improveControl } from "../src/improve-run.ts";
+import { AUTHORITATIVE } from "../src/counts.ts";
 import { sha256Hex } from "../src/auth.ts";
 import { operatorIdentity } from "../src/auth.ts";
 import { fakeD1, fakeEnv, fakeKv } from "./fakes.ts";
 import { allSourceText, sourceFile, sourceFiles } from "./source-files.ts";
+
+const CAPSID = AUTHORITATIVE.capsid;
 
 // THE PUBLIC DOCS, AND THE ONE THING THAT MUST NEVER BE IN THEM.
 //
@@ -179,11 +182,12 @@ test("two mints are different keys", async () => {
 });
 
 test("the mint is a control action on the existing tool, not a new tool", () => {
-  // Hard rule 1: the surface is 30 tools and stays small. A key mint is a control
-  // verb on a tool that already has four of them, and adding a 31st tool for it
-  // would need its own ruling. Counted across src/ so a split of registerTool
-  // cannot hide a 31st (the pin lives in counts.test.ts too).
+  // Hard rule 1: the surface stays small, and every addition is a ruled exception
+  // recorded in capsid/decisions.md. A key mint is a control verb on a tool that
+  // already has four of them, and it did NOT take a tool of its own. Counted across
+  // src/ against counts.ts, so a split of registerTool cannot hide one and the
+  // number moves in one place when a ruling adds a tool.
   const registered = sourceFiles().reduce((n, f) => n + (f.text.match(/server\.registerTool\(/g) ?? []).length, 0);
-  assert.equal(registered, 30, `the surface moved to ${registered} tools`);
+  assert.equal(registered, CAPSID.tools, `the surface moved to ${registered} tools`);
   assert.match(allSourceText(), /"mint_operator_key"/, "the action must be reachable from the tool schema");
 });

@@ -49,6 +49,11 @@ export const TOOL_HINTS: Record<string, ToolHints> = {
 
   improve_status: read(),
   improve_run: destructive(),
+
+  // The work queue. complete, fail and block overwrite result_summary and move a
+  // job out of claimed, and the mirrored document is rewritten on every
+  // transition, so the tool can overwrite existing state.
+  jobs: destructive(),
 };
 
 // Object.hasOwn, not a bare index: "constructor" is not a missing tool.
