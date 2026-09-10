@@ -1,48 +1,41 @@
-// The restore rehearsal (session 3 of the off-account backup arc). Takes a
-// downloaded dump run directory (one <table>.json per real table, the shape
-// src/backup.ts writes) and proves it actually restores: migrations build a
-// fresh SQLite database, every table's rows go in with documents FIRST so the
-// FTS5 triggers rebuild the index, and the result is verified. A backup that
-// has never been restored is a hope, not a backup; this makes the restore a
-// scheduled, failing-loudly CI job instead of a procedure first exercised
-// during an incident.
+// The restore rehearsal (session 3 of the off-account backup arc). Takes a downloaded
+// dump run directory (one <table>.json per real table, the shape src/backup.ts writes)
+// and proves it restores: migrations build a fresh SQLite database, every table's rows
+// go in with documents FIRST so the FTS5 triggers rebuild the index, and the result is
+// verified.
 //
-// Node's bundled SQLite (node:sqlite, stable on the .nvmrc version) carries
-// FTS5, so the rehearsal runs the REAL triggers from migrations/0001_init.sql,
-// not a simulation. Foreign key enforcement is off, deliberately: the restore
-// runbook inserts table by table in dump order after documents, exactly as a
-// real per-table D1 import does, and FK ordering is not what this rehearsal
-// exists to prove.
+// Node's bundled SQLite (node:sqlite, stable on the .nvmrc version) carries FTS5, so the
+// rehearsal runs the REAL triggers from migrations/0001_init.sql. Foreign key
+// enforcement is off, deliberately: the runbook inserts table by table in dump order
+// after documents, exactly as a real per-table D1 import does.
 //
 // What is verified, each failing with a named reason:
-// - The dump directory holds EXACTLY one JSON per migrations-derived table,
-//   both directions: a missing table file and an unexpected extra file both
-//   fail (the backup.test.ts discipline, applied to the artifact).
-// - Each file's own "table" field matches its filename, so a copy shuffle
-//   cannot restore rows into the wrong table.
+// - The dump directory holds EXACTLY one JSON per migrations-derived table, both
+//   directions: a missing table file and an unexpected extra file both fail.
+// - Each file's own "table" field matches its filename, so a copy shuffle cannot restore
+//   rows into the wrong table.
 // - Every row inserts, and the restored count equals the dump's count.
-// - documents is non-empty. A zero-document restore passes every other check
-//   while proving nothing, which is the vacuous-pass failure mode.
-// - The FTS index agrees with documents via the _docsize shadow table.
-//   COUNT(*) on an external-content FTS5 table reads through to the content
-//   table and cannot detect drift (measured 2026-07-27, capsid/core.md).
+// - documents is non-empty. A zero-document restore passes every other check while
+//   proving nothing.
+// - The FTS index agrees with documents via the _docsize shadow table. COUNT(*) on an
+//   external-content FTS5 table reads through to the content table and cannot detect
+//   drift (measured 2026-07-27, capsid/core.md).
 // - A MATCH probe on a word taken from a restored document returns it.
 // - The two SIDECARS are present and are exactly the two expected (_kv.json,
-//   _holdout-manifests.json). They are not tables and restore into no table; a
-//   missing one means the loop's memory is not in the backup.
-// - CROSS-TABLE CONSISTENCY (residual 4). The dump is one D1 batch, so it is one
-//   transaction and the table objects must agree with each other. What is checked
-//   is the TEARING SIGNATURE, not plain referential integrity: measured live on
-//   2026-09-08, the real store holds 205 document_versions rows and 2,060
-//   audit_log rows whose document is not in the store at all, every one of them
-//   explained by a deletion, by lint finalize rewriting a path, or by the
-//   recova-to-foxhound namespace rename. Failing on those would be red on every
-//   good dump forever. So the orphans are COUNTED AND REPORTED, and what FAILS is
-//   the pair of shapes a torn read produces and a deletion cannot: a version row
-//   whose document_id is above the highest id in the documents object with no
-//   delete or move recorded for its path, and a `write` audit row newer than
-//   every row in the documents object naming a path that is not there. Both
-//   measured zero against the live store before they were written.
+//   _holdout-manifests.json). They restore into no table; a missing one means the loop's
+//   memory is not in the backup.
+// - CROSS-TABLE CONSISTENCY (residual 4). The dump is one D1 batch, so the table objects
+//   must agree with each other. What is checked is the TEARING SIGNATURE, not plain
+//   referential integrity: measured live on 2026-09-08, the real store holds 205
+//   document_versions rows and 2,060 audit_log rows whose document is not in the store,
+//   every one explained by a deletion, by lint finalize rewriting a path, or by the
+//   recova-to-foxhound namespace rename. Failing on those would be red on every good
+//   dump forever. Orphans are COUNTED AND REPORTED; what FAILS is the pair of shapes a
+//   torn read produces and a deletion cannot: a version row whose document_id is above
+//   the highest id in the documents object with no delete or move recorded for its path,
+//   and a `write` audit row newer than every row in the documents object naming a path
+//   that is not there. Both measured zero against the live store before they were
+//   written.
 
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -75,9 +68,9 @@ export function rehearse(dumpDir, migrationsDir) {
   if (tables.length === 0) fail(`no tables derived from ${migrationsDir}; the rehearsal read nothing`);
 
   const files = readdirSync(dumpDir).filter((f) => f.endsWith(".json"));
-  // Sidecars are underscore-prefixed so they can never collide with a table name.
-  // Checked in BOTH directions: a missing one is a dump that lost the loop's
-  // memory, an unexpected one is a file nothing here knows how to verify.
+  // Sidecars are underscore-prefixed so they cannot collide with a table name. Checked in
+  // BOTH directions: a missing one is a dump that lost the loop's memory, an unexpected
+  // one is a file nothing here knows how to verify.
   const sidecars = files.filter((f) => f.startsWith("_")).sort();
   const missingSidecars = SIDECARS.filter((f) => !sidecars.includes(f));
   const unknownSidecars = sidecars.filter((f) => !SIDECARS.includes(f));
