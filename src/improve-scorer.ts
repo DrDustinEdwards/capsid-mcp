@@ -1,7 +1,6 @@
 import { hmacHex, timingSafeEqual } from "./auth";
 import type { Env } from "./env";
-import { dispatchWorkflow } from "./github";
-import { HOLDOUT_PREFIX, holdoutManifestKey, ROSTER, SCORER_WORKFLOW, type HoldoutManifest } from "./improve-schema";
+import { HOLDOUT_PREFIX, holdoutManifestKey, ROSTER, type HoldoutManifest } from "./improve-schema";
 import type { MetricMap } from "./improve-scores";
 
 // HMAC, not operator key: an /ops/ path would invite adding the operator-key check.
@@ -561,21 +560,4 @@ export async function verifyBackupCredentialRequest(
     badSig: "backup credential signature does not verify",
     ageNoun: "request",
   });
-}
-
-// ---- dispatch ---------------------------------------------------------------
-
-// Ask the target repo's CI to score a branch. The workflow file is resolved on
-// the DEFAULT branch, never on the attempt branch; see dispatchWorkflow for why.
-export async function dispatchScorer(
-  env: Env,
-  namespace: string,
-  inputs: { branch: string; run_id: string; attempt_id: string }
-): Promise<{ repo: string; workflow: string; ref: string }> {
-  const result = await dispatchWorkflow(env, namespace, SCORER_WORKFLOW, {
-    branch: inputs.branch,
-    run_id: inputs.run_id,
-    attempt_id: inputs.attempt_id,
-  });
-  return { repo: result.repo, workflow: result.workflow, ref: result.ref };
 }

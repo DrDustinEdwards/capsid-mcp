@@ -3,7 +3,9 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { APPROVAL_MAX_AGE_SECONDS, approvalTag } from "../src/approval.ts";
-import { callerIp, checkRegistrationRate, dcrRedirectRefusal, isLoopbackRedirect, MAX_PER_DAY, MAX_PER_HOUR, type RateVerdict } from "../src/rate-limit.ts";
+import { callerIp, checkRate, dcrRedirectRefusal, isLoopbackRedirect, MAX_PER_DAY, MAX_PER_HOUR, REGISTRATION_LIMIT, type RateVerdict } from "../src/rate-limit.ts";
+
+const checkRegistrationRate = (kv: KVNamespace | undefined, ip: string, now: Date) => checkRate(kv, ip, now, REGISTRATION_LIMIT);
 import { fakeKv } from "./fakes.ts";
 
 const src = (name: string) => readFileSync(join(import.meta.dirname, "..", "src", name), "utf8");
@@ -117,7 +119,7 @@ test("callerIp reads CF-Connecting-IP and falls back off the edge", () => {
 test("the rejection is wired to the library's registration callback", () => {
   const index = src("index.ts");
   assert.match(index, /clientRegistrationCallback: async/);
-  assert.match(index, /checkRegistrationRate\(env\.APP_KV/);
+  assert.match(index, /checkRate\(env\.APP_KV, ip, new Date\(\), REGISTRATION_LIMIT\)/);
   assert.match(index, /status: 429/);
   // Fail open at the wiring layer too: no env must not mean no registration.
   assert.match(index, /if \(!env\) \{[\s\S]*?return;/);

@@ -4,12 +4,15 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   CSP_REPORT_LIMIT,
-  checkCspReportRate,
-  checkRegistrationRate,
+  checkRate,
   MAX_REPORTS_PER_DAY,
   MAX_REPORTS_PER_HOUR,
   rateLimitedResponse,
+  REGISTRATION_LIMIT,
 } from "../src/rate-limit.ts";
+
+const checkCspReportRate = (kv: KVNamespace | undefined, ip: string, now: Date) => checkRate(kv, ip, now, CSP_REPORT_LIMIT);
+const checkRegistrationRate = (kv: KVNamespace | undefined, ip: string, now: Date) => checkRate(kv, ip, now, REGISTRATION_LIMIT);
 import { fakeKv } from "./fakes.ts";
 
 // AN APP-LEVEL RATE LIMIT ON /csp-report (work queue, corrected 2026-08-17).
@@ -190,7 +193,7 @@ test("the handler checks the limit BEFORE it reads the body", async () => {
   // read and parse a 16KB body first, and must not reach the R2 write at all.
   const routes = read("../src/routes.ts");
   const handler = routes.slice(routes.indexOf("async function handleCspReport"), routes.indexOf("export const defaultHandler"));
-  const limitAt = handler.indexOf("checkCspReportRate");
+  const limitAt = handler.indexOf("checkRate");
   const bodyAt = handler.indexOf("await request.text()");
   const putAt = handler.indexOf("env.MEDIA.put");
   assert.ok(limitAt !== -1, "handleCspReport does not rate limit at all");

@@ -1,7 +1,7 @@
 import { sha256Hex } from "./auth";
 import { bytesToHex } from "./encoding";
 import type { Env } from "./env";
-import { defaultBranchSha, listRepoTree, openPr, resolveRepo } from "./github";
+import { defaultBranchSha, dispatchWorkflow, listRepoTree, openPr, resolveRepo } from "./github";
 import { proposeChange, pushAttempt, renderChange } from "./improve-attempt";
 import { anchorDriftVerdict, driftVerdict, monitorAttempt, pathMonitor } from "./improve-gates";
 import { runMetaLoop } from "./improve-meta";
@@ -13,7 +13,7 @@ import {
   type MetricMap,
   type ScoresDoc,
 } from "./improve-scores";
-import { checkHoldout, dispatchScorer, readHoldoutManifest, type ScoreReport } from "./improve-scorer";
+import { checkHoldout, readHoldoutManifest, type ScoreReport } from "./improve-scorer";
 import {
   archivePath,
   attemptId,
@@ -34,6 +34,7 @@ import {
   RUN_PROMPT_PATH,
   SCORES_PATH,
   SCORE_TIMEOUT_MS,
+  SCORER_WORKFLOW,
   BUDGET_KEY,
   IMPROVE_MODES,
   MODE_KEY,
@@ -470,7 +471,7 @@ async function dispatchBaseline(env: Env, run: RunRow): Promise<TickOutcome> {
   // An empty push: the branch is created at the base commit and nothing is
   // written to it, which is exactly what "measure the base" means.
   await pushAttempt(env, { namespace: run.namespace, branch, baseSha: run.base_sha, summary: "baseline", files: [] });
-  await dispatchScorer(env, run.namespace, { branch, run_id: run.id, attempt_id: id });
+  await dispatchWorkflow(env, run.namespace, SCORER_WORKFLOW, { branch, run_id: run.id, attempt_id: id });
   return { runId: run.id, namespace: run.namespace, from: "opening", to: "awaiting-score", note: `baseline dispatched on ${branch}` };
 }
 
@@ -572,7 +573,7 @@ async function startAttempt(env: Env, run: RunRow, now: Date): Promise<TickOutco
 
   // THE DETERMINISTIC PATH MONITOR RUNS BEFORE THE BRANCH IS PUSHED (audit
   // 2026-09-06). It used to run only at ingest, after pushAttempt and
-  // dispatchScorer had already put the attempt's files on a branch and started CI
+  // dispatchWorkflow had already put the attempt's files on a branch and started CI
   // on them: a change that added a package.json postinstall, or a new
   // .github/workflows/*.yml with `on: push`, executed in CI (secrets in scope)
   // before the monitor ever flagged it, and a revert cannot un-run that. Checking
@@ -638,7 +639,7 @@ async function startAttempt(env: Env, run: RunRow, now: Date): Promise<TickOutco
     })),
   ]);
 
-  await dispatchScorer(env, run.namespace, { branch, run_id: run.id, attempt_id: id });
+  await dispatchWorkflow(env, run.namespace, SCORER_WORKFLOW, { branch, run_id: run.id, attempt_id: id });
   // The status was claimed at the top; this books the attempt and the spend, and
   // refreshes advanced_at so the stale guard measures from the dispatch.
   await advanceRun(env.DB, {

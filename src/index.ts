@@ -2,7 +2,7 @@ import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { createMcpHandler } from "agents/mcp";
 import { isAdminUser } from "./auth";
 import { runBackup } from "./backup";
-import { callerIp, checkRegistrationRate, dcrRedirectRefusal } from "./rate-limit";
+import { callerIp, checkRate, dcrRedirectRefusal, REGISTRATION_LIMIT } from "./rate-limit";
 import { defaultHandler } from "./routes";
 import { mcpOriginProblem, withSecurityHeaders } from "./headers";
 import type { Env, Props } from "./env";
@@ -72,7 +72,7 @@ const provider = new OAuthProvider({
       return;
     }
     const ip = callerIp(request);
-    const verdict = await checkRegistrationRate(env.APP_KV, ip, new Date());
+    const verdict = await checkRate(env.APP_KV, ip, new Date(), REGISTRATION_LIMIT);
     if (verdict.allowed) return;
     console.error(`DCR_RATE_LIMITED ${ip} hit the ${verdict.window} limit (${verdict.count} of ${verdict.limit})`);
     return {

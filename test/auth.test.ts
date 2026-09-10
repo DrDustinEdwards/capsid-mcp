@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isAdminUser, operatorGrant, sha256Hex, operatorIdentity, timingSafeEqual } from "../src/auth.ts";
+import { isAdminUser, sha256Hex, operatorIdentity, timingSafeEqual } from "../src/auth.ts";
 import { sourceFiles } from "./source-files.ts";
+
+async function grantOf(request: Request, env: { OPERATOR_KEY_HASH?: string }) {
+  return (await operatorIdentity(request, env)).grant;
+}
 
 const req = (key?: string) =>
   new Request("https://capsid.example/ops/mcp", {
@@ -10,52 +14,52 @@ const req = (key?: string) =>
 
 test("single write key still grants write (backwards compatible)", async () => {
   const env = { OPERATOR_KEY_HASH: await sha256Hex("full-key") };
-  assert.equal(await operatorGrant(req("full-key"), env), "write");
+  assert.equal(await grantOf(req("full-key"), env), "write");
 });
 
 test("ro: entry grants read only", async () => {
   const env = { OPERATOR_KEY_HASH: `ro:${await sha256Hex("agent-key")}` };
-  assert.equal(await operatorGrant(req("agent-key"), env), "read");
+  assert.equal(await grantOf(req("agent-key"), env), "read");
 });
 
 test("comma-separated list resolves each key to its own grant", async () => {
   const env = {
     OPERATOR_KEY_HASH: `${await sha256Hex("full-key")}, ro:${await sha256Hex("agent-key")}`,
   };
-  assert.equal(await operatorGrant(req("full-key"), env), "write");
-  assert.equal(await operatorGrant(req("agent-key"), env), "read");
+  assert.equal(await grantOf(req("full-key"), env), "write");
+  assert.equal(await grantOf(req("agent-key"), env), "read");
 });
 
 test("removing a hash revokes that key without touching the others", async () => {
   const env = { OPERATOR_KEY_HASH: await sha256Hex("full-key") };
-  assert.equal(await operatorGrant(req("agent-key"), env), null);
-  assert.equal(await operatorGrant(req("full-key"), env), "write");
+  assert.equal(await grantOf(req("agent-key"), env), null);
+  assert.equal(await grantOf(req("full-key"), env), "write");
 });
 
 test("uppercase hashes and stray whitespace in the secret still match", async () => {
   const env = {
     OPERATOR_KEY_HASH: ` ${(await sha256Hex("full-key")).toUpperCase()} ,, RO:${await sha256Hex("agent-key")} `,
   };
-  assert.equal(await operatorGrant(req("full-key"), env), "write");
-  assert.equal(await operatorGrant(req("agent-key"), env), "read");
+  assert.equal(await grantOf(req("full-key"), env), "write");
+  assert.equal(await grantOf(req("agent-key"), env), "read");
 });
 
 test("missing header, non-bearer auth, or empty secret all deny", async () => {
   const env = { OPERATOR_KEY_HASH: await sha256Hex("full-key") };
-  assert.equal(await operatorGrant(req(), env), null);
+  assert.equal(await grantOf(req(), env), null);
   assert.equal(
-    await operatorGrant(
+    await grantOf(
       new Request("https://capsid.example/ops/mcp", { headers: { Authorization: "Basic abc" } }),
       env
     ),
     null
   );
-  assert.equal(await operatorGrant(req("full-key"), { OPERATOR_KEY_HASH: "" }), null);
+  assert.equal(await grantOf(req("full-key"), { OPERATOR_KEY_HASH: "" }), null);
 });
 
 test("a raw key pasted as the secret never matches (hashes only)", async () => {
   const env = { OPERATOR_KEY_HASH: "full-key" };
-  assert.equal(await operatorGrant(req("full-key"), env), null);
+  assert.equal(await grantOf(req("full-key"), env), null);
 });
 
 test("isAdminUser matches login case-insensitively and numeric ids exactly", () => {
@@ -103,10 +107,10 @@ test("a rejected key yields no grant and no fingerprint", async () => {
   assert.deepEqual(bad, { grant: null, fingerprint: null });
 });
 
-test("operatorGrant still answers exactly as before", async () => {
+test("operatorIdentity.grant still answers exactly as before", async () => {
   const env = { OPERATOR_KEY_HASH: await sha256Hex("write-key") };
-  assert.equal(await operatorGrant(keyRequest("write-key"), env), "write");
-  assert.equal(await operatorGrant(keyRequest("nope"), env), null);
+  assert.equal(await grantOf(keyRequest("write-key"), env), "write");
+  assert.equal(await grantOf(keyRequest("nope"), env), null);
 });
 
 // ---- timingSafeEqual, moved here from limits.test.ts (quality audit 6.6) ------

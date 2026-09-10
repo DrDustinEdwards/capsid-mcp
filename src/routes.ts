@@ -1,11 +1,11 @@
 import type { AuthRequest } from "@cloudflare/workers-oauth-provider";
 import { createMcpHandler } from "agents/mcp";
 import { APPROVAL_MAX_AGE_SECONDS, approvalTag } from "./approval";
-import { hmacHex, isAdminUser, operatorGrant, operatorIdentity, sha256Hex, timingSafeEqual } from "./auth";
+import { hmacHex, isAdminUser, operatorIdentity, sha256Hex, timingSafeEqual } from "./auth";
 import { runBackup } from "./backup";
 import { b64urlDecode, b64urlEncode } from "./encoding";
 import { REPORT_PATH, REPORT_PREFIX } from "./headers";
-import { callerIp, checkCspReportRate, rateLimitedResponse } from "./rate-limit";
+import { callerIp, checkRate, CSP_REPORT_LIMIT, rateLimitedResponse } from "./rate-limit";
 import type { Env } from "./env";
 import { buildServer } from "./server";
 import { ingestScore } from "./improve-run";
@@ -359,7 +359,7 @@ async function handleOperatorMcp(request: Request, env: Env, ctx: ExecutionConte
 }
 
 async function handleBackup(request: Request, env: Env): Promise<Response> {
-  if ((await operatorGrant(request, env)) !== "write") {
+  if ((await operatorIdentity(request, env)).grant !== "write") {
     return new Response("unauthorized: write-grant operator key required", {
       status: 401,
       headers: { "WWW-Authenticate": 'Bearer realm="capsid-operator"' },
@@ -421,7 +421,7 @@ async function handleCspReport(request: Request, env: Env): Promise<Response> {
   // The refusal is a 429 rather than this endpoint's usual 204; the reasoning is
   // stated once, on rateLimitedResponse.
   const ip = callerIp(request);
-  const rate = await checkCspReportRate(env.APP_KV, ip, new Date());
+  const rate = await checkRate(env.APP_KV, ip, new Date(), CSP_REPORT_LIMIT);
   if (!rate.allowed) {
     console.error(`CSP_REPORT_RATE_LIMITED ${ip} hit the ${rate.window} limit (${rate.count} of ${rate.limit})`);
     return rateLimitedResponse(rate);
