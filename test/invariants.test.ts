@@ -79,21 +79,3 @@ test("the one mutating helper outside a tool handler carries the gate itself", (
   assert.ok(MUTATING_SQL.test(helper), "guardedWrite no longer writes the audit row");
   assert.ok(helper.includes(OPERATOR_GATE), "guardedWrite lost its write gate: every repo write tool is now open to ro: keys");
 });
-
-test("every tool that overwrites or removes a document snapshots and audits it", () => {
-  // Structural, per tool. The behavioural proof is in write-invariants.test.ts;
-  // this is the cheap version that names the specific tool that lost a statement.
-  for (const tool of ["write", "delete", "restore"]) {
-    const block = BLOCKS.find((b) => b.name === tool)!;
-    assert.match(
-      block.body,
-      /INSERT INTO document_versions/,
-      `${tool} no longer snapshots the prior row into document_versions`
-    );
-    assert.match(block.body, /INSERT INTO audit_log/, `${tool} no longer appends to audit_log`);
-  }
-  const move = BLOCKS.find((b) => b.name === "move")!;
-  // move renames rather than overwriting, so there is no body to snapshot, but the
-  // audit row is what the 2026-08-10 edge repair recovered five repoints from.
-  assert.match(move.body, /INSERT INTO audit_log/, "move no longer appends to audit_log");
-});

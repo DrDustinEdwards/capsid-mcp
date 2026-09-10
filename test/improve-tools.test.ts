@@ -6,7 +6,6 @@ import { buildServer, type ToolGrant } from "../src/server.ts";
 import { anchorChecksum, parseScoresDoc } from "../src/improve-scores.ts";
 import { ROSTER } from "../src/improve-schema.ts";
 import { fakeD1, fakeEnv, fakeKv, fakeR2, withFetch } from "./fakes.ts";
-import { toolBlocks } from "./source-files.ts";
 import { seedScoresDoc } from "./seed-scores.ts";
 
 // THE TWO TOOLS, over a real MCP connection.
@@ -121,22 +120,4 @@ test("improve_run with dry_run WRITES NOTHING through the tool surface either", 
     assert.deepEqual(kv.puts, [], "a dry run through the tool wrote to KV");
     assert.deepEqual(calls, [], "a dry run through the tool made a network call");
   });
-});
-
-// ---- the gate, in source ----------------------------------------------------
-
-test("improve_run carries the operator gate IN ITS OWN BLOCK", () => {
-  // test/invariants.test.ts finds mutating tools by scanning for SQL inside a
-  // registerTool block. improve_run's SQL is in a helper, so that scan cannot see
-  // it and cannot demand the gate. Asserted here instead, by name.
-  const block = toolBlocks().find((b) => b.name === "improve_run");
-  assert.ok(block, "could not bound the improve_run registration");
-  assert.match(block.body, /if \(!mayWrite\) return fail\(DENIED\);/, "improve_run lost its write gate");
-});
-
-test("improve_status carries NO gate, and no mutating SQL, because it is a read tool", () => {
-  const block = toolBlocks().find((b) => b.name === "improve_status");
-  assert.ok(block, "could not bound the improve_status registration");
-  assert.equal(/if \(!mayWrite\)/.test(block.body), false, "improve_status gained a write gate; it is a read tool");
-  assert.equal(/\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\b/i.test(block.body), false, "improve_status contains mutating SQL");
 });

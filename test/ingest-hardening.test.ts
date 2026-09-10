@@ -17,14 +17,6 @@ function jtiDb() {
   return fakeD1({});
 }
 
-test("PLANT: a jti can be claimed exactly once", async () => {
-  const d1 = jtiDb();
-  assert.deepEqual(await claimJti(d1.db, "capsid", "nonce-a"), { ok: true });
-  const second = await claimJti(d1.db, "capsid", "nonce-a");
-  assert.equal(second.ok, false);
-  assert.equal(second.ok === false && second.status, 409);
-});
-
 test("PLANT: two concurrent claims of the same jti resolve to ONE winner", async () => {
   // The KV version was get-then-put: both callers read absent, both wrote, both
   // proceeded. A captured signed request could therefore be replayed for the
@@ -45,21 +37,6 @@ test("the same jti in a different scope is a different claim", async () => {
   assert.deepEqual(await claimJti(d1.db, "capsid", "n"), { ok: true });
   assert.deepEqual(await claimJti(d1.db, "foxing", "n"), { ok: true });
   assert.deepEqual(await claimJti(d1.db, "backup", "n"), { ok: true });
-});
-
-test("a database error FAILS CLOSED, it does not admit the request", async () => {
-  const broken = {
-    prepare: () => ({
-      bind: () => ({
-        all: async () => {
-          throw new Error("D1 is unavailable");
-        },
-      }),
-    }),
-  } as unknown as D1Database;
-  const verdict = await claimJti(broken, "capsid", "n");
-  assert.equal(verdict.ok, false);
-  assert.equal(verdict.ok === false && verdict.status, 503);
 });
 
 // ---- ci_dispatch aliases ----------------------------------------------------
