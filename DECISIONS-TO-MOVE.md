@@ -126,3 +126,10 @@ Rulings, measurements, and refusal reasons that were recorded only in Worker com
 ## src/improve-skills.ts
 
 - **:1-14** A kept attempt's specific diff is worthless elsewhere; the reason it worked might not be. A skill is a candidate, not an instruction: it goes through the identical attempt path, so a skill that does not transfer is reverted. Wins and losses accumulate per skill so "does cross-project transfer work" is answerable. Candidate order is Laplace-smoothed win rate; a skill sourced from this namespace is excluded.
+
+## src/improve-attempt.ts
+
+- **:1-16** This module takes `AttemptEnv`, not `Env`. The CI runner reads holdout with its own read-only R2 token held as a repo secret, never in this Worker's environment.
+- **:23-27** Whole files rather than a patch: a unified diff that fails to apply has no recovery inside a cron job.
+- **:99-104** Repository context is the cached prefix, passed separately. It used to be last in the user message, after history, so every attempt busted the prefix cache.
+- **:165-192** One contents-API commit per file: building a multi-file commit means constructing a tree by hand, which is a second write path. `writeRepoFile` direct mode falls back to the default branch if no branch is passed; on capsid that is this server's master, so a dropped branch is a production deploy. Precondition, not a second path. Audit 2026-09-07.
