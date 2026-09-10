@@ -31,3 +31,9 @@ Rulings, measurements, and refusal reasons that were recorded only in Worker com
 - **:10-17** `hmacHex` lived privately in `src/routes.ts` until the improve arc. Moved rather than copied; routes.ts imports it and its call sites are unchanged, which is what keeps the `timingSafeEqual` guards in `test/source-conventions.test.ts` matching.
 - **:30-39** Constant-time compare, audit 2 F1. Practical risk of short-circuiting `===` over TLS to a Cloudflare edge was low; the reason to fix it anyway is that "low risk" has to be re-made every time someone reads the line. Length check leaks length only (constant for a digest).
 - **:54-61** Fingerprint is a prefix, not the whole digest: the full digest is the stored `OPERATOR_KEY_HASH` verifier, so writing it into `audit_log` would copy the verifier into the database the audit log is meant to hold to account.
+
+## src/health.ts
+
+- **:1-5** Lives in its own module because `src/routes.ts` imports the Agents SDK, which pulls in `cloudflare:workers` and cannot load under `node --test` (same reason `rate-limit.ts` lives apart). Schema version and backup age have branches a source scan cannot check.
+- **:7-12** Deploy provenance is stamped at deploy time by `scripts/deploy.mjs`. `dirty=true` means the deployed bytes are not a clean commit. A Worker whose DB binding is missing or pointed at an empty database starts fine and answers `/health` ok while every read tool errors, which is why the store is probed.
+- **:14-24** Two store probes fail separately: `d1` is `SELECT 1`; `fts` is a MATCH that must return one pinned document. `schema_version` and `backup` (added 2026-09-07) are informational and do not degrade health: health is whether the store answers. Backup warning threshold is 26h (daily cron plus 2h grace).
