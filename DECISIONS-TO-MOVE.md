@@ -24,3 +24,10 @@ Rulings, measurements, and refusal reasons that were recorded only in Worker com
 
 - **:1-11** Types `session` and `handoff` were invisible to gather and to the counts, which is why the type list is validated at write. Then 22 recova episodics stored as status `active` went invisible the same way, because unconsolidated count and gather filtered on `status = 'published'`. Those queries are archive-path-only now: the `archive/` prefix is the only thing that takes a doc out of the lint loop.
 - **:18-30** Status `closed` added 2026-08-12 (batch-two item 5). Task closure had been unrepresentable, so it was written into bodies as prose and brief returned every non-archived task forever. Ruled a status value rather than a new column; TEXT column, no CHECK, no migration. Closure is going-forward only: backfilling would invent an editorial judgement about work nobody reviewed.
+
+## src/auth.ts
+
+- **:1-2** Kept free of MCP and Worker imports so the grant logic is unit-testable under node.
+- **:10-17** `hmacHex` lived privately in `src/routes.ts` until the improve arc. Moved rather than copied; routes.ts imports it and its call sites are unchanged, which is what keeps the `timingSafeEqual` guards in `test/source-conventions.test.ts` matching.
+- **:30-39** Constant-time compare, audit 2 F1. Practical risk of short-circuiting `===` over TLS to a Cloudflare edge was low; the reason to fix it anyway is that "low risk" has to be re-made every time someone reads the line. Length check leaks length only (constant for a digest).
+- **:54-61** Fingerprint is a prefix, not the whole digest: the full digest is the stored `OPERATOR_KEY_HASH` verifier, so writing it into `audit_log` would copy the verifier into the database the audit log is meant to hold to account.
