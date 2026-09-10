@@ -14,7 +14,7 @@ function tablesInMigrations(): string[] {
   const names = new Set<string>();
   for (const file of readdirSync(dir).filter((f) => f.endsWith(".sql")).sort()) {
     const sql = readFileSync(join(dir, file), "utf8");
-    // CREATE VIRTUAL TABLE does not match, which is what we want.
+    // CREATE VIRTUAL TABLE does not match, which keeps documents_fts out.
     for (const m of sql.matchAll(/CREATE TABLE(?: IF NOT EXISTS)?\s+(\w+)/gi)) {
       if (!DERIVED.test(m[1])) names.add(m[1]);
     }
