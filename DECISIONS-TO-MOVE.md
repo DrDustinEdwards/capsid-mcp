@@ -112,3 +112,9 @@ Rulings, measurements, and refusal reasons that were recorded only in Worker com
 - **:85-92** DCR callback gets no env; provider is constructed at module scope. `currentEnv` stash is idempotent (every request in an isolate gets the same env object). Unset skips the limiter (fail-open).
 - **:95-100** `CANONICAL_MCP_URL` pinned as `resourceMetadata.resource` so every access-token audience is bound (RFC 8707 / RFC 9728). A token minted with no `resource` is otherwise admitted unbound (2026-09-06 MAJOR).
 - **:162-180** Three crons dispatched on `controller.cron`, not the clock: 09:00 UTC matches all three expressions and Cloudflare delivers once per expression. Improve opener is two UTC hours because 03:00 America/Chicago is 08:00 or 09:00 depending on DST. Each branch is its own try.
+
+## src/improve-select.ts
+
+- **:1-13** Branching from current best every time is hill climbing. A base is chosen on score and on descendant performance (lineage potential).
+- **:41-46** Laplace smoothing `(wins+1)/(total+2)`: without it a base with one kept descendant has potential 1.0 and outranks 9/10. With it those are 0.67 and 0.83. An unexplored base is 0.5, not known-bad.
+- **:74-88** Score and potential are combined, not ranked lexicographically. `tanh` squash rather than min-max over the candidate set: min-max manufactures a 1.0 vs 0.0 gap out of noise when every attempt scored about the same. Ties break toward the later (more recent) candidate.
