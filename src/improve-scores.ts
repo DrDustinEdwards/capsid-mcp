@@ -44,12 +44,11 @@ const SECTION_HEADING = /^##\s+/;
 
 // CRLF IS NORMALIZED BEFORE ANYTHING ELSE, including before the hash.
 //
-// This is not tidiness. capsid/repo-structure.md records the CRLF checkout hazard
-// as a measured trap that has already produced two vacuous plants in this
-// portfolio, and a scores document reaching the Worker through a repo checkout on
-// an autocrlf host would hash differently from the same document written through
-// the MCP write path. The pin would then mismatch for a reason that has nothing
-// to do with anyone editing an anchor, and the run would refuse forever.
+// capsid/repo-structure.md records the CRLF checkout hazard as a measured trap that
+// has produced two vacuous plants in this portfolio. A scores document reaching the
+// Worker through a repo checkout on an autocrlf host would hash differently from the
+// same document written through the MCP write path, and the pin would then mismatch
+// for a reason unrelated to anyone editing an anchor.
 function normalize(text: string): string {
   return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
@@ -135,17 +134,15 @@ export async function anchorChecksum(doc: ScoresDoc): Promise<string> {
 }
 
 // THE ordinary write TOOL'S IMPROVE-PATH GUARD (audit 2026-09-06). Returns a
-// caller-facing refusal when a document write would touch the improve loop's
-// control surface without explicit opt-in, or null when the write may proceed.
+// caller-facing refusal when a document write would touch the improve loop's control
+// surface without explicit opt-in, or null when the write may proceed.
 //
-// The two prefixes are refused outright: nothing legitimate edits the run prompt or
-// a skill through the ordinary write tool (the loop writes skills itself; the
-// prompt is edited by a human on purpose). scores.md is subtler: its Secondary
-// section is meant to be freely editable, so only a write that CHANGES the anchor
-// block is refused. That is detected by comparing the anchor checksum of the stored
-// body with the checksum of the body about to be written; a Secondary-only edit
-// leaves the checksum unchanged and passes. Creating scores.md from nothing counts
-// as introducing an anchor block and is refused unless opted in.
+// The two prefixes are refused outright: nothing legitimate edits the run prompt or a
+// skill through the ordinary write tool. scores.md is subtler: its Secondary section
+// is meant to be freely editable, so only a write that CHANGES the anchor block is
+// refused, detected by comparing the anchor checksum of the stored body with that of
+// the body about to be written. Creating scores.md from nothing counts as introducing
+// an anchor block and is refused unless opted in.
 export async function improveWriteRefusal(
   namespace: string,
   path: string,
@@ -154,16 +151,11 @@ export async function improveWriteRefusal(
   allow: boolean
 ): Promise<string | null> {
   if (allow) return null;
-  // IMPORTED, NOT RE-DECLARED. These were four local literals until 2026-09-07,
-  // under a schema header stating that a string two modules must agree on is
-  // declared once. Both audits flagged the copy; the guard and the paths the
-  // loop actually writes now cannot drift apart.
-  // THE NIGHTLY TASK DOCUMENT (audit 2026-09-07). `improve/run-<day>.md` is read
-  // by the `/improve` driver and executed as its instruction list on a machine
-  // holding five repo clones, local git and a Capsid write grant. It was the one
-  // improve-steering path the ordinary write tool did not guard, which made it
-  // the cheapest way to steer that session: a plain write, no flag, an audit row
-  // indistinguishable from any other edit.
+  // THE NIGHTLY TASK DOCUMENT (audit 2026-09-07). `improve/run-<day>.md` is read by
+  // the `/improve` driver and executed as its instruction list on a machine holding
+  // five repo clones, local git and a Capsid write grant. It was the one
+  // improve-steering path the ordinary write tool did not guard: a plain write, no
+  // flag, an audit row indistinguishable from any other edit.
   if (path.startsWith(RUN_TASK_PREFIX)) {
     return `${namespace}/${path} is an improve loop task document. The /improve driver executes it, so a write here steers a session with local shell and repo access. Pass allow_improve_paths: true to write it anyway; the flag is audit-logged. The loop writes and signs these itself.`;
   }
@@ -192,14 +184,13 @@ export interface AnchorVerification {
   pinned: string | null;
 }
 
-// FAIL CLOSED IN BOTH DIRECTIONS, which is the whole reason this is a function
-// and not two lines at the call site.
+// FAIL CLOSED IN BOTH DIRECTIONS, which is why this is a function and not two lines
+// at the call site.
 //
-// A missing pin is a refusal, not a free pass. The tempting alternative is
-// "pin it on first sight", and that is exactly how an attacker or an accident
-// installs its own floor: whatever the anchors happen to say the first time the
-// loop looks becomes canon, and the pin then faithfully protects the wrong thing.
-// A namespace joins the loop when a human pins its anchors, and never before.
+// A missing pin is a refusal, not a free pass. "Pin it on first sight" is how an
+// attacker or an accident installs its own floor: whatever the anchors happen to say
+// the first time the loop looks becomes canon. A namespace joins the loop when a
+// human pins its anchors, and never before.
 export async function verifyAnchors(
   kv: KVNamespace,
   namespace: string,
@@ -255,11 +246,10 @@ export interface AnchorVerdict {
   reasons: string[];
 }
 
-// AN UNMEASURED ANCHOR IS A FAILED ANCHOR. A null here means CI did not report
-// the metric, and the arc's ruling is explicit: any missing or unauthenticated
-// score is treated as a revert. The alternative, skipping an anchor that was not
-// reported, means a scorer that quietly stops running the holdout suite scores
-// exactly like one that runs it and passes.
+// AN UNMEASURED ANCHOR IS A FAILED ANCHOR. A null here means CI did not report the
+// metric, and the arc's ruling is that any missing or unauthenticated score is treated
+// as a revert. Skipping an unreported anchor means a scorer that quietly stops running
+// the holdout suite scores exactly like one that runs it and passes.
 export function anchorVerdict(anchors: AnchorSpec[], values: MetricMap): AnchorVerdict {
   const reasons: string[] = [];
   for (const spec of anchors) {
@@ -279,10 +269,10 @@ export function anchorVerdict(anchors: AnchorSpec[], values: MetricMap): AnchorV
   return { passed: reasons.length === 0, reasons };
 }
 
-// A separate question from the verdict above: did any anchor get WORSE than the
-// base, even while still inside its bound. The drift gate pauses a namespace on
-// this, because an anchor sliding within tolerance is the shape of a slow
-// regression that no single attempt is ever refused for.
+// A separate question from the verdict above: did any anchor get WORSE than the base
+// while still inside its bound. The drift gate pauses a namespace on this, because an
+// anchor sliding within tolerance is the shape of a slow regression no single attempt
+// is ever refused for.
 export function anchorRegressions(anchors: AnchorSpec[], before: MetricMap, after: MetricMap): string[] {
   const out: string[] = [];
   for (const spec of anchors) {
@@ -323,15 +313,14 @@ export interface Comparison {
   reason: string;
 }
 
-// Relative improvement, clamped, so one metric measured in bytes cannot drown
-// four measured in counts.
+// Relative improvement, clamped, so one metric measured in bytes cannot drown four
+// measured in counts.
 //
-// The denominator is max(|before|, 1) rather than |before|, which handles the
-// two cases a plain ratio does not: a base of zero (0 lint errors, and any
-// increase should register as a loss rather than as a division by zero) and a
-// base near zero (1 error becoming 2 is a real doubling and should not score as
-// an infinite one). Clamped to [-1, 1] so a single metric's contribution is
-// bounded by its weight.
+// The denominator is max(|before|, 1) rather than |before|, which handles the two
+// cases a plain ratio does not: a base of zero (0 lint errors, where any increase
+// should register as a loss rather than a division by zero) and a base near zero (1
+// error becoming 2 is a real doubling, not an infinite one). Clamped to [-1, 1] so a
+// single metric's contribution is bounded by its weight.
 function relative(direction: Direction, before: number, after: number): number {
   const scale = Math.max(Math.abs(before), 1);
   const raw = direction === "maximize" ? (after - before) / scale : (before - after) / scale;
@@ -341,13 +330,12 @@ function relative(direction: Direction, before: number, after: number): number {
 // KEEP OR REVERT, and the default is revert.
 //
 // An attempt is kept when the anchors hold and the weighted secondary score is
-// strictly better. Strictly, not "no worse": a change that moves nothing is
-// churn, and churn accumulates into a diff nobody can review. A tie reverts.
+// strictly better. Strictly, not "no worse": a change that moves nothing is churn. A
+// tie reverts.
 //
 // AN UNPROVABLE COMPARISON REVERTS. If every secondary metric is a stub, or CI
-// reported none of them, `compared` is 0 and the attempt is reverted with that
-// as its reason. This is the case the whole module is written to get right: the
-// cheapest way to score well is to report nothing, and a system that reads
+// reported none of them, `compared` is 0 and the attempt is reverted with that as its
+// reason. The cheapest way to score well is to report nothing, and a system that reads
 // silence as success rewards exactly that.
 export function compare(specs: SecondarySpec[], before: MetricMap, after: MetricMap): Comparison {
   const details: MetricDelta[] = [];
@@ -376,10 +364,9 @@ export function compare(specs: SecondarySpec[], before: MetricMap, after: Metric
     const contribution = spec.weight * relative(spec.direction, a, b);
     compared += 1;
     delta += contribution;
-    // The absolute scores exist for the improve_attempts columns and for the
-    // status tool. They are the weighted values themselves, sign-corrected so
-    // higher is better on both, which makes score_before and score_after
-    // comparable rows in a table a human reads.
+    // The absolute scores exist for the improve_attempts columns and the status tool.
+    // They are the weighted values themselves, sign-corrected so higher is better on
+    // both, which makes score_before and score_after comparable rows in a table.
     const sign = spec.direction === "maximize" ? 1 : -1;
     scoreBefore += spec.weight * sign * a;
     scoreAfter += spec.weight * sign * b;
