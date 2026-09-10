@@ -43,7 +43,7 @@ test("the hourly limit refuses at the threshold, named", async () => {
 });
 
 test("a refusal cannot be constructed without its reason", () => {
-  // COMPILE-TIME, and it is the whole point of the union (quality audit 3.3).
+  // COMPILE-TIME, which is what the union buys (quality audit 3.3).
   // RateVerdict was one interface with allowed:boolean and three OPTIONAL fields,
   // so `{ allowed: false }` typechecked, and index.ts interpolates all three into
   // the 429 body: that value renders as "undefined in the last undefined, limit
