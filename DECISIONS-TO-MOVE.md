@@ -142,3 +142,18 @@ Rulings, measurements, and refusal reasons that were recorded only in Worker com
 - **:122-124** Fail closed: a monitor that cannot run does not approve.
 - **:173-181** Drift uses last three runs, not last one. A window with no attempts does not pause (zero/zero would stop every namespace on the first three nights).
 - **:214-220** An anchor drop pauses immediately. Per-attempt only asks whether the anchor still PASSES, so 1.0 to 0.95 against a floor of 0.9 is invisible to it.
+
+## src/improve-schema.ts
+
+- **:15-36** Roster is a closed list. foxhound question resolved 2026-09-05 by renaming the `recova` namespace; the loop targets the primary repo. Legacy recova is hotfix-only.
+- **:50-53** Default mode is off: unset, unreadable, or unrecognised all resolve to off.
+- **:68-86** Subscription-mode driver lease (residual 9, 2026-09-08). API mode is covered by a partial unique index; subscription creates no run row, so two `/improve` sessions would both push. KV has no CAS. TTL six hours.
+- **:90-97** Budget kill switch (2026-09-06): Cloudflare budget alerts cannot stop a Worker. Missing KV falls back to defaults, never to no cap.
+- **:130-134** Worker reads holdout COUNT, never the tests. A report claiming 3 passed when the manifest says 11 exist is refused.
+- **:144-167** `improve/run-` is what `/improve` executes (2026-09-07 lethal trifecta). Meta-loop may write only under `improve/proposals/`. Ordinary `write` refuses prompts/skills/scores anchors unless `allow_improve_paths`.
+- **:173-178** `SCORER_WORKFLOW` lives here not in improve-scorer because `ci_dispatch` refuses it by name (a hand dispatch mints a genuinely signed report) and importing from improve-scorer would cycle.
+- **:200-212** `RUN_CONDITIONS` is TEXT with no CHECK; each value has to switch something real off.
+- **:243-251** `SCORE_TIMEOUT_MS` is a ceiling against a 2-4 minute CI job, not a measured p99. `RUN_MAX_AGE_MS` 6h so a crawling run does not hold the slot when the next opener fires.
+- **:304-318** wrangler `.example` is included because foxing Job A copies it into place (2026-09-07 Opus CRITICAL 5.2). Every lockfile, not just npm: scorer install is package-manager agnostic; `--frozen-lockfile` compares lockfile to package.json; npm prefers shrinkwrap over package-lock.
+- **:350-354** Protected-path list is served to the subscription driver, which cannot import a RegExp. `test/improve-driver-lock.test.ts` derives both directions.
+- **:316-318** `en-US` with `hour12: false` renders midnight as "24" in some ICU versions and "00" in others; `% 24` keeps the opener from firing on a day boundary in one runtime and not another.

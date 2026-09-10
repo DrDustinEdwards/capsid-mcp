@@ -1,39 +1,5 @@
-// The improve loop's vocabulary: the roster, the states, the keys and the paths.
-//
-// A leaf, deliberately. Everything else in the improve family imports this and
-// nothing here imports any of them, so the names a run is made of can be read
-// without opening the orchestrator. Same reasoning that moved Env out of
-// server.ts in the 2026-08-17 quality audit.
-//
-// THE RULE THIS FILE EXISTS TO ENFORCE: a string two modules must agree on is
-// declared here once. The report-prefix class of bug (intake writing under one
-// prefix and the prune reading another) is what it prevents, and
-// test/source-conventions.test.ts already guards that class for REPORT_PREFIX.
-
 // ---- the roster -------------------------------------------------------------
 
-// WHICH NAMESPACES THE LOOP TOUCHES, and it is a closed list rather than "every
-// registered namespace". A namespace joins by being added here AND by having a
-// scores document with a pinned anchor checksum. Nothing opts in by existing.
-//
-// THE foxhound QUESTION, RESOLVED 2026-09-05 by renaming the namespace.
-//
-// The arc named six projects: capsid, foxing, germomics, dustinedwards, recova
-// and foxhound. foxhound was NOT a namespace then: it was the primary repo of the
-// `recova` namespace, so the roster was keyed by `recova` and carried a note
-// explaining the mismatch. Dustin ruled the namespace itself be renamed
-// `recova` to `foxhound` before the loop was ever switched on, which removes the
-// mismatch rather than documenting it.
-//
-// The namespace still maps to THREE repos (foxhound primary, recova legacy,
-// recova-mcp legacy-mcp), so `foxhound` here means the namespace and the loop
-// targets its PRIMARY repo. Legacy recova is hotfix-only until the Phase 9
-// cutover and is reached only by an explicit `repo` selector, which the loop
-// never passes.
-//
-// foxhound carries BOTH stub metrics: recovery_rate for the legacy product and
-// dispute_win_rate for foxhound itself. Both return null, so neither moves a
-// score until Dustin wires it.
 export const ROSTER = ["capsid", "dustinedwards", "foxhound", "foxing", "germomics"] as const;
 
 export type RosterNamespace = (typeof ROSTER)[number];
@@ -47,10 +13,7 @@ export function onRoster(namespace: string): namespace is RosterNamespace {
 export const IMPROVE_MODES = ["api", "subscription", "off"] as const;
 export type ImproveMode = (typeof IMPROVE_MODES)[number];
 
-// THE DEFAULT IS "off", in the strong sense: an unset key, an unreadable KV, or a
-// value nobody recognises all resolve to off. A loop that starts writing to five
-// repos because a KV read returned an unexpected string is the failure this
-// default exists to make impossible.
+// Unset, unreadable, or unrecognised all resolve to off.
 export const DEFAULT_MODE: ImproveMode = "off";
 
 // ---- KV keys ----------------------------------------------------------------
@@ -65,36 +28,12 @@ export const anchorKey = (namespace: string) => `improve:anchor:${namespace}`;
 // meta-loop reasons across all of them at once.
 export const META_LAST_KEY = "improve:meta:last";
 
-// THE SUBSCRIPTION-MODE DRIVER LEASE (residual 9, closed 2026-09-08).
-//
-// API mode cannot run twice for one namespace because a partial unique index on
-// improve_runs refuses a second open run. Subscription mode creates NO run row,
-// so that index does not reach it at all: two `/improve` sessions, on one laptop
-// or two, would both read the same task document and both start pushing branches
-// to the same five clones. The index being real (proved by
-// test-integration/scheduled.test.ts) is exactly what made the gap clearer.
-//
-// So the driver claims this key first and releases it at the end. It is the SAME
-// SHAPE as the backup lease and carries the same honest limit: KV has no
-// compare-and-set, so a get-then-put is best-effort mutual exclusion, not a lock.
-// It closes the window that actually exists here (a second session started while
-// the first is working, minutes or hours apart) and does not close two claims
-// landing in the same millisecond. Said plainly, because a lock described as
-// stronger than it is becomes the reason nobody checks.
-//
-// SIX HOURS because that is well past the longest observed driver run and well
-// under a day, so a session that dies without releasing costs at most one night.
+// Subscription-mode driver lease. KV has no CAS, so this is best-effort.
+// Six hours: past the longest observed driver run, under a day.
 export const driverKey = (namespace: string) => `improve:driver:${namespace}`;
 export const DRIVER_LEASE_TTL_SECONDS = 6 * 60 * 60;
 
-// THE BUDGET KILL SWITCH (Cloudflare platform arc, 2026-09-06). Cloudflare's
-// budget alerts are informational and cannot stop a Worker, so the loop carries
-// its own hard stop: monthly caps on GitHub Actions minutes and model spend,
-// read by the opener and the tick BEFORE they open or advance anything. The
-// caps live in KV, not in code, so they can be changed without a deploy; the
-// key holds JSON { actions_minutes_month, model_usd_month, month? }, and a
-// missing or unreadable key falls back to these defaults rather than to "no
-// cap", the same fail-closed posture as improve_mode.
+// Monthly caps in KV. Missing or unreadable falls back to these, never to no cap.
 export const BUDGET_KEY = "improve:budget";
 export const BUDGET_DEFAULTS = { actions_minutes_month: 300, model_usd_month: 50 } as const;
 
@@ -141,11 +80,6 @@ export interface HoldoutManifest {
 // ---- document paths ---------------------------------------------------------
 
 export const SCORES_PATH = "improve/scores.md";
-// THE NIGHTLY TASK DOCUMENT'S PREFIX, guarded by the ordinary write tool as of
-// 2026-09-07 (Opus 3.1 / 22.1, Grok MAJOR 8). `improve/run-<day>.md` is what the
-// `/improve` driver is told to execute, from a machine holding five repo clones
-// and local credentials, so a write-grant key that can rewrite it can steer that
-// session. runTaskPath() builds from it so the guard and the writer cannot drift.
 export const RUN_TASK_PREFIX = "improve/run-";
 export const RUN_PROMPT_PATH = "improve/prompts/run.md";
 export const runTaskPath = (day: string) => `${RUN_TASK_PREFIX}${day}.md`;
@@ -154,28 +88,12 @@ export const archivePath = (runIdValue: string, attemptIdValue: string) =>
 export const skillPath = (skillId: string) => `improve/skills/${skillId}.md`;
 export const proposalPath = (kind: string, day: string) => `improve/proposals/${kind}-${day}.md`;
 
-// THE META-LOOP'S ENTIRE WRITE SURFACE. It proposes; it never applies. Stated as
-// a prefix rather than as a rule in prose because src/improve-meta.ts asserts
-// against it and test/improve-meta.test.ts drives that assertion.
 export const PROPOSAL_PREFIX = "improve/proposals/";
 
-// THE IMPROVE CONTROL SURFACE THE ORDINARY write TOOL GUARDS (audit 2026-09-06).
-// These paths steer the nightly loop: the attempt generator's system prompt, the
-// cross-project skills it re-injects, and the checksummed anchor block of a scores
-// document. A one-shot prompt injection that could write any of them turns into a
-// standing, nightly-re-injected instruction, so the write tool refuses them unless
-// the caller passes allow_improve_paths: true, which is audit-logged. The prefixes
-// are namespace-relative, matching a document's `path` in any namespace.
 export const PROMPTS_PREFIX = "improve/prompts/";
 export const SKILLS_PREFIX = "improve/skills/";
 
 
-// The workflow file every roster repo carries. One spelling, HERE rather than in
-// improve-scorer.ts where it used to live, because github.ts's ci_dispatch now
-// refuses it by name (audit 2026-09-06, Fable MAJOR 7: a hand dispatch of the
-// scorer mints a genuinely signed score report for whatever ref it is pointed
-// at) and importing it from improve-scorer would cycle: improve-scorer already
-// imports dispatchWorkflow from github.
 export const SCORER_WORKFLOW = "improve-score.yml";
 
 // ---- states -----------------------------------------------------------------
@@ -197,19 +115,6 @@ export type RunStatus = (typeof RUN_STATUSES)[number];
 // and not there would let two active runs exist for one namespace.
 export const TERMINAL_RUN_STATUSES: readonly RunStatus[] = ["done", "paused"];
 
-// THE EXPERIMENTAL CONDITION a run was executed under, per the arc's ruling: the
-// column exists so an ablation is a query rather than an archaeology exercise.
-//
-// A TEXT column with NO CHECK constraint, validated here instead, which is the
-// same shape and the same reasoning as DOC_STATUSES in src/doc-meta.ts: the
-// vocabulary is exactly this list, the database does not restate it, and
-// test/improve-condition.test.ts derives the migration's documented set from this
-// one so the two cannot drift.
-//
-// EACH VALUE HAS TO DO SOMETHING. A condition recorded on a run that changed
-// nothing about how the run behaved is a label that lies, which is worse than no
-// column. What each one switches off is enforced in src/improve-run.ts and
-// asserted in that test.
 export const RUN_CONDITIONS = ["full", "no-memory", "no-transfer"] as const;
 export type RunCondition = (typeof RUN_CONDITIONS)[number];
 
@@ -282,17 +187,7 @@ export const MODEL_FOR: Record<ModelStage, string> = {
 
 // ---- protected paths --------------------------------------------------------
 
-// WHAT AN ATTEMPT MAY NOT TOUCH, matched against every changed path in a diff.
-//
-// This is the deterministic half of the reward-hacking monitor and it runs in
-// every mode, including when no model is available to run the other half. It is
-// first because it is the half that cannot be talked out of a verdict: a diff
-// that edits a test is reverted whether or not a model thinks the edit was
-// reasonable, and the model's job is the cases a pattern cannot name.
-//
-// Matched by SHAPE rather than by the spellings that exist today, per
-// capsid/conventions.md: the guard has to fire on the sixth repo's layout as well
-// as on the five that exist now.
+// Matched by shape, not today's spellings, so a sixth repo's layout is covered.
 export const PROTECTED_PATH_PATTERNS: Array<{ pattern: RegExp; why: string }> = [
   { pattern: /(^|\/)tests?\//i, why: "a test directory" },
   { pattern: /\.(test|spec)\.[cm]?[jt]sx?$/i, why: "a test file" },
@@ -301,21 +196,8 @@ export const PROTECTED_PATH_PATTERNS: Array<{ pattern: RegExp; why: string }> = 
   { pattern: /(^|\/)improve\//i, why: "the improve loop's own documents" },
   { pattern: /(^|\/)src\/improve-/i, why: "the improve loop's own source" },
   { pattern: /(^|\/)migrations\//i, why: "a database migration" },
-  // The example is included: foxing's Job A copies apps/web/wrangler.jsonc.example
-  // into place before running `wrangler types`, so the unprotected .example was a
-  // path into the measured build (audit 2026-09-07, Opus CRITICAL 5.2). .toml is
-  // the older spelling and is equally load-bearing where a repo still uses it.
   { pattern: /(^|\/)wrangler\.(jsonc?|toml)(\.example)?$/i, why: "deployment configuration" },
   { pattern: /(^|\/)package(-lock)?\.json$/i, why: "the dependency manifest or lockfile" },
-  // EVERY LOCKFILE, NOT JUST NPM'S (audit 2026-09-07, Opus CRITICAL 5.2, Grok
-  // MAJOR 4). The scorer's install step is package-manager agnostic and installs
-  // from whichever lockfile is present, so a lockfile an attempt can edit is
-  // arbitrary code execution in CI through a lifecycle script. foxing is a pnpm
-  // workspace and its Job A runs `pnpm install --frozen-lockfile`; --frozen
-  // compares the lockfile to package.json, not to the registry, so a repointed
-  // resolution installs. npm-shrinkwrap.json matters for a second reason: npm
-  // PREFERS it over package-lock.json, so leaving it out was a bypass of the
-  // pattern above rather than a gap beside it.
   { pattern: /(^|\/)npm-shrinkwrap\.json$/i, why: "a lockfile npm prefers over package-lock.json" },
   { pattern: /(^|\/)pnpm-lock\.yaml$/i, why: "the pnpm lockfile the scorer installs from" },
   { pattern: /(^|\/)pnpm-workspace\.yaml$/i, why: "the pnpm workspace definition" },
@@ -330,12 +212,6 @@ export const PROTECTED_PATH_PATTERNS: Array<{ pattern: RegExp; why: string }> = 
   { pattern: /(^|\/)\.?eslint[^/]*$/i, why: "lint configuration" },
   { pattern: /(^|\/)\.claude\//i, why: "the agent steering layer" },
   { pattern: /(^|\/)CLAUDE\.md$/i, why: "the repo briefing" },
-  // Toolchain and build-glue the scorer runs THROUGH (audit 2026-09-06). .nvmrc /
-  // .node-version pick the Node the scorer job uses (setup-node reads them);
-  // .npmrc / .yarnrc control the registry and install-script policy npm ci obeys;
-  // .gitattributes changes what the checkout even contains; a husky hook and
-  // scripts/ and a Makefile are code CI executes. An attempt editing any of these
-  // steers the measurement without touching a file the earlier patterns name.
   { pattern: /(^|\/)\.nvmrc$/i, why: "the Node version the scorer runs" },
   { pattern: /(^|\/)\.node-version$/i, why: "the Node version the scorer runs" },
   { pattern: /(^|\/)\.npmrc$/i, why: "npm registry and install-script policy" },
@@ -347,12 +223,6 @@ export const PROTECTED_PATH_PATTERNS: Array<{ pattern: RegExp; why: string }> = 
   { pattern: /(^|\/)Makefile$/i, why: "build glue CI executes" },
 ];
 
-// THE LIST, SERVED (residual 10). The subscription-mode driver runs outside this
-// Worker and cannot import a RegExp, so improve_status hands it the source and
-// flags of every pattern and the driver rebuilds them. Serving it is what stops
-// the driver holding a copy: a pattern added above appears in the next call, and
-// test/improve-driver-lock.test.ts derives the served list from this one in both
-// directions so a hand-maintained second list cannot appear.
 export interface ServedProtectedPath {
   pattern: string;
   flags: string;
@@ -390,13 +260,6 @@ export function attemptId(runIdValue: string, index: number): string {
   return `${runIdValue}-a${String(index).padStart(2, "0")}`;
 }
 
-// ONE CONSTANT, TWO READERS, and that is the whole point of it existing.
-//
-// `branchName()` builds attempt branches from this, and `delete_branch` refuses a
-// branch under it unless forced. Those two must agree by construction: a literal
-// "improve/" in the guard would keep matching only until this prefix changed, and
-// the failure would be silent in the worst direction, a guard that stops guarding
-// while still looking like one. Same reasoning as HOLDOUT_PREFIX above.
 export const IMPROVE_BRANCH_PREFIX = "improve/";
 
 export function branchName(attemptIdValue: string): string {
@@ -408,10 +271,6 @@ export function isImproveBranch(branch: string): boolean {
   return branch.startsWith(IMPROVE_BRANCH_PREFIX);
 }
 
-// The America/Chicago day, which is what a run doc is dated by. Computed through
-// Intl rather than by subtracting an offset, because the offset is 5 hours for
-// part of the year and 6 for the rest, and a hardcoded one silently mislabels
-// every document written in the other half.
 export function chicagoDay(now: Date): string {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Chicago",
@@ -421,10 +280,6 @@ export function chicagoDay(now: Date): string {
   }).format(now);
 }
 
-// The America/Chicago hour, 0 to 23. The nightly opener fires on this rather than
-// on a UTC cron hour: Cloudflare cron expressions are UTC only, so "03:00
-// America/Chicago" is 08:00 UTC for part of the year and 09:00 for the rest. The
-// cron covers both hours and this decides which one is really 03:00.
 export function chicagoHour(now: Date): number {
   const hour = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Chicago",
