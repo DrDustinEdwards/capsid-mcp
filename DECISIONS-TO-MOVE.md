@@ -162,3 +162,8 @@ Rulings, measurements, and refusal reasons that were recorded only in Worker com
 
 - **:12-28** Overlap lock (audit 2, F32). Cron and POST /ops/backup can overlap dump+prune. KV has no CAS, so the lease is best-effort, not a lock. TTL 15 minutes (scheduled invocation wall-time ceiling; KV min expirationTtl is 60s).
 - **:32-54** Retention: export before prune. Dumps were kept 14 by count, so a row pruned at 90 days was recoverable from R2 for 14 more days then existed nowhere. Now pruned by age at 90 days. A count is only a duration if there is exactly one dump per day; /ops/backup by hand used to consume a slot.
+
+## src/improve-run.ts
+
+- **:1-29** Resumable D1 state machine, one step per tick, idempotent on expected status. Baseline scoring job exists so the first attempt has something to compare against and so metrics that move on their own are not attributed to attempt 1.
+- **:1709-1743** Dry run uses the same resolver as the real path and resolves the base for real (it used to pass null and report "no base could be resolved" on every namespace). Fails soft to null.
