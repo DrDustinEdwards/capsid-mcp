@@ -1,7 +1,7 @@
 import { sha256Hex } from "./auth";
 import { bytesToHex } from "./encoding";
 import type { Env } from "./env";
-import { defaultBranchSha, listRepoTree, openPr, resolveRepo } from "./github";
+import { defaultBranchSha, dispatchWorkflow, listRepoTree, openPr, resolveRepo } from "./github";
 import { proposeChange, pushAttempt, renderChange } from "./improve-attempt";
 import { anchorDriftVerdict, driftVerdict, monitorAttempt, pathMonitor } from "./improve-gates";
 import { runMetaLoop } from "./improve-meta";
@@ -13,7 +13,7 @@ import {
   type MetricMap,
   type ScoresDoc,
 } from "./improve-scores";
-import { checkHoldout, dispatchScorer, readHoldoutManifest, type ScoreReport } from "./improve-scorer";
+import { checkHoldout, readHoldoutManifest, type ScoreReport } from "./improve-scorer";
 import {
   archivePath,
   attemptId,
@@ -34,6 +34,7 @@ import {
   RUN_PROMPT_PATH,
   SCORES_PATH,
   SCORE_TIMEOUT_MS,
+  SCORER_WORKFLOW,
   BUDGET_KEY,
   IMPROVE_MODES,
   MODE_KEY,
@@ -167,7 +168,7 @@ export async function checkBudget(env: Env, now: Date): Promise<BudgetStatus> {
         (overMinutes ? `${spend.ci_minutes.toFixed(1)} of ${caps.actions_minutes_month} Actions minutes` : "") +
         (overMinutes && overUsd ? ", " : "") +
         (overUsd ? `$${spend.cost_usd.toFixed(2)} of $${caps.model_usd_month} model spend` : "") +
-        `. Raise the caps in KV ${"improve:budget"} or wait for the month to turn.`
+        `. Raise the caps in KV ${BUDGET_KEY} or wait for the month to turn.`
       : null,
   };
 }
@@ -243,24 +244,50 @@ async function openOne(
   namespace: string,
   mode: ImproveMode,
   now: Date,
-  condition: RunCondition
+  condition: RunCondition,
+  opts: { preview?: boolean } = {}
 ): Promise<OpenOutcome> {
+  const preview = opts.preview === true;
   const paused = await pausedReason(env.APP_KV, namespace);
-  if (paused) return { namespace, opened: false, runId: null, note: `paused: ${paused}` };
+  if (paused) {
+    return { namespace, opened: false, runId: null, note: preview ? `would skip: paused (${paused})` : `paused: ${paused}` };
+  }
 
   const existing = await activeRun(env.DB, namespace);
   if (existing) {
-    return { namespace, opened: false, runId: existing.id, note: `a run is already active in state '${existing.status}'` };
+    return {
+      namespace,
+      opened: false,
+      runId: existing.id,
+      note: preview
+        ? `would skip: run ${existing.id} is active in '${existing.status}'`
+        : `a run is already active in state '${existing.status}'`,
+    };
   }
 
   const { doc, refusal } = await loadScores(env, namespace);
   if (refusal) {
+    if (preview) return { namespace, opened: false, runId: null, note: `would refuse: ${refusal}` };
     // A refusal is written where a human will see it in the morning, not only
     // logged. capsid/conventions.md: where a check cannot run, block and NAME the
     // reason.
     await writeTaskDoc(env, namespace, now, `# improve is blocked in ${namespace}\n\n${refusal}\n`);
     await env.DB.batch([improveAudit(env.DB, "improve-refused", namespace, { refusal })]);
     return { namespace, opened: false, runId: null, note: refusal };
+  }
+
+  if (preview) {
+    const best = await readBest(env.APP_KV, namespace);
+    const history = await recentAttempts(env.DB, namespace, 50);
+    const defaultSha = await resolveDefaultSha(env, namespace);
+    const choice = selectBase(best, history, defaultSha);
+    return {
+      namespace,
+      opened: false,
+      runId: null,
+      base: choice.sha || null,
+      note: `would open a run and baseline ${choice.sha || "(no base resolved)"}: ${choice.why}`,
+    };
   }
 
   if (mode === "off") {
@@ -444,7 +471,7 @@ async function dispatchBaseline(env: Env, run: RunRow): Promise<TickOutcome> {
   // An empty push: the branch is created at the base commit and nothing is
   // written to it, which is exactly what "measure the base" means.
   await pushAttempt(env, { namespace: run.namespace, branch, baseSha: run.base_sha, summary: "baseline", files: [] });
-  await dispatchScorer(env, run.namespace, { branch, run_id: run.id, attempt_id: id });
+  await dispatchWorkflow(env, run.namespace, SCORER_WORKFLOW, { branch, run_id: run.id, attempt_id: id });
   return { runId: run.id, namespace: run.namespace, from: "opening", to: "awaiting-score", note: `baseline dispatched on ${branch}` };
 }
 
@@ -546,7 +573,7 @@ async function startAttempt(env: Env, run: RunRow, now: Date): Promise<TickOutco
 
   // THE DETERMINISTIC PATH MONITOR RUNS BEFORE THE BRANCH IS PUSHED (audit
   // 2026-09-06). It used to run only at ingest, after pushAttempt and
-  // dispatchScorer had already put the attempt's files on a branch and started CI
+  // dispatchWorkflow had already put the attempt's files on a branch and started CI
   // on them: a change that added a package.json postinstall, or a new
   // .github/workflows/*.yml with `on: push`, executed in CI (secrets in scope)
   // before the monitor ever flagged it, and a revert cannot un-run that. Checking
@@ -612,7 +639,7 @@ async function startAttempt(env: Env, run: RunRow, now: Date): Promise<TickOutco
     })),
   ]);
 
-  await dispatchScorer(env, run.namespace, { branch, run_id: run.id, attempt_id: id });
+  await dispatchWorkflow(env, run.namespace, SCORER_WORKFLOW, { branch, run_id: run.id, attempt_id: id });
   // The status was claimed at the top; this books the attempt and the spend, and
   // refreshes advanced_at so the stale guard measures from the dispatch.
   await advanceRun(env.DB, {
@@ -1491,7 +1518,12 @@ export async function improveRunManual(
   }
   const condition: RunCondition = opts.condition ?? DEFAULT_CONDITION;
   if (opts.dryRun) {
-    return { mode, mode_note: reason, condition, dry_run: true, opened: await dryRun(env, opts.namespace), advanced: [] };
+    const namespaces = opts.namespace ? [opts.namespace] : [...ROSTER];
+    const opened: OpenOutcome[] = [];
+    for (const ns of namespaces) {
+      opened.push(await openOne(env, ns, mode, now, condition, { preview: true }));
+    }
+    return { mode, mode_note: reason, condition, dry_run: true, opened, advanced: [] };
   }
   const summary = await openRuns(env, now, opts.namespace, condition);
   // One tick immediately, so a hand-run does something visible rather than only
@@ -1711,36 +1743,3 @@ async function resolveDefaultSha(env: Env, namespace: string): Promise<string | 
   }
 }
 
-async function dryRun(env: Env, only?: string): Promise<OpenOutcome[]> {
-  const namespaces = only ? [only] : [...ROSTER];
-  const outcomes: OpenOutcome[] = [];
-  for (const namespace of namespaces) {
-    const paused = await pausedReason(env.APP_KV, namespace);
-    if (paused) {
-      outcomes.push({ namespace, opened: false, runId: null, note: `would skip: paused (${paused})` });
-      continue;
-    }
-    const existing = await activeRun(env.DB, namespace);
-    if (existing) {
-      outcomes.push({ namespace, opened: false, runId: existing.id, note: `would skip: run ${existing.id} is active in '${existing.status}'` });
-      continue;
-    }
-    const { refusal } = await loadScores(env, namespace);
-    if (refusal) {
-      outcomes.push({ namespace, opened: false, runId: null, note: `would refuse: ${refusal}` });
-      continue;
-    }
-    const best = await readBest(env.APP_KV, namespace);
-
-    const defaultSha = await resolveDefaultSha(env, namespace);
-    const choice = selectBase(best, await recentAttempts(env.DB, namespace, 50), defaultSha);
-    outcomes.push({
-      namespace,
-      opened: false,
-      runId: null,
-      base: choice.sha || null,
-      note: `would open a run and baseline ${choice.sha || "(no base resolved)"}: ${choice.why}`,
-    });
-  }
-  return outcomes;
-}

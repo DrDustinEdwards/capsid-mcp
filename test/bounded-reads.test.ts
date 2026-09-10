@@ -5,7 +5,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { buildServer } from "../src/server.ts";
 import { GATHER_BUDGET, MAX_ROWS, MAX_SCAN_CAP, SEARCH_ROWS } from "../src/limits.ts";
 import { type DocRow, fakeD1, fakeEnv, type FakeD1Options, type Recorded } from "./fakes.ts";
-import { sourceFile } from "./source-files.ts";
+import { allSourceText, sourceFile } from "./source-files.ts";
 
 // EVERY READ IS BOUNDED, AND SAYS SO WHEN IT CUT (audit 9.2).
 //
@@ -332,7 +332,7 @@ test("the advertised caps are INTERPOLATED, not restated as digits", () => {
   // TAUTOLOGY once the description interpolates it: change the constant and both
   // move together, which is the point. The only way the two can part again is if
   // someone writes the digits back into the prose, so that is what is asserted.
-  const text = sourceFile("server.ts");
+  const text = allSourceText();
   const capArgs = text
     .split("\n")
     .filter((line) => /max_(files|results): z\.number\(\)/.test(line));

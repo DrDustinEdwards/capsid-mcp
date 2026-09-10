@@ -108,14 +108,6 @@ export async function checkRate(
   return { allowed: true };
 }
 
-export async function checkRegistrationRate(kv: KVNamespace, ip: string, now: Date): Promise<RateVerdict> {
-  return checkRate(kv, ip, now, REGISTRATION_LIMIT);
-}
-
-export async function checkCspReportRate(kv: KVNamespace | undefined, ip: string, now: Date): Promise<RateVerdict> {
-  return checkRate(kv, ip, now, CSP_REPORT_LIMIT);
-}
-
 export function callerIp(request: Request): string {
   return request.headers.get("CF-Connecting-IP") ?? "unknown";
 }

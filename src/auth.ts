@@ -53,13 +53,6 @@ export async function operatorIdentity(
   return { grant: null, fingerprint: null };
 }
 
-export async function operatorGrant(
-  request: Request,
-  env: { OPERATOR_KEY_HASH?: string }
-): Promise<OperatorGrant> {
-  return (await operatorIdentity(request, env)).grant;
-}
-
 export function isAdminUser(
   env: { ADMIN_GITHUB_LOGIN?: string },
   user: { id: number | string; login: string }

@@ -417,10 +417,6 @@ const SEARCH_TREE_LIMIT = 5000; // refuse to scan a tree bigger than this whole
 // GitHub's primary and secondary rate limits (both of which answer 403); 429 is
 // the explicit rate-limit status. None of them are per-file conditions, so a
 // scan that keeps going past one is reporting on a repository it did not read.
-function isScanAbortingStatus(status: number): boolean {
-  return status === 401 || status === 403 || status === 429;
-}
-
 export async function searchCode(
   env: Env,
   namespace: string | undefined,
@@ -504,7 +500,7 @@ export async function searchCode(
       // the same way, so continuing produces a confidently empty answer over an
       // unread repository. Everything else (a 404 on a raced deletion, a 5xx on
       // one blob) is survivable, so it is counted and reported instead.
-      if (isScanAbortingStatus(blob.status)) {
+      if (blob.status === 401 || blob.status === 403 || blob.status === 429) {
         throw new Error(
           `search_code aborted at ${filesScanned} of ${candidates.length} candidate files: GitHub returned ${blob.status} fetching ${c.path}. ` +
             `This is NOT an empty result. The scan could not read the repository, so no conclusion about whether "${query}" is present is available. ` +

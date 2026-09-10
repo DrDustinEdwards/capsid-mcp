@@ -5,7 +5,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { buildServer, type ToolGrant } from "../src/server.ts";
 import { fakeD1, fakeEnv, type FakeD1Rows, type Recorded } from "./fakes.ts";
-import { sourceFile } from "./source-files.ts";
+import { allSourceText, sourceFile } from "./source-files.ts";
 
 // THE BEHAVIOURAL HALF of the write-path invariants. test/invariants.test.ts reads
 // the source; this file DRIVES the real tool handlers over a real MCP connection
@@ -511,7 +511,7 @@ test("ARMING PARITY: both call sites pass the SAME consent signal", async () => 
   //
   // The two call sites stay in server.ts; the commit protocol and its arming
   // condition moved to src/store-guards.ts on 2026-09-07 (audit MAJOR 17).
-  const server = sourceFile("server.ts");
+  const server = allSourceText();
   assert.equal(
     server.split("commit.run(elicited, statements)").length - 1,
     2,

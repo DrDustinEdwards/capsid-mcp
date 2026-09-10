@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { sourceFiles } from "./source-files.ts";
+import { sourceFiles, toolBlocks, type ToolBlock } from "./source-files.ts";
 
 // The two write-path invariants, guarded.
 //
@@ -31,54 +31,14 @@ import { sourceFiles } from "./source-files.ts";
 const MUTATING_SQL = /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\b/i;
 const OPERATOR_GATE = "if (!mayWrite)";
 
-interface Block {
-  tool: string;
-  text: string;
-  file: string;
-}
-
-// Each registerTool call, from its name to the start of the next registration.
-// Crude on purpose: a parser would be more precise and would also be a second
-// implementation of TypeScript in a test file.
-//
-// Scanned per FILE rather than over a concatenation of all of src/, so a block
-// cannot run past the end of its own module and swallow the next file's text, and
-// so a failure names the file the offending tool lives in.
-function toolBlocks(): Block[] {
-  const marker = "server.registerTool(";
-  const blocks: Block[] = [];
-  for (const { name, text } of sourceFiles()) {
-    const starts: number[] = [];
-    for (let i = text.indexOf(marker); i !== -1; i = text.indexOf(marker, i + 1)) starts.push(i);
-    if (starts.length === 0) continue;
-    const resourceStart = text.indexOf("server.registerResource(");
-    for (let i = 0; i < starts.length; i++) {
-      const start = starts[i];
-      // The block ends at the next registration, or at the resource registration
-      // if that comes first, or at the end of the file.
-      const bounds = [
-        i + 1 < starts.length ? starts[i + 1] : text.length,
-        resourceStart > start ? resourceStart : text.length,
-      ];
-      const body = text.slice(start, Math.min(...bounds));
-      blocks.push({
-        file: name,
-        text: body,
-        tool: body.match(/registerTool\(\s*\n?\s*"([^"]+)"/)?.[1] ?? `${name}#${i}`,
-      });
-    }
-  }
-  return blocks;
-}
-
-const BLOCKS = toolBlocks();
+const BLOCKS: ToolBlock[] = toolBlocks();
 
 test("the block scan found the whole tool surface", () => {
   // Vacuity guard. If this parse broke, every assertion below would pass over an
   // empty list and the file would be worthless while looking green.
   assert.ok(BLOCKS.length >= 20, `expected the full tool surface, parsed ${BLOCKS.length} blocks`);
   for (const name of ["write", "delete", "move", "lint", "restore", "read", "search"]) {
-    assert.ok(BLOCKS.some((b) => b.tool === name), `did not parse a block for the ${name} tool`);
+    assert.ok(BLOCKS.some((b) => b.name === name), `did not parse a block for the ${name} tool`);
   }
   // And the walk itself reached the whole directory. sourceFiles() throws below
   // its own floor; this is the second half, asserting the scan is not reading one
@@ -87,8 +47,8 @@ test("the block scan found the whole tool surface", () => {
 });
 
 test("every tool whose handler contains mutating SQL is gated on the write grant", () => {
-  const ungated = BLOCKS.filter((b) => MUTATING_SQL.test(b.text) && !b.text.includes(OPERATOR_GATE)).map(
-    (b) => `${b.tool} (src/${b.file})`
+  const ungated = BLOCKS.filter((b) => MUTATING_SQL.test(b.body) && !b.body.includes(OPERATOR_GATE)).map(
+    (b) => `${b.name} (src/${b.file})`
   );
   assert.deepEqual(
     ungated,
@@ -100,7 +60,7 @@ test("every tool whose handler contains mutating SQL is gated on the write grant
 test("the gate check is not vacuous: several tools are found to be mutating", () => {
   // If a refactor moved every statement into a helper, the test above would pass
   // by matching nothing. This asserts it is still looking at real mutations.
-  const mutating = BLOCKS.filter((b) => MUTATING_SQL.test(b.text)).map((b) => b.tool);
+  const mutating = BLOCKS.filter((b) => MUTATING_SQL.test(b.body)).map((b) => b.name);
   assert.ok(mutating.length >= 6, `only ${mutating.length} tool handlers contain mutating SQL: ${mutating.join(", ")}`);
   for (const name of ["write", "delete", "move", "restore"]) {
     assert.ok(mutating.includes(name), `${name} no longer contains mutating SQL; has it moved to a helper?`);
@@ -118,22 +78,4 @@ test("the one mutating helper outside a tool handler carries the gate itself", (
   assert.ok(helper.length > 200, `could not bound guardedWrite in src/${owner.name}`);
   assert.ok(MUTATING_SQL.test(helper), "guardedWrite no longer writes the audit row");
   assert.ok(helper.includes(OPERATOR_GATE), "guardedWrite lost its write gate: every repo write tool is now open to ro: keys");
-});
-
-test("every tool that overwrites or removes a document snapshots and audits it", () => {
-  // Structural, per tool. The behavioural proof is in write-invariants.test.ts;
-  // this is the cheap version that names the specific tool that lost a statement.
-  for (const tool of ["write", "delete", "restore"]) {
-    const block = BLOCKS.find((b) => b.tool === tool)!;
-    assert.match(
-      block.text,
-      /INSERT INTO document_versions/,
-      `${tool} no longer snapshots the prior row into document_versions`
-    );
-    assert.match(block.text, /INSERT INTO audit_log/, `${tool} no longer appends to audit_log`);
-  }
-  const move = BLOCKS.find((b) => b.tool === "move")!;
-  // move renames rather than overwriting, so there is no body to snapshot, but the
-  // audit row is what the 2026-08-10 edge repair recovered five repoints from.
-  assert.match(move.text, /INSERT INTO audit_log/, "move no longer appends to audit_log");
 });

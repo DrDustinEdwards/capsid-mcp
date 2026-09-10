@@ -84,3 +84,38 @@ export function sourceFile(name: string): string {
   if (!found) throw new Error(`src/${name} not found by the source walk`);
   return found.text;
 }
+
+export interface ToolBlock {
+  name: string;
+  body: string;
+  file: string;
+}
+
+// Each registerTool call, from its name to the start of the next registration.
+// Scanned per FILE rather than over a concatenation of all of src/, so a block
+// cannot run past the end of its own module and swallow the next file's text, and
+// so a failure names the file the offending tool lives in.
+export function toolBlocks(): ToolBlock[] {
+  const marker = "server.registerTool(";
+  const blocks: ToolBlock[] = [];
+  for (const { name, text } of sourceFiles()) {
+    const starts: number[] = [];
+    for (let i = text.indexOf(marker); i !== -1; i = text.indexOf(marker, i + 1)) starts.push(i);
+    if (starts.length === 0) continue;
+    const resourceStart = text.indexOf("server.registerResource(");
+    for (let i = 0; i < starts.length; i++) {
+      const start = starts[i];
+      const bounds = [
+        i + 1 < starts.length ? starts[i + 1] : text.length,
+        resourceStart > start ? resourceStart : text.length,
+      ];
+      const body = text.slice(start, Math.min(...bounds));
+      blocks.push({
+        file: name,
+        body,
+        name: body.match(/registerTool\(\s*\n?\s*"([^"]+)"/)?.[1] ?? `${name}#${i}`,
+      });
+    }
+  }
+  return blocks;
+}

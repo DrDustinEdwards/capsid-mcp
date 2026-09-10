@@ -11,7 +11,7 @@ import {
 import { improveRunManual, openRuns } from "../src/improve-run.ts";
 import { anchorChecksum, parseScoresDoc } from "../src/improve-scores.ts";
 import { fakeD1, fakeEnv, fakeKv, fakeR2, withFetch } from "./fakes.ts";
-import { sourceFile } from "./source-files.ts";
+import { allSourceText, sourceFile, sourceFiles, toolBlocks } from "./source-files.ts";
 import { seedScoresDoc } from "./seed-scores.ts";
 
 // improve_runs.condition, from the arc's third ruling.
@@ -116,7 +116,7 @@ test("THE CONDITION IS IN THE OPENING AUDIT ROW, not only on the row it describe
 test("the FINISHING audit row carries it too, so one query covers a run's whole life", () => {
   // Driven by source: reaching finalize behaviourally needs a full run, and the
   // claim under test is that the field is present on the row the finalizer writes.
-  const run = sourceFile("improve-run.ts");
+  const run = allSourceText();
   const start = run.indexOf('improveAudit(env.DB, "improve-run-finished"');
   assert.ok(start !== -1, "the improve-run-finished audit row is gone");
   const block = run.slice(start, start + 400);
@@ -124,7 +124,7 @@ test("the FINISHING audit row carries it too, so one query covers a run's whole 
 });
 
 test("the run summary document states the condition", () => {
-  const run = sourceFile("improve-run.ts");
+  const run = allSourceText();
   assert.match(run, /`- condition: \$\{run\.condition\}`/);
 });
 
@@ -134,7 +134,7 @@ test("'no-memory' WITHHOLDS LINEAGE HISTORY from base selection", () => {
   // The ablation is only real if the input is actually withheld. Asserted at the
   // call site because that is where the withholding happens; a condition that
   // reached selectBase with the full history would be a label that lies.
-  const run = sourceFile("improve-run.ts");
+  const run = allSourceText();
   assert.match(
     run,
     /const lineage = run\.condition === "no-memory" \? \[\] : await recentAttempts\(/,
@@ -144,7 +144,7 @@ test("'no-memory' WITHHOLDS LINEAGE HISTORY from base selection", () => {
 });
 
 test("'no-transfer' OFFERS NO cross-project skill", () => {
-  const run = sourceFile("improve-run.ts");
+  const run = allSourceText();
   assert.match(
     run,
     /run\.condition !== "no-transfer" \? await candidateSkills\(/,
@@ -156,12 +156,15 @@ test("EVERY CONDITION OTHER THAN full CHANGES A BEHAVIOUR", () => {
   // The guard against adding a fourth value that records a difference it does not
   // make. Every non-default condition must be named somewhere in the orchestrator
   // outside its own type declaration.
-  const run = sourceFile("improve-run.ts");
+  const run = sourceFiles()
+    .filter((f) => f.name !== "improve-schema.ts")
+    .map((f) => f.text)
+    .join("\n");
   for (const condition of RUN_CONDITIONS) {
     if (condition === DEFAULT_CONDITION) continue;
     assert.ok(
       run.includes(`"${condition}"`),
-      `condition '${condition}' is declared but src/improve-run.ts never branches on it, so a run recorded under it behaves identically to full`
+      `condition '${condition}' is declared but no orchestrator file branches on it, so a run recorded under it behaves identically to full`
     );
   }
 });
@@ -206,16 +209,14 @@ test("the manual result reports the condition it ran under, including on a dry r
 });
 
 test("the improve_run tool exposes condition and describes what each value does", () => {
-  const server = sourceFile("server.ts");
-  const start = server.indexOf('"improve_run"');
-  const end = server.indexOf('"improve_status"');
-  const block = server.slice(start, end);
-  assert.match(block, /condition: bounded\(/);
-  assert.match(block, /no-memory/);
-  assert.match(block, /no-transfer/);
+  const block = toolBlocks().find((b) => b.name === "improve_run");
+  assert.ok(block, "could not bound the improve_run registration");
+  assert.match(block.body, /condition: bounded\(/);
+  assert.match(block.body, /no-memory/);
+  assert.match(block.body, /no-transfer/);
   // The tool passes it through rather than dropping it, which a description alone
   // would not prove.
-  assert.match(block, /condition\s*\}\)\);/);
+  assert.match(block.body, /condition\s*\}\)\);/);
 });
 
 // A type-level assertion: RunCondition is the union, not a bare string, so a typo

@@ -158,9 +158,6 @@ export async function improveWriteRefusal(
   // under a schema header stating that a string two modules must agree on is
   // declared once. Both audits flagged the copy; the guard and the paths the
   // loop actually writes now cannot drift apart.
-  const promptsPrefix = PROMPTS_PREFIX;
-  const skillsPrefix = SKILLS_PREFIX;
-  const scoresPath = SCORES_PATH;
   // THE NIGHTLY TASK DOCUMENT (audit 2026-09-07). `improve/run-<day>.md` is read
   // by the `/improve` driver and executed as its instruction list on a machine
   // holding five repo clones, local git and a Capsid write grant. It was the one
@@ -170,17 +167,17 @@ export async function improveWriteRefusal(
   if (path.startsWith(RUN_TASK_PREFIX)) {
     return `${namespace}/${path} is an improve loop task document. The /improve driver executes it, so a write here steers a session with local shell and repo access. Pass allow_improve_paths: true to write it anyway; the flag is audit-logged. The loop writes and signs these itself.`;
   }
-  if (path.startsWith(promptsPrefix)) {
+  if (path.startsWith(PROMPTS_PREFIX)) {
     return `${namespace}/${path} is the improve loop's run-prompt surface and the ordinary write tool refuses it. It steers the nightly attempt generator, so a write here is only accepted with allow_improve_paths: true, which is audit-logged.`;
   }
-  if (path.startsWith(skillsPrefix)) {
+  if (path.startsWith(SKILLS_PREFIX)) {
     return `${namespace}/${path} is an improve loop skill document, re-injected into other projects' runs, and the ordinary write tool refuses it. Pass allow_improve_paths: true to write it anyway; the flag is audit-logged.`;
   }
-  if (path === scoresPath) {
+  if (path === SCORES_PATH) {
     const before = priorBody === null ? null : await anchorChecksum(parseScoresDoc(namespace, priorBody));
     const after = await anchorChecksum(parseScoresDoc(namespace, newBody));
     if (before !== after) {
-      return `this write changes the checksummed Anchors block of ${namespace}/${scoresPath}, which is the improve loop's floor. Editing a Secondary weight is fine and does not trip this; changing an anchor needs allow_improve_paths: true (audit-logged) and a human re-pin afterwards.`;
+      return `this write changes the checksummed Anchors block of ${namespace}/${SCORES_PATH}, which is the improve loop's floor. Editing a Secondary weight is fine and does not trip this; changing an anchor needs allow_improve_paths: true (audit-logged) and a human re-pin afterwards.`;
     }
   }
   return null;

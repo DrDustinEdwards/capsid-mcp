@@ -12,7 +12,7 @@ import { mcpOriginProblem } from "../src/headers.ts";
 import { tickRuns } from "../src/improve-run.ts";
 import { anchorChecksum, parseScoresDoc } from "../src/improve-scores.ts";
 import { fakeD1, fakeEnv, fakeKv, fakeR2, withFetch, type FakeD1Options } from "./fakes.ts";
-import { sourceFile } from "./source-files.ts";
+import { allSourceText, sourceFile, sourceFiles, toolBlocks } from "./source-files.ts";
 import { seedScoresDoc } from "./seed-scores.ts";
 
 // THE 2026-09-06 ROUND-2 AUDIT FIXES, one block per finding. Each test was
@@ -194,11 +194,12 @@ test("a tick leaves a FRESH 'judging' run alone; only a stale one is returned to
 });
 
 test("every advanceRun inside ingestScore checks its result", () => {
-  const source = sourceFile("improve-run.ts");
-  const start = source.indexOf("export async function ingestScore");
-  const end = source.indexOf("async function maybeAbstract");
-  assert.ok(start > 0 && end > start, "could not bound ingestScore in improve-run.ts");
-  const body = source.slice(start, end);
+  const owner = sourceFiles().find((f) => f.text.includes("export async function ingestScore"));
+  assert.ok(owner, "could not locate ingestScore under src/");
+  const start = owner.text.indexOf("export async function ingestScore");
+  const end = owner.text.indexOf("async function maybeAbstract");
+  assert.ok(start >= 0 && end > start, `could not bound ingestScore in src/${owner.name}`);
+  const body = owner.text.slice(start, end);
   const all = body.match(/await advanceRun\(/g) ?? [];
   const checked = body.match(/=\s*await advanceRun\(/g) ?? [];
   assert.ok(all.length >= 3, `ingestScore has ${all.length} advanceRun calls; the transitions moved?`);
@@ -226,7 +227,7 @@ test("delete_branch treats a non-OK pulls response as a refusal, not as no PRs",
 // ---- 4. installation tokens are repo-scoped and cached per owner+repo -------
 
 test("installation tokens are minted scoped to the one repo and cached under owner/repo", () => {
-  const github = sourceFile("github.ts");
+  const github = allSourceText();
   assert.match(
     github,
     /const tokenKey = \(owner: string, repo: string\)/,
@@ -332,13 +333,10 @@ test("delete arms the body guard after an elicitation, like write and restore do
   // and restore: the delete handler must choose requireBodyUnchanged on the same
   // elicited signal. Without it, a body written during the 90-second prompt is
   // deleted with a stale snapshot, and the racing writer's body exists nowhere.
-  const server = sourceFile("server.ts");
-  const start = server.indexOf('"delete"');
-  const end = server.indexOf('"move"', start);
-  assert.ok(start > 0 && end > start, "could not bound the delete handler");
-  const block = server.slice(start, end);
+  const block = toolBlocks().find((b) => b.name === "delete");
+  assert.ok(block, "could not bound the delete handler");
   assert.match(
-    block,
+    block.body,
     /elicited\s*\?\s*requireBodyUnchanged/,
     "delete never arms requireBodyUnchanged: consent given during elicitation is not bound to the body it was about"
   );

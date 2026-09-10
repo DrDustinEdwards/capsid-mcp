@@ -6,7 +6,7 @@ import { improveControl } from "../src/improve-run.ts";
 import { sha256Hex } from "../src/auth.ts";
 import { operatorIdentity } from "../src/auth.ts";
 import { fakeD1, fakeEnv, fakeKv } from "./fakes.ts";
-import { sourceFile } from "./source-files.ts";
+import { allSourceText, sourceFile, sourceFiles } from "./source-files.ts";
 
 // THE PUBLIC DOCS, AND THE ONE THING THAT MUST NEVER BE IN THEM.
 //
@@ -181,9 +181,9 @@ test("two mints are different keys", async () => {
 test("the mint is a control action on the existing tool, not a new tool", () => {
   // Hard rule 1: the surface is 30 tools and stays small. A key mint is a control
   // verb on a tool that already has four of them, and adding a 31st tool for it
-  // would need its own ruling.
-  const server = sourceFile("server.ts");
-  const registrations = [...server.matchAll(/server\.registerTool\(/g)];
-  assert.equal(registrations.length, 30, `the surface moved to ${registrations.length} tools`);
-  assert.match(server, /"mint_operator_key"/, "the action must be reachable from the tool schema");
+  // would need its own ruling. Counted across src/ so a split of registerTool
+  // cannot hide a 31st (the pin lives in counts.test.ts too).
+  const registered = sourceFiles().reduce((n, f) => n + (f.text.match(/server\.registerTool\(/g) ?? []).length, 0);
+  assert.equal(registered, 30, `the surface moved to ${registered} tools`);
+  assert.match(allSourceText(), /"mint_operator_key"/, "the action must be reachable from the tool schema");
 });

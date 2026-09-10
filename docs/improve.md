@@ -69,26 +69,9 @@ so the sixth one cannot quietly reopen the hole.
 
 Attempt code executes in exactly one place: a container with no network, a
 read-only root, and every mount read-only, whose only writable surface is a tmpfs
-that dies with the run. Its results leave as a stdout pipe.
-
-The reasons are specific, and each was a live hole before it was one:
-
-- **A workspace overlay let attempt code replace the trusted signing script.** The
-  scoring job copied the attempt's tree over its own checkout, and the step that
-  signs the report then ran the attacker's copy with the signing key in its
-  environment. The job now never overlays anything, and the trusted script is
-  copied out of the workspace before any untrusted byte exists on the runner.
-- **The same overlay planted extra hidden-test files** that the sync did not
-  delete and the counting glob happily counted. The hidden suite is wiped before
-  it is synced and lives outside the workspace entirely.
-- **The test report went to a seekable file inside the attempt's own filesystem**,
-  so attempt code rewrote it from an exit handler after the reporter had flushed.
-  There is no destination file any more. Results are a pipe the container cannot
-  seek back into, and a test's own stdout is escaped by the reporter into comment
-  lines, so nothing a test prints can produce a result line at column 0.
-- **Markers carry a per-run nonce** the trusted shell drops from the environment
-  before any attempt code runs, because the secondary phases pipe raw tool output
-  into the same stream and a diagnostic can carry attacker text at column 0.
+that dies with the run. Its results leave as a stdout pipe. Markers carry a
+per-run nonce the trusted shell drops from the environment before any attempt
+code runs.
 
 ### Anchors do not come from the artifact
 

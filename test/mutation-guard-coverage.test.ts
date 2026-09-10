@@ -4,7 +4,7 @@ import { workflowWriteRefusal, WORKFLOW_DIR, writeRepoFile, deleteRepoFile } fro
 import { improveWriteRefusal } from "../src/improve-scores.ts";
 import { RUN_TASK_PREFIX } from "../src/improve-schema.ts";
 import { fakeEnv, fakeKv, withFetch } from "./fakes.ts";
-import { sourceFile } from "./source-files.ts";
+import { allSourceText, toolBlocks } from "./source-files.ts";
 
 // ENUMERATE EVERY SITE, audit 2026-09-07 (Opus MAJOR 5.4 and NOTE 6.1).
 //
@@ -21,27 +21,12 @@ import { sourceFile } from "./source-files.ts";
 // listing the four that exist today. A sixth tool that writes `documents` is a
 // build failure the day it is added, whether or not anyone remembers this file.
 
-const SERVER = sourceFile("server.ts");
-
 // A handler mutates the document store if it inserts a documents row or calls the
 // one path-mutation helper. Matched by SHAPE rather than by tool name, so the
 // next mutation is caught by what it does.
 const MUTATION_MARKERS = [/INSERT INTO documents/i, /\bpathMutation\(/];
 
-interface ToolBlock {
-  name: string;
-  body: string;
-}
-
-function toolBlocks(): ToolBlock[] {
-  const starts = [...SERVER.matchAll(/server\.registerTool\(\s*\n\s*"([a-z_]+)"/g)];
-  return starts.map((m, i) => ({
-    name: m[1],
-    body: SERVER.slice(m.index ?? 0, i + 1 < starts.length ? starts[i + 1].index : SERVER.length),
-  }));
-}
-
-function mutationTools(): ToolBlock[] {
+function mutationTools() {
   return toolBlocks().filter((t) => MUTATION_MARKERS.some((re) => re.test(t.body)));
 }
 
@@ -164,7 +149,7 @@ test("the refusal is checked in BOTH the shared dance and the write primitive", 
   // commitOnBranch covers delete_repo_file, whose mutate does its own ghFetch and
   // never reaches putFile. putFile covers a caller added later that does not go
   // through commitOnBranch at all.
-  const github = sourceFile("github.ts");
+  const github = allSourceText();
   const inCommit = /async function commitOnBranch[\s\S]*?workflowWriteRefusal\(/.test(github);
   const inPut = /async function putFile[\s\S]*?workflowWriteRefusal\(/.test(github);
   assert.ok(inCommit, "commitOnBranch must refuse before any network call");
@@ -173,7 +158,7 @@ test("the refusal is checked in BOTH the shared dance and the write primitive", 
 });
 
 test("the opt-in reaches audit_log, so a workflow write is greppable afterwards", () => {
-  const github = sourceFile("github.ts");
+  const github = allSourceText();
   assert.match(
     github,
     /allow_workflow_write: true \} : \{\}/,

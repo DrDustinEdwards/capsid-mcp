@@ -103,7 +103,6 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # ---- PER-REPO measurement. capsid-mcp: node --test, tsc, wrangler. ----
       - name: Build
         id: build
         continue-on-error: true
@@ -143,7 +142,6 @@ jobs:
               bundle_size_bytes: n(process.env.BUNDLE_BYTES),
             }));
           ' > metrics.json
-          cat metrics.json
 
       # PER-REPO: the source tree(s) the holdout imports. capsid-mcp: src.
       #
@@ -490,11 +488,7 @@ jobs:
               done
               echo "${M}-END"
             ' > "${RUNNER_TEMP}/holdout.tap" 2>"${RUNNER_TEMP}/holdout.err" || true
-          echo "container exited $?"
-          tail -5 "${RUNNER_TEMP}/holdout.err" || true
 
-      # Counting is done by the trusted copy, from the piped stream, against the
-      # manifest that came out of R2. Both live outside the workspace.
       - name: Count the holdout result
         id: holdout_count
         continue-on-error: true
@@ -507,7 +501,6 @@ jobs:
           PASSED=$("${NODE_BIN}" "${RUNNER_TEMP}/trusted/improve-report.mjs" --holdout-stream "${RUNNER_TEMP}/holdout.tap" "${CAPSID_NONCE}" || echo "0")
           echo "total=${TOTAL}" >> "$GITHUB_OUTPUT"
           echo "passed=${PASSED}" >> "$GITHUB_OUTPUT"
-          echo "holdout ${PASSED} of ${TOTAL}"
 
       # The same trusted copy, the same stream, and the artifact only gets to
       # disagree out loud. A mismatch on either recomputed metric is printed and
@@ -556,8 +549,6 @@ jobs:
           BODY=$("${NODE_BIN}" "${RUNNER_TEMP}/trusted/improve-report.mjs" "${RUNNER_TEMP}/attempt/metrics.json" "${HOLDOUT_TOTAL}" "${HOLDOUT_PASSED}")
           TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           SIG=$(TS="${TS}" BODY="${BODY}" "${NODE_BIN}" -e 'const c=require("crypto");const h=c.createHmac("sha256",process.env.IMPROVE_SCORE_KEY);h.update(process.env.TS+"."+process.env.BODY);process.stdout.write(h.digest("hex"))')
-          echo "Posting score report for ${ATTEMPT_ID}:"
-          echo "${BODY}"
           # A shakedown dispatch (the literal RUN_ID "shakedown") has no run row in
           # the Worker, so its report is answered 409 "unknown run" by design, AFTER
           # the signature verified (a bad signature is 401 before the run lookup).

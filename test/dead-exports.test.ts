@@ -141,8 +141,6 @@ const KNOWN_SUSPECTS = [
   "src/improve-scorer.ts: BACKUP_DUMP_PREFIX",
   "src/improve-scorer.ts: HOLDOUT_BUCKET_NAME",
   "src/improve-scorer.ts: HOLDOUT_CREDENTIAL_TTL_SECONDS",
-  "src/rate-limit.ts: REGISTRATION_LIMIT",
-  "src/rate-limit.ts: checkRate",
   "src/store-probe.ts: HEALTH_PROBE_NS",
   "src/store-probe.ts: HEALTH_PROBE_PATH",
   "src/store-probe.ts: HEALTH_PROBE_TERM",

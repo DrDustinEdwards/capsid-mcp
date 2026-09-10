@@ -1,12 +1,7 @@
 import { hmacHex, timingSafeEqual } from "./auth";
 import type { Env } from "./env";
-import { dispatchWorkflow } from "./github";
-import { HOLDOUT_PREFIX, holdoutManifestKey, ROSTER, SCORER_WORKFLOW, type HoldoutManifest } from "./improve-schema";
+import { HOLDOUT_PREFIX, holdoutManifestKey, ROSTER, type HoldoutManifest } from "./improve-schema";
 import type { MetricMap } from "./improve-scores";
-
-// Re-exported from improve-schema (moved there so ci_dispatch can refuse it
-// without an import cycle); existing importers keep this path.
-export { SCORER_WORKFLOW };
 
 // HMAC, not operator key: an /ops/ path would invite adding the operator-key check.
 export const SCORE_PATH = "/improve/score";
@@ -241,6 +236,42 @@ export function signaturePayload(timestamp: string, body: string): string {
 
 export type AuthVerdict = { ok: true; namespace: string } | { ok: false; status: number; refusal: string };
 
+type HmacFail = { ok: false; status: number; refusal: string };
+
+async function verifyHmac(
+  env: Pick<Env, "IMPROVE_SCORE_SECRET">,
+  signed: { timestamp: string; signature: string; body: string },
+  now: Date,
+  opts: {
+    deriveKey: (root: string) => Promise<string>;
+    missingSecret: string;
+    badSig: string;
+    ageNoun: "report" | "request";
+    afterSecret?: () => HmacFail | null;
+  }
+): Promise<{ ok: true } | HmacFail> {
+  if (!env.IMPROVE_SCORE_SECRET) {
+    return { ok: false, status: 503, refusal: opts.missingSecret };
+  }
+  const extra = opts.afterSecret?.();
+  if (extra) return extra;
+  const at = Date.parse(signed.timestamp);
+  if (Number.isNaN(at)) return { ok: false, status: 400, refusal: "missing or unparseable timestamp header" };
+  const age = now.getTime() - at;
+  // Both directions. A timestamp far in the future is as much a replay handle as
+  // one far in the past, and clock skew of a few minutes is what the tolerance
+  // below is sized for.
+  if (age > SIGNATURE_MAX_AGE_MS || age < -SIGNATURE_MAX_AGE_MS) {
+    return { ok: false, status: 401, refusal: `${opts.ageNoun} timestamp is ${Math.round(age / 1000)}s from now, outside the accepted window` };
+  }
+  const key = await opts.deriveKey(env.IMPROVE_SCORE_SECRET);
+  const expected = await hmacHex(key, signaturePayload(signed.timestamp, signed.body));
+  if (!timingSafeEqual(signed.signature.trim().toLowerCase(), expected)) {
+    return { ok: false, status: 401, refusal: opts.badSig };
+  }
+  return { ok: true };
+}
+
 // EVERY FAILURE PATH HERE REFUSES. There is no fall-through that admits a report
 // because something was missing, which is the one property this function has to
 // have: the arc's ruling is that any missing or unauthenticated score is treated
@@ -250,26 +281,17 @@ export async function verifySignedReport(
   signed: SignedRequest,
   now: Date
 ): Promise<AuthVerdict> {
-  if (!env.IMPROVE_SCORE_SECRET) {
-    return { ok: false, status: 503, refusal: "score reporting is not configured: IMPROVE_SCORE_SECRET is unset" };
-  }
-  if (!/^[a-z0-9_-]{1,64}$/i.test(signed.namespace)) {
-    return { ok: false, status: 400, refusal: "missing or malformed namespace header" };
-  }
-  const at = Date.parse(signed.timestamp);
-  if (Number.isNaN(at)) return { ok: false, status: 400, refusal: "missing or unparseable timestamp header" };
-  const age = now.getTime() - at;
-  // Both directions. A timestamp far in the future is as much a replay handle as
-  // one far in the past, and clock skew of a few minutes is what the tolerance
-  // below is sized for.
-  if (age > SIGNATURE_MAX_AGE_MS || age < -SIGNATURE_MAX_AGE_MS) {
-    return { ok: false, status: 401, refusal: `report timestamp is ${Math.round(age / 1000)}s from now, outside the accepted window` };
-  }
-  const key = await deriveScoreKey(env.IMPROVE_SCORE_SECRET, signed.namespace);
-  const expected = await hmacHex(key, signaturePayload(signed.timestamp, signed.body));
-  if (!timingSafeEqual(signed.signature.trim().toLowerCase(), expected)) {
-    return { ok: false, status: 401, refusal: "score report signature does not verify" };
-  }
+  const hmac = await verifyHmac(env, signed, now, {
+    deriveKey: (root) => deriveScoreKey(root, signed.namespace),
+    missingSecret: "score reporting is not configured: IMPROVE_SCORE_SECRET is unset",
+    badSig: "score report signature does not verify",
+    ageNoun: "report",
+    afterSecret: () =>
+      /^[a-z0-9_-]{1,64}$/i.test(signed.namespace)
+        ? null
+        : { ok: false, status: 400, refusal: "missing or malformed namespace header" },
+  });
+  if (!hmac.ok) return hmac;
   return { ok: true, namespace: signed.namespace };
 }
 
@@ -380,23 +402,34 @@ export const HOLDOUT_CREDENTIAL_TTL_SECONDS = 3600;
 // What the credential request body must say: which namespace (bound to the
 // signing key by the same rule as a score report) and a jti so a captured
 // request cannot be replayed inside the signature window.
-export function parseCredentialRequest(
-  body: string
-): { ok: true; namespace: string; jti: string } | { ok: false; refusal: string } {
-  let parsed: unknown;
+function parseJsonBody(body: string): { ok: true; parsed: unknown } | { ok: false; refusal: string } {
   try {
-    parsed = JSON.parse(body);
+    return { ok: true, parsed: JSON.parse(body) };
   } catch {
     return { ok: false, refusal: "the credential request body is not JSON" };
   }
-  const record = parsed as { namespace?: unknown; jti?: unknown };
+}
+
+function jtiOf(parsed: unknown): { ok: true; jti: string } | { ok: false; refusal: string } {
+  const jti = (parsed as { jti?: unknown } | null)?.jti;
+  if (typeof jti !== "string" || jti.length < 8 || jti.length > 128) {
+    return { ok: false, refusal: "the credential request body must carry a jti of 8 to 128 characters" };
+  }
+  return { ok: true, jti };
+}
+
+export function parseCredentialRequest(
+  body: string
+): { ok: true; namespace: string; jti: string } | { ok: false; refusal: string } {
+  const json = parseJsonBody(body);
+  if (!json.ok) return json;
+  const record = json.parsed as { namespace?: unknown; jti?: unknown };
   if (typeof record?.namespace !== "string" || record.namespace.length === 0) {
     return { ok: false, refusal: "the credential request body must name a namespace" };
   }
-  if (typeof record?.jti !== "string" || record.jti.length < 8 || record.jti.length > 128) {
-    return { ok: false, refusal: "the credential request body must carry a jti of 8 to 128 characters" };
-  }
-  return { ok: true, namespace: record.namespace, jti: record.jti };
+  const jti = jtiOf(json.parsed);
+  if (!jti.ok) return jti;
+  return { ok: true, namespace: record.namespace, jti: jti.jti };
 }
 
 // What the score job receives: everything it needs to run `aws s3 sync` with no
@@ -507,17 +540,9 @@ export async function mintBackupCredential(
 // cannot be replayed inside the signature window. No namespace: the scope is
 // fixed by the endpoint.
 export function parseBackupCredentialRequest(body: string): { ok: true; jti: string } | { ok: false; refusal: string } {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(body);
-  } catch {
-    return { ok: false, refusal: "the credential request body is not JSON" };
-  }
-  const record = parsed as { jti?: unknown };
-  if (typeof record?.jti !== "string" || record.jti.length < 8 || record.jti.length > 128) {
-    return { ok: false, refusal: "the credential request body must carry a jti of 8 to 128 characters" };
-  }
-  return { ok: true, jti: record.jti };
+  const json = parseJsonBody(body);
+  if (!json.ok) return json;
+  return jtiOf(json.parsed);
 }
 
 // The backup mirror's request, verified under the SAME rules as a score report
@@ -529,36 +554,10 @@ export async function verifyBackupCredentialRequest(
   signed: { timestamp: string; signature: string; body: string },
   now: Date
 ): Promise<{ ok: true } | { ok: false; status: number; refusal: string }> {
-  if (!env.IMPROVE_SCORE_SECRET) {
-    return { ok: false, status: 503, refusal: "backup credentials are not configured: IMPROVE_SCORE_SECRET is unset" };
-  }
-  const at = Date.parse(signed.timestamp);
-  if (Number.isNaN(at)) return { ok: false, status: 400, refusal: "missing or unparseable timestamp header" };
-  const age = now.getTime() - at;
-  if (age > SIGNATURE_MAX_AGE_MS || age < -SIGNATURE_MAX_AGE_MS) {
-    return { ok: false, status: 401, refusal: `request timestamp is ${Math.round(age / 1000)}s from now, outside the accepted window` };
-  }
-  const key = await deriveBackupCredentialKey(env.IMPROVE_SCORE_SECRET);
-  const expected = await hmacHex(key, signaturePayload(signed.timestamp, signed.body));
-  if (!timingSafeEqual(signed.signature.trim().toLowerCase(), expected)) {
-    return { ok: false, status: 401, refusal: "backup credential signature does not verify" };
-  }
-  return { ok: true };
-}
-
-// ---- dispatch ---------------------------------------------------------------
-
-// Ask the target repo's CI to score a branch. The workflow file is resolved on
-// the DEFAULT branch, never on the attempt branch; see dispatchWorkflow for why.
-export async function dispatchScorer(
-  env: Env,
-  namespace: string,
-  inputs: { branch: string; run_id: string; attempt_id: string }
-): Promise<{ repo: string; workflow: string; ref: string }> {
-  const result = await dispatchWorkflow(env, namespace, SCORER_WORKFLOW, {
-    branch: inputs.branch,
-    run_id: inputs.run_id,
-    attempt_id: inputs.attempt_id,
+  return verifyHmac(env, signed, now, {
+    deriveKey: deriveBackupCredentialKey,
+    missingSecret: "backup credentials are not configured: IMPROVE_SCORE_SECRET is unset",
+    badSig: "backup credential signature does not verify",
+    ageNoun: "request",
   });
-  return { repo: result.repo, workflow: result.workflow, ref: result.ref };
 }
