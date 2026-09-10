@@ -62,3 +62,12 @@ Rulings, measurements, and refusal reasons that were recorded only in Worker com
 - **:54-55** A four-digit year is never a count: `tool surface...(\d+)` matched 2026 in "the 2026-07-28 migration".
 - **:58-77** Episodics exempt (history of a run). `decision` exempt, ruled 2026-08-15: an append-only ruling log is history by construction. Three finer exemptions each revealed another false-positive shape.
 - **:191-194** `"all seven"` appears in 25 documents and almost none are about headers, so the flag is scoped to header context. COOP ships Report-Only, so "all seven enforced" overstates what is live.
+
+## src/limits.ts
+
+- **:9-15** Bounds measured against the live store on 2026-08-17 (F29). `MAX_BODY` is set from the largest VERSION row, not the largest document, because restore writes a stored snapshot back; a bound under that figure would make the largest snapshots unrestorable.
+- **:17-21** No `archive/` write ban: 41% of the live store already sits under that prefix, so a rule against writing there would refuse every future append/patch/meta and refuse restore of a deleted archived document.
+- **:51-56** Measured 2026-08-17: 557 documents across 8 namespaces, largest 245. `MAX_ROWS` 500 sits above a namespace and below the whole store.
+- **:67-69** `GATHER_BUDGET` 150_000: real packets measured 213KB and 330KB; a warning that fires on the normal case is not a bound. Enforced by trimming.
+- **:72-75** `LINT_CONSUMED_MAX` 20 is 81 statements, under D1's 100-statement batch ceiling. Chunking was rejected because a partial archive silently drops documents out of the lint loop.
+- **:114-124** Repo path grammar is a whole-segment check, not `includes("..")`, because `a..b` is a legal file name. Closed a real traversal: `encodeURIComponent` leaves `.` and `..` untouched, so `../../other-repo/contents/x` reached fetch() and URL-normalized into an unmapped repo.
