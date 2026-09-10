@@ -198,7 +198,7 @@ export function importedNames(text) {
       if (name && name !== "as") names.add(name);
     }
   }
-  // A name is a JavaScript identifier and nothing else. Belt and braces after the regex
+  // A name is a JavaScript identifier and nothing else. A second check after the regex
   // above: a token that is not one is a parse artefact.
   //
   // THE SNAPSHOT IS LOAD-BEARING, and it is a NAMED CONST rather than a spread in the
