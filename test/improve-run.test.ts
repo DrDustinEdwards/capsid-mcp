@@ -5,6 +5,7 @@ import { MAX_CONSECUTIVE_REVERTS, SCORE_TIMEOUT_MS } from "../src/improve-schema
 import { improveRunManual, improveStatus, ingestScore, openRuns, tickRuns } from "../src/improve-run.ts";
 import type { ScoreReport } from "../src/improve-scorer.ts";
 import { fakeD1, fakeEnv, fakeKv, fakeR2, withFetch, type FakeD1Options } from "./fakes.ts";
+import { sseChange } from "./improve-fakes.ts";
 import { seedScoresDoc } from "./seed-scores.ts";
 
 // THE LOOP, DRIVEN. Keep and revert, the monitor's veto, the restore after five
@@ -482,34 +483,8 @@ test("A DUPLICATE REPORT IS IGNORED, not counted twice", async () => {
 
 // ---- Fix 2: the deterministic path monitor runs BEFORE the branch is pushed --
 
-// A real streaming attempt response, in the shape proposeChange parses. The change
-// touches a protected path (package.json), which the pre-push gate must catch.
-function sseChange(files: Array<{ path: string; content: string }>): string {
-  const payload = JSON.stringify({ summary: "s", reasoning: "r", files });
-  const events: Array<[string, unknown]> = [
-    [
-      "message_start",
-      {
-        type: "message_start",
-        message: {
-          id: "msg_1",
-          type: "message",
-          role: "assistant",
-          model: "claude-sonnet-5",
-          content: [],
-          stop_reason: null,
-          usage: { input_tokens: 100, output_tokens: 0 },
-        },
-      },
-    ],
-    ["content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }],
-    ["content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: payload } }],
-    ["content_block_stop", { type: "content_block_stop", index: 0 }],
-    ["message_delta", { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 20 } }],
-    ["message_stop", { type: "message_stop" }],
-  ];
-  return events.map(([name, data]) => `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`).join("");
-}
+// The change touches a protected path (package.json), which the pre-push gate must
+// catch. The stream itself is ./improve-fakes.ts.
 
 const ATTEMPTING = {
   id: "capsid-r2",

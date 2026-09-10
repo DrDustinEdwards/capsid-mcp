@@ -354,3 +354,42 @@ export function improveExec(sql: string, params: unknown[], rows: ImproveRows): 
       `result would make whatever asserts on it vacuously true.\n  ${text}`
   );
 }
+
+// ONE SSE ATTEMPT RESPONSE. The attempt path uses the SDK's streaming helper, so a
+// plain JSON body is answered with "request ended without sending any chunks", and a
+// test that hands it one is exercising a non-streaming lookalike.
+//
+// Three files built this event stream: improve-run.test.ts and
+// audit-2026-09-06-round2.test.ts held byte-identical copies (the second said so in
+// a comment), and improve-caching.test.ts held a twin that differed only in the
+// cache token counters it needs.
+export function sseMessage(text: string, usage: Record<string, unknown> = {}): string {
+  const events: Array<[string, unknown]> = [
+    [
+      "message_start",
+      {
+        type: "message_start",
+        message: {
+          id: "msg_1",
+          type: "message",
+          role: "assistant",
+          model: "claude-sonnet-5",
+          content: [],
+          stop_reason: null,
+          usage: { input_tokens: 100, output_tokens: 0, ...usage },
+        },
+      },
+    ],
+    ["content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }],
+    ["content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } }],
+    ["content_block_stop", { type: "content_block_stop", index: 0 }],
+    ["message_delta", { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 20 } }],
+    ["message_stop", { type: "message_stop" }],
+  ];
+  return events.map(([name, data]) => `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`).join("");
+}
+
+// The shape proposeChange parses, over that stream.
+export function sseChange(files: Array<{ path: string; content: string }>): string {
+  return sseMessage(JSON.stringify({ summary: "s", reasoning: "r", files }));
+}
