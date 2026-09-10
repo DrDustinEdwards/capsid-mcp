@@ -2,9 +2,9 @@
 //
 // A SEPARATE MODULE, NOT A SECOND FAKE. test/fakes.ts still owns the single
 // fakeD1(); this file is the dialect it delegates to when a statement names an
-// improve_* table. The rule from quality audit 6.2 is that there is one fake per
-// binding, not that one file holds every SQL shape, and folding four more tables
-// into the document dialect would have made the file the thing nobody reads.
+// improve_* table. The rule from quality audit 6.2 is that there is one fake per binding,
+// not that one file holds every SQL shape, and folding four more tables into the document
+// dialect would have made this file too large to read.
 //
 // IT IS ROW-BACKED AND BIND-AWARE, for the reason 6.1 gives: a fake that answers
 // on SQL shape alone cannot disagree with the handler, so every assertion becomes
