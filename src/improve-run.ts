@@ -40,15 +40,12 @@ import {
 } from "./improve/open";
 import { tickRuns, type TickOutcome } from "./improve/tick";
 
-export { ingestScore, type IngestResult } from "./improve/ingest";
-export {
-  checkBudget,
-  openRuns,
-  type BudgetStatus,
-  type OpenOutcome,
-  type OpenSummary,
-} from "./improve/open";
-export { DEFAULT_RUN_PROMPT, tickRuns, type TickOutcome } from "./improve/tick";
+// The barrel. Only what something outside src/improve/ actually imports: src/index.ts
+// and src/routes.ts take openRuns, tickRuns and ingestScore, and test/ takes
+// checkBudget. A re-export nothing imports is a name the split invented.
+export { ingestScore } from "./improve/ingest";
+export { checkBudget, openRuns } from "./improve/open";
+export { tickRuns } from "./improve/tick";
 
 // WHAT THE DRIVER ASKS BEFORE IT EXECUTES A PLAN. Returns the verification of one
 // task document: its signature against the Worker's derived key, and its last
