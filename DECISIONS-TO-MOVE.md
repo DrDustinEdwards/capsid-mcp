@@ -188,3 +188,7 @@ Rulings, measurements, and refusal reasons that were recorded only in Worker com
 ## src/improve-state.ts
 
 - **:1-17** Every transition is `UPDATE ... WHERE status = <expected> RETURNING id`, not `meta.changes`. These tables have no FTS triggers so meta.changes would be honest here; RETURNING is used anyway so the rule does not depend on remembering which tables have triggers.
+
+## src/truth-report.ts
+
+- **:1-25** Integrity is good-standing subjects over all subjects, unweighted. Stored as `<namespace>/reports/lint-<date>.md` so the trend is a document. Does not judge whether a decision is correct.
