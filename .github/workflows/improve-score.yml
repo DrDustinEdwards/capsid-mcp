@@ -17,38 +17,35 @@ name: improve-score
 # ONLY THE build JOB DIFFERS PER REPO. The score job and scripts/improve-report.mjs
 # are copied verbatim; change them here and re-copy, never edit one copy.
 #
-# WHY THE CONTAINER (audit 2026-09-07, Opus CRITICAL 5.1 and Grok CRITICAL 1+2).
-# The previous split ran `cp -r attempt/code/. .` over the default-branch checkout
-# and then executed holdout tests that import the attempt source, in the same job
-# that holds IMPROVE_SCORE_KEY. Three things followed, and all three were live:
+# WHY THE CONTAINER (audit 2026-09-07, Opus CRITICAL 5.1 and Grok CRITICAL 1+2). The
+# previous split ran `cp -r attempt/code/. .` over the default-branch checkout and then
+# executed holdout tests that import the attempt source, in the same job that holds
+# IMPROVE_SCORE_KEY. Three consequences, all live:
 #
-#   1. Job A's staging did not wipe code/ first, so attempt code running during
-#      Job A's own test step could write code/scripts/improve-report.mjs. The
-#      overlay then replaced the TRUSTED signing script and the Post step ran it
-#      with the HMAC key in its environment. Direct key theft.
-#   2. The same overlay could plant extra .improve-holdout/*.test.* files, which
-#      the sync did not delete and the counting glob happily counted.
-#   3. The TAP destination was a seekable file in the attempt's own filesystem,
-#      so attempt code could rewrite it from process.on('exit') after the reporter
-#      flushed, which forges the one anchor the loop rests on.
+#   1. Job A's staging did not wipe code/ first, so attempt code running during Job A's
+#      own test step could write code/scripts/improve-report.mjs. The overlay then
+#      replaced the TRUSTED signing script and the Post step ran it with the HMAC key
+#      in its environment.
+#   2. The same overlay could plant extra .improve-holdout/*.test.* files, which the
+#      sync did not delete and the counting glob counted.
+#   3. The TAP destination was a seekable file in the attempt's own filesystem, so
+#      attempt code could rewrite it from process.on('exit') after the reporter
+#      flushed.
 #
-# The fix is structural rather than a patch to each: attempt code now executes
-# ONLY inside `docker run --rm --network none --read-only`, with the workspace
-# nowhere in it, results leaving only as a stdout pipe the container cannot seek
-# back into, and the trusted scorer script copied out of the workspace before any
-# untrusted byte exists on disk.
+# Attempt code now executes ONLY inside `docker run --rm --network none --read-only`,
+# with the workspace nowhere in it, results leaving only as a stdout pipe the container
+# cannot seek back into, and the trusted scorer script copied out of the workspace
+# before any untrusted byte exists on disk.
 #
-# WHAT REMAINS ATTEMPT-INFLUENCED, stated rather than glossed. As of 2026-09-07
-# that is bundle_size_bytes ALONE. test_pass_rate and lint_count are recomputed in
-# the score job's container from this repo's own commands, taken from the map in
-# scripts/improve-report.mjs on the default branch; metrics.json is read for
-# bundle_size_bytes and cross-checked on the other two, with a mismatch logged and
-# the container's value winning. bundle_size_bytes stays with Job A because
-# measuring it means running the repo's bundler, which an offline container cannot
-# do. The two things that decide keep-or-revert against a floor are still
-# build_passes (a job output from a step outcome) and holdout_pass_rate
-# (recomputed by the Worker from the container's own output against the R2
-# manifest). Those are the numbers the isolation protects.
+# WHAT REMAINS ATTEMPT-INFLUENCED, as of 2026-09-07: bundle_size_bytes ALONE.
+# test_pass_rate and lint_count are recomputed in the score job's container from this
+# repo's own commands, taken from the map in scripts/improve-report.mjs on the default
+# branch; metrics.json is read for bundle_size_bytes and cross-checked on the other
+# two, with a mismatch logged and the container's value winning. bundle_size_bytes
+# stays with Job A because measuring it means running the repo's bundler, which an
+# offline container cannot do. The two numbers deciding keep-or-revert against a floor
+# are build_passes (a job output from a step outcome) and holdout_pass_rate (recomputed
+# by the Worker from the container's own output against the R2 manifest).
 
 on:
   workflow_dispatch:
@@ -73,11 +70,10 @@ jobs:
     timeout-minutes: 25
     outputs:
       head_sha: ${{ steps.head.outputs.sha }}
-      # THE ANCHOR COMES FROM A STEP OUTCOME, NOT FROM THE ARTIFACT (audit
-      # 2026-09-07, Grok MAJOR 3). metrics.json is written on a runner that has
-      # already executed attempt code, so a detached writer can rewrite it before
-      # the upload. A job output is set by the Actions runner from the step's own
-      # result and attempt code cannot reach it.
+      # THE ANCHOR COMES FROM A STEP OUTCOME, NOT FROM THE ARTIFACT (audit 2026-09-07,
+      # Grok MAJOR 3). metrics.json is written on a runner that has already executed
+      # attempt code, so a detached writer can rewrite it before the upload. A job
+      # output is set by the Actions runner from the step's own result.
       build_passes: ${{ steps.build.outcome == 'success' && '1' || '0' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -89,8 +85,8 @@ jobs:
         id: head
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      # AFTER checkout: actions/checkout cleans the workspace, so a file written
-      # before it is deleted and never reaches the artifact.
+      # AFTER checkout: actions/checkout cleans the workspace, so a file written before
+      # it is deleted and never reaches the artifact.
       - name: Stamp the start
         id: started
         run: echo "epoch=$(date -u +%s)" > started.txt
@@ -108,9 +104,9 @@ jobs:
         continue-on-error: true
         run: npm run check
 
-      # node directly, not `npm test --`: the reporter flags must come BEFORE the
-      # test glob or node ignores them (npm would append them after the script's
-      # fixed glob). PER-REPO command; mirrors package.json's test invocation.
+      # node directly, not `npm test --`: the reporter flags must come BEFORE the test
+      # glob or node ignores them, and npm appends them after the script's fixed glob.
+      # PER-REPO command; mirrors package.json's test invocation.
       - name: Test
         id: test
         continue-on-error: true
@@ -124,12 +120,11 @@ jobs:
           BUILD_PASSES=0; [ "${{ steps.build.outcome }}" = "success" ] && BUILD_PASSES=1
           RATE=$(node scripts/improve-report.mjs --rate test-report.json || echo "")
           LINT_COUNT=$(npm run check:test 2>&1 | grep -c "error TS" || true)
-          # bundle_size_bytes needs a wrangler.jsonc, and this repo gitignores the
-          # real one, so the dry run had nothing to read and the metric came back
-          # null on every run. Generated here from wrangler.jsonc.example plus the
-          # pinned ids in scripts/bindings.mjs, with NO NETWORK and NO SECRETS: a
-          # dry run bundles, it does not talk to the account, so placeholder-free
-          # ids are all it needs. Job A holds no credential and this does not
+          # bundle_size_bytes needs a wrangler.jsonc and this repo gitignores the real
+          # one, so the dry run had nothing to read and the metric came back null on
+          # every run. Generated here from wrangler.jsonc.example plus the pinned ids in
+          # scripts/bindings.mjs, with NO NETWORK and NO SECRETS: a dry run bundles, it
+          # does not talk to the account. Job A holds no credential and this does not
           # change that (ruled 2026-09-08).
           node scripts/dry-run-config.mjs
           BUNDLE_BYTES=$(npx wrangler deploy --dry-run --outdir=.improve-build > /dev/null 2>&1 && du -sb .improve-build/index.js 2>/dev/null | cut -f1 || echo "")
@@ -143,12 +138,12 @@ jobs:
             }));
           ' > metrics.json
 
-      # PER-REPO: the source tree(s) the holdout imports. capsid-mcp: src.
+      # PER-REPO: the source trees the holdout imports. capsid-mcp: src.
       #
-      # `rm -rf code` FIRST (audit 2026-09-07, Grok CRITICAL 1). Without it, a
-      # code/ directory written by attempt code during the Test step above
-      # survives into the artifact alongside the trees this step stages, and the
-      # old Job B copied the whole of code/ over its own checkout.
+      # `rm -rf code` FIRST (audit 2026-09-07, Grok CRITICAL 1). Without it a code/
+      # directory written by attempt code during the Test step survives into the
+      # artifact alongside the trees this step stages, and the old Job B copied the whole
+      # of code/ over its own checkout.
       - name: Stage the scored source
         run: |
           set -euo pipefail
@@ -177,8 +172,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      # THE DEFAULT BRANCH ONLY. Nothing from the attempt branch is ever checked
-      # out here, and nothing is ever overlaid onto this working tree.
+      # THE DEFAULT BRANCH ONLY. Nothing from the attempt branch is checked out here and
+      # nothing is overlaid onto this working tree.
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
@@ -190,10 +185,10 @@ jobs:
           # before corepack has provisioned pnpm for a pnpm-workspace repo.
           package-manager-cache: false
 
-      # PACKAGE-MANAGER AGNOSTIC so this job stays byte-identical across an npm repo
-      # and a pnpm workspace: pnpm-lock.yaml picks pnpm (via corepack, honouring the
-      # repo's packageManager field), otherwise npm ci. Both read the DEFAULT
-      # branch's lockfile, which an attempt cannot edit (it is a protected path).
+      # PACKAGE-MANAGER AGNOSTIC so this job stays byte-identical across an npm repo and
+      # a pnpm workspace: pnpm-lock.yaml picks pnpm via corepack, honouring the repo's
+      # packageManager field, otherwise npm ci. Both read the DEFAULT branch's lockfile,
+      # which an attempt cannot edit because it is a protected path.
       - name: Install dependencies
         run: |
           set -euo pipefail
@@ -204,15 +199,15 @@ jobs:
             npm ci
           fi
 
-      # THE TRUSTED SCRIPT AND THE NODE BINARY ARE RESOLVED BEFORE ANY UNTRUSTED
-      # BYTE EXISTS ON THIS RUNNER, and only these copies are used afterwards.
-      # Even though nothing untrusted is written to the workspace any more, this
-      # is what makes that property independent of the steps below staying correct.
+      # THE TRUSTED SCRIPT AND THE NODE BINARY ARE RESOLVED BEFORE ANY UNTRUSTED BYTE
+      # EXISTS ON THIS RUNNER, and only these copies are used afterwards. Nothing
+      # untrusted is written to the workspace any more; this makes that property
+      # independent of the steps below staying correct.
       #
-      # It also writes the per-repo sandbox commands and the staged-tree list from
-      # the map inside that trusted script, which is how this job stays
-      # byte-identical while measuring five different repos, and mints the marker
-      # nonce the container shell uses to frame its output.
+      # It also writes the per-repo sandbox commands and the staged-tree list from the map
+      # inside that trusted script, which is how this job stays byte-identical while
+      # measuring five different repos, and mints the marker nonce the container shell
+      # uses to frame its output.
       - name: Stash the trusted scorer, the sandbox commands and the marker nonce
         id: trusted
         env:
@@ -226,24 +221,23 @@ jobs:
           "${NODE_BIN}" "${RUNNER_TEMP}/trusted/improve-report.mjs" --secondary-scripts "${IMPROVE_NAMESPACE}" "${RUNNER_TEMP}/trusted"
           echo "nonce=$("${NODE_BIN}" -e 'process.stdout.write(require("crypto").randomUUID().replace(/-/g,""))')" >> "$GITHUB_OUTPUT"
 
-      # Into RUNNER_TEMP, never the workspace, so the attempt tree and the
-      # default-branch checkout never share a directory.
+      # Into RUNNER_TEMP, never the workspace, so the attempt tree and the default-branch
+      # checkout never share a directory.
       - name: Download the attempt artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: attempt
           path: ${{ runner.temp }}/attempt
 
-      # NO LONG-LIVED R2 SECRET. The holdout is pulled with a ONE-HOUR
-      # object-read-only credential scoped to this namespace's prefix, minted by
-      # the Worker on request and signed with the same per-namespace key as the
-      # score report. This step's env holds only the signing key; no attempt code
-      # runs on this runner at all. Checksums are when_required because R2
-      # rejects the CRC headers newer aws CLIs send by default.
+      # NO LONG-LIVED R2 SECRET. The holdout is pulled with a ONE-HOUR object-read-only
+      # credential scoped to this namespace's prefix, minted by the Worker on request and
+      # signed with the same per-namespace key as the score report. This step's env holds
+      # only the signing key. Checksums are when_required because R2 rejects the CRC
+      # headers newer aws CLIs send by default.
       #
-      # WIPED BEFORE THE SYNC (audit 2026-09-07, Grok CRITICAL 1): `aws s3 sync`
-      # has no --delete here, so a pre-existing file under the destination would
-      # survive and be counted as a case.
+      # WIPED BEFORE THE SYNC (audit 2026-09-07, Grok CRITICAL 1): `aws s3 sync` has no
+      # --delete here, so a pre-existing file under the destination would survive and be
+      # counted as a case.
       - name: Pull the holdout suite
         id: holdout
         continue-on-error: true
@@ -286,21 +280,20 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/holdout"
           aws s3 sync "s3://${HOLDOUT_BUCKET}/${HOLDOUT_PREFIX}" "${RUNNER_TEMP}/holdout/" --endpoint-url "${HOLDOUT_ENDPOINT}"
 
-      # THE HOLDOUT IMPORT MANIFEST, checked before anything runs (ruled
-      # 2026-09-08). improve/holdout/<ns>/imports.txt lists every name the hidden
-      # suite imports out of this repo's source. It is committed and not secret:
-      # an export name is already in the source.
+      # THE HOLDOUT IMPORT MANIFEST, checked before anything runs (ruled 2026-09-08).
+      # improve/holdout/<ns>/imports.txt lists every name the hidden suite imports out of
+      # this repo's source. It is committed and not secret: an export name is already in
+      # the source.
       #
-      # Why it is a gate rather than a note. The bloat pass removed two exports on
-      # a scan that found no caller in src/ or test/; the holdout imported both,
-      # and the holdout is structurally invisible to anything that runs in the
-      # repo. 28 of 30 against an anchor of min 1.0, and nothing local could have
-      # predicted it. This fails in BOTH directions: the dead-export check treats
-      # a listed name as a caller, and this step refuses a case importing a name
-      # that is not listed, so the list cannot fall behind the suite.
+      # A gate rather than a note. The bloat pass removed two exports on a scan that
+      # found no caller in src/ or test/; the holdout imported both, and the holdout is
+      # structurally invisible to anything that runs in the repo. 28 of 30 against an
+      # anchor of min 1.0. This fails in BOTH directions: the dead-export check treats a
+      # listed name as a caller, and this step refuses a case importing a name that is
+      # not listed.
       #
-      # It runs on the TRUSTED copy, over the R2 sync, before the container. It
-      # never prints a case filename.
+      # It runs on the TRUSTED copy, over the R2 sync, before the container. It never
+      # prints a case filename.
       - name: Check the holdout import manifest
         env:
           NODE_BIN: ${{ steps.trusted.outputs.node }}
@@ -311,52 +304,48 @@ jobs:
             "${RUNNER_TEMP}/holdout" "${IMPROVE_NAMESPACE}" \
             "improve/holdout/${IMPROVE_NAMESPACE}/imports.txt"
 
-      # THE ONLY PLACE ATTEMPT CODE EVER RUNS IN THIS JOB, and it runs with no
-      # network, a read-only root, no workspace mount, and no secret in scope.
+      # THE ONLY PLACE ATTEMPT CODE EVER RUNS IN THIS JOB, and it runs with no network, a
+      # read-only root, no workspace mount, and no secret in scope.
       #
       #   --network none    nothing it learns can leave, including the suite.
       #   --read-only       the image and every bind mount stay immutable.
       #   -v ...:ro         attempt, holdout and node_modules are read-only.
       #   --tmpfs /work     the only writable surface, and it dies with the run.
-      #   pinned by digest  so the image cannot be repointed under us.
+      #   pinned by digest  so the image cannot be repointed.
       #
-      # GLIBC, NOT ALPINE, and that is a measurement rather than a preference. The
-      # container mounts node_modules installed by the RUNNER, which is Ubuntu and
-      # therefore glibc. On an Alpine image every package with a platform-specific
-      # native binary asks for its musl build and finds only the gnu one: rollup
-      # threw at `/repo/node_modules/rollup/dist/native.js:121` on foxhound, which
-      # took vitest and everything downstream of vite with it, and biome could not
-      # resolve its binary at all. Pure-JS tooling (node --test, tsc) was fine,
-      # which is exactly why capsid-mcp measured clean while three repos reported
-      # null. bookworm matches the runner.
+      # GLIBC, NOT ALPINE. The container mounts node_modules installed by the RUNNER,
+      # which is Ubuntu and therefore glibc. On an Alpine image every package with a
+      # platform-specific native binary asks for its musl build and finds only the gnu
+      # one: rollup threw at `/repo/node_modules/rollup/dist/native.js:121` on foxhound,
+      # taking vitest and everything downstream of vite with it, and biome could not
+      # resolve its binary at all. Pure-JS tooling (node --test, tsc) was fine, which is
+      # why capsid-mcp measured clean while three repos reported null. bookworm matches
+      # the runner.
       #
-      # THE FULL IMAGE, NOT slim, BECAUSE IT CARRIES git. A foxhound test shells
-      # out to git and slim answered "git: not found", failing one file of 255.
-      # Ruled 2026-09-08: add the tool rather than exclude the file, because
-      # excluding a file to make a number go up is how a score stops describing
-      # the suite. There is no second way in: apt-get cannot run behind
-      # --network none, so the tool has to be in the image or absent.
+      # THE FULL IMAGE, NOT slim, BECAUSE IT CARRIES git. A foxhound test shells out to
+      # git and slim answered "git: not found", failing one file of 255. Ruled
+      # 2026-09-08: add the tool rather than exclude the file, because excluding a file
+      # to make a number go up is how a score stops describing the suite. apt-get cannot
+      # run behind --network none, so the tool has to be in the image or absent.
       #
-      # RESULTS LEAVE AS A STDOUT PIPE. There is no seekable TAP destination for
-      # the child to rewrite: the reporter writes to the container's stdout, the
-      # runner captures it outside the container, and a test's own stdout is
-      # escaped by node's TAP reporter into `# ` comment lines, so it cannot forge
-      # a result line at column 0. The per-case markers below are emitted by this
-      # trusted shell, never by a test.
+      # RESULTS LEAVE AS A STDOUT PIPE. There is no seekable TAP destination for the
+      # child to rewrite: the reporter writes to the container's stdout, the runner
+      # captures it outside the container, and a test's own stdout is escaped by node's
+      # TAP reporter into `# ` comment lines, so it cannot forge a result line at column
+      # 0. The per-case markers below are emitted by this trusted shell, never by a test.
+      #
       # THE SECONDARIES ARE RECOMPUTED HERE TOO (audit 2026-09-07 residual). Job A
-      # measures test_pass_rate and lint_count on a runner that has already run
-      # attempt code, and the CI plant in run 34162010375 proved what that is
-      # worth: a forged metrics.json put test_pass_rate 1 and lint_count 0 into a
-      # signed report. Both numbers are now measured HERE, by the repo's own
+      # measures test_pass_rate and lint_count on a runner that has already run attempt
+      # code, and the CI plant in run 34162010375 put a forged test_pass_rate 1 and
+      # lint_count 0 into a signed report. Both are now measured HERE, by the repo's own
       # commands, in the same sandbox, framed by a nonce the attempt never sees.
       # metrics.json survives for bundle_size_bytes alone, and is cross-checked.
       #
-      # THE WORKING TREE IS THE DEFAULT BRANCH WITH THE DECLARED TREES REPLACED.
-      # /work starts as a symlink view of the trusted checkout, so tests, configs
-      # and node_modules are the copies an attempt cannot edit (they are protected
-      # paths), and only the trees named in the trusted map are taken from the
-      # attempt. Each is taken WHOLE, so a file the attempt deleted is deleted in
-      # the sandbox instead of reappearing from the default branch.
+      # THE WORKING TREE IS THE DEFAULT BRANCH WITH THE DECLARED TREES REPLACED. /work
+      # starts as a symlink view of the trusted checkout, so tests, configs and
+      # node_modules are the copies an attempt cannot edit, and only the trees named in
+      # the trusted map are taken from the attempt. Each is taken WHOLE, so a file the
+      # attempt deleted is deleted in the sandbox instead of reappearing.
       - name: Run the holdout suite and recompute the secondaries in an isolated container
         id: holdout_run
         continue-on-error: true
@@ -379,24 +368,22 @@ jobs:
             node:24.14.1-bookworm@sha256:80fc934952c8f1b2b4d39907af7211f8a9fff1a4c2cf673fb49099292c251cec \
             -c '
               set -u
-              # The nonce becomes a SHELL variable and leaves the environment, so
-              # no process started below can read it and forge a marker.
+              # The nonce becomes a SHELL variable and leaves the environment, so no
+              # process started below can read it and forge a marker.
               M="##CAPSID-${CAPSID_NONCE}"
               unset CAPSID_NONCE
-              # THE TRUSTED TREE IS COPIED, NOT SYMLINKED, AND THE FIRST CI PLANT
-              # IS WHY. Symlinking /work/test at /repo/test made the REAL path of a
-              # test file /repo/test/x.test.ts, so node resolved its ../src import
-              # against /repo and the sandbox measured the default branch against
-              # itself: run 34168480470 reported test_pass_rate 1 for an attempt
-              # that genuinely broke two tests. Only node_modules stays a symlink,
-              # where resolving through the real path is correct.
+              # THE TRUSTED TREE IS COPIED, NOT SYMLINKED. Symlinking /work/test at
+              # /repo/test made the REAL path of a test file /repo/test/x.test.ts, so
+              # node resolved its ../src import against /repo and the sandbox measured
+              # the default branch against itself: run 34168480470 reported
+              # test_pass_rate 1 for an attempt that broke two tests. Only node_modules
+              # stays a symlink, where resolving through the real path is correct.
               #
-              # NO APOSTROPHE ANYWHERE IN THIS SCRIPT, comments included. The whole
-              # thing is one single-quoted shell argument, so one apostrophe ends it
-              # and the rest runs on the RUNNER instead of in the container. That is
-              # not hypothetical: run 34168919050 died at `cd: /repo: No such file
-              # or directory` because the paragraph above once wrote the possessive
-              # of "a test file". test/secondary-recompute.test.ts asserts it now.
+              # NO APOSTROPHE ANYWHERE IN THIS SCRIPT, comments included. The whole thing
+              # is one single-quoted shell argument, so one apostrophe ends it and the
+              # rest runs on the RUNNER. Run 34168919050 died at
+              # `cd: /repo: No such file or directory` for exactly that reason.
+              # test/secondary-recompute.test.ts asserts it now.
               cd /repo || exit 1
               find . -path ./.git -prune -o -name node_modules -prune -o -type d -print | while read -r d; do
                 mkdir -p "/work/$d"
@@ -405,19 +392,17 @@ jobs:
                 cp "$f" "/work/$f" 2>/dev/null || true
               done
               # -print -prune, not -print: without the prune this descends INTO
-              # node_modules and finds every nested one, then tries to rm and
-              # relink them underneath the read-only symlink it just made. On
-              # foxhound that was thousands of "Read-only file system" lines
-              # burying the one message that mattered.
-              # A REAL DIRECTORY OF SYMLINKS, not a symlink to the directory.
-              # vite writes node_modules/.vite-temp before it loads a config, and
-              # a symlink to the read-only mount made that ENOENT: foxhound and
-              # dustinedwards-info both died trying to mkdir that path, with the
-              # vitest config never loaded.
-              # One level of symlinks gives every package its read-only original
-              # while leaving the directory itself writable in the tmpfs, so a
-              # tool that scribbles inside node_modules gets somewhere to scribble
-              # and still cannot reach the trusted checkout.
+              # node_modules, finds every nested one, then tries to rm and relink them
+              # underneath the read-only symlink it just made. On foxhound that was
+              # thousands of "Read-only file system" lines.
+              #
+              # A REAL DIRECTORY OF SYMLINKS, not a symlink to the directory. vite writes
+              # node_modules/.vite-temp before it loads a config, and a symlink to the
+              # read-only mount made that ENOENT: foxhound and dustinedwards-info both
+              # died trying to mkdir that path.
+              #
+              # One level of symlinks gives every package its read-only original while
+              # leaving the directory writable in the tmpfs.
               find . -path ./.git -prune -o -name node_modules -print -prune | while read -r d; do
                 rel=${d#./}
                 rm -rf "/work/$rel"
@@ -435,21 +420,17 @@ jobs:
                 cp -R "/attempt/$T" "/work/$T"
               done < /trusted/trees.txt
               cd /work || exit 1
-              # A REAL GIT REPOSITORY, because code that asks git a question should
-              # get an answer rather than a fatal (ruled 2026-09-08). Adding the
-              # binary was not enough: the sandbox assembles its tree by copying,
-              # deliberately without .git, so the tool was present and the
-              # repository was not, and foxhound went from
-              # "git: not found" to "not a git repository" with the same file
-              # still failing.
+              # A REAL GIT REPOSITORY, because code that asks git a question should get
+              # an answer rather than a fatal (ruled 2026-09-08). Adding the binary was
+              # not enough: the sandbox assembles its tree by copying, deliberately
+              # without .git, so the tool was present and the repository was not.
               #
-              # ONE COMMIT OF THE ASSEMBLED TREE. No network, no remote, no
-              # history, no real author: enough for rev-parse and status to
-              # answer, and nothing that tells an attempt anything about the
-              # actual repository. node_modules and the holdout are excluded so
-              # the index is the source tree and nothing else, and every step is
-              # tolerant of failure because a repo without git is not a reason to
-              # lose the whole measurement.
+              # ONE COMMIT OF THE ASSEMBLED TREE. No network, no remote, no history, no
+              # real author: enough for rev-parse and status to answer, and nothing that
+              # tells an attempt anything about the actual repository. node_modules and
+              # the holdout are excluded so the index is the source tree, and every step
+              # tolerates failure because a repo without git is not a reason to lose the
+              # whole measurement.
               git init -q >/dev/null 2>&1 || true
               if [ -d /work/.git ]; then
                 printf "node_modules\n.holdout\n" > /work/.git/info/exclude
@@ -459,13 +440,12 @@ jobs:
                 git commit -q -m sandbox --no-gpg-sign >/dev/null 2>&1 || true
               fi
 
-              # THE SECONDARY PHASES RUN BEFORE THE HOLDOUT IS COPIED IN, and the
-              # order is load-bearing rather than tidy. The holdout cases land in
-              # /work/.holdout, which is inside the working directory, so a lint
-              # command spelled `eslint .` walks them: on foxhound 2026-09-08 the
-              # count included the hidden suite and its filenames appeared in the
-              # run log. Running each repo command first means the tree they
-              # see is the tree the attempt produced, and nothing else.
+              # THE SECONDARY PHASES RUN BEFORE THE HOLDOUT IS COPIED IN. The holdout
+              # cases land in /work/.holdout, inside the working directory, so a lint
+              # command spelled `eslint .` walks them: on foxhound 2026-09-08 the count
+              # included the hidden suite and its filenames appeared in the run log.
+              # Running each repo command first means the tree they see is the tree the
+              # attempt produced.
               if [ -f /trusted/secondary-test.sh ]; then
                 echo "${M}-TEST"
                 sh /trusted/secondary-test.sh 2>&1
@@ -502,9 +482,8 @@ jobs:
           echo "total=${TOTAL}" >> "$GITHUB_OUTPUT"
           echo "passed=${PASSED}" >> "$GITHUB_OUTPUT"
 
-      # The same trusted copy, the same stream, and the artifact only gets to
-      # disagree out loud. A mismatch on either recomputed metric is printed and
-      # the sandbox value is the one that reaches the signed body.
+      # The same trusted copy and the same stream. A mismatch on either recomputed metric
+      # is printed and the sandbox value is the one that reaches the signed body.
       - name: Recompute the secondaries from the sandbox stream
         id: secondary
         continue-on-error: true
@@ -520,8 +499,8 @@ jobs:
 
       # RUN_ID, ATTEMPT_ID, BUILD_PASSES and the key are in THIS step's own env so a
       # poisoned GITHUB_ENV cannot override them; NODE_OPTIONS is cleared; the HMAC is
-      # computed by node with the key read from the environment, never argv; node and
-      # curl are absolute-pathed. ci_minutes is computed before the body.
+      # computed by node with the key read from the environment, never argv; node and curl
+      # are absolute-pathed. ci_minutes is computed before the body.
       - name: Post the score report
         if: always()
         env:
@@ -549,12 +528,11 @@ jobs:
           BODY=$("${NODE_BIN}" "${RUNNER_TEMP}/trusted/improve-report.mjs" "${RUNNER_TEMP}/attempt/metrics.json" "${HOLDOUT_TOTAL}" "${HOLDOUT_PASSED}")
           TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           SIG=$(TS="${TS}" BODY="${BODY}" "${NODE_BIN}" -e 'const c=require("crypto");const h=c.createHmac("sha256",process.env.IMPROVE_SCORE_KEY);h.update(process.env.TS+"."+process.env.BODY);process.stdout.write(h.digest("hex"))')
-          # A shakedown dispatch (the literal RUN_ID "shakedown") has no run row in
-          # the Worker, so its report is answered 409 "unknown run" by design, AFTER
-          # the signature verified (a bad signature is 401 before the run lookup).
-          # That one answer, on that one RUN_ID, is success: it proves the pipeline
-          # end to end. Any other non-2xx, and a 409 on a real run id, still fails
-          # this step loudly.
+          # A shakedown dispatch (the literal RUN_ID "shakedown") has no run row in the
+          # Worker, so its report is answered 409 "unknown run" by design, AFTER the
+          # signature verified; a bad signature is 401 before the run lookup. That one
+          # answer, on that one RUN_ID, is success. Any other non-2xx, and a 409 on a real
+          # run id, still fails this step.
           RESPONSE_FILE=$(mktemp)
           STATUS=$(/usr/bin/curl --silent --show-error -o "${RESPONSE_FILE}" -w '%{http_code}' \
             -X POST "${CAPSID_URL}/improve/score" \
