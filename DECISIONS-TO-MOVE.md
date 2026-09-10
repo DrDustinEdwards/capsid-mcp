@@ -157,3 +157,8 @@ Rulings, measurements, and refusal reasons that were recorded only in Worker com
 - **:304-318** wrangler `.example` is included because foxing Job A copies it into place (2026-09-07 Opus CRITICAL 5.2). Every lockfile, not just npm: scorer install is package-manager agnostic; `--frozen-lockfile` compares lockfile to package.json; npm prefers shrinkwrap over package-lock.
 - **:350-354** Protected-path list is served to the subscription driver, which cannot import a RegExp. `test/improve-driver-lock.test.ts` derives both directions.
 - **:316-318** `en-US` with `hour12: false` renders midnight as "24" in some ICU versions and "00" in others; `% 24` keeps the opener from firing on a day boundary in one runtime and not another.
+
+## src/backup.ts
+
+- **:12-28** Overlap lock (audit 2, F32). Cron and POST /ops/backup can overlap dump+prune. KV has no CAS, so the lease is best-effort, not a lock. TTL 15 minutes (scheduled invocation wall-time ceiling; KV min expirationTtl is 60s).
+- **:32-54** Retention: export before prune. Dumps were kept 14 by count, so a row pruned at 90 days was recoverable from R2 for 14 more days then existed nowhere. Now pruned by age at 90 days. A count is only a duration if there is exactly one dump per day; /ops/backup by hand used to consume a slot.
