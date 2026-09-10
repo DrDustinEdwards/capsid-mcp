@@ -58,6 +58,9 @@ function renderJobDoc(job: JobRow): string {
     `- claimed by: ${job.claimed_by ?? "(unclaimed)"}`,
     `- lease expires: ${job.lease_expires ?? "(no lease)"}`,
   ];
+  // Only once it has happened. A job that has never hit a gate should not carry a
+  // line of zeroes explaining that it has not.
+  if (job.blocked_count > 0) lines.push(`- gates hit: ${job.blocked_count}, resumed: ${job.resumed_count}`);
   if (job.result_summary) lines.push(`- result: ${job.result_summary}`);
   if (job.result_ref) lines.push(`- result ref: ${job.result_ref}`);
   lines.push("", "## The prompt", "", job.body);
@@ -133,6 +136,8 @@ export async function postJob(
     result_ref: null,
     result_summary: null,
     gate_required: args.gate_required ? 1 : 0,
+    blocked_count: 0,
+    resumed_count: 0,
     created_at: now.toISOString(),
     updated_at: now.toISOString(),
   };
@@ -308,14 +313,34 @@ async function holderTransition(
   now: Date,
   action: "heartbeat" | "complete" | "fail" | "block",
   id: string,
-  patch: { status: JobStatus; result_summary?: string | null; result_ref?: string | null; lease_expires: string | null }
+  patch: {
+    status: JobStatus;
+    result_summary?: string | null;
+    result_ref?: string | null;
+    lease_expires: string | null;
+    // block is the only transition that bumps the gate counter. BOUND AS A NUMBER,
+    // not interpolated as a SQL fragment: the statement stays one static string, so
+    // test/jobs.test.ts can read that it is keyed and test-integration/
+    // query-plans.test.ts can reconstruct it and EXPLAIN it. A statement assembled
+    // at runtime is invisible to both.
+    bumpBlocked?: boolean;
+  }
 ): Promise<JobResult> {
   const won = await env.DB.prepare(
     `UPDATE jobs SET status = ?2, result_summary = COALESCE(?3, result_summary), result_ref = COALESCE(?4, result_ref),
-       lease_expires = ?5, updated_at = ?6
+       lease_expires = ?5, updated_at = ?6, blocked_count = blocked_count + ?8
      WHERE id = ?1 AND status = 'claimed' AND claimed_by = ?7 RETURNING id`
   )
-    .bind(id, patch.status, patch.result_summary ?? null, patch.result_ref ?? null, patch.lease_expires, now.toISOString(), actor)
+    .bind(
+      id,
+      patch.status,
+      patch.result_summary ?? null,
+      patch.result_ref ?? null,
+      patch.lease_expires,
+      now.toISOString(),
+      actor,
+      patch.bumpBlocked ? 1 : 0
+    )
     .first<{ id: string }>();
   if (!won) {
     const current = await readJob(env.DB, id);
@@ -378,8 +403,108 @@ export async function blockJob(
   args: { reason: string; command?: string }
 ): Promise<JobResult> {
   if (!args.reason?.trim()) return refuse("block", "block needs a reason: what gate was hit.");
-  const summary = args.command ? `${args.reason}\n\nRun this, then unblock by reposting or claiming again:\n\n    ${args.command}` : args.reason;
-  return holderTransition(env, actor, now, "block", id, { status: "blocked", result_summary: summary, lease_expires: null });
+  const summary = args.command ? `${args.reason}\n\nRun this, then send it back in with jobs action 'resume':\n\n    ${args.command}` : args.reason;
+  return holderTransition(env, actor, now, "block", id, {
+    status: "blocked",
+    result_summary: summary,
+    lease_expires: null,
+    bumpBlocked: true,
+  });
+}
+
+// ---- resume --------------------------------------------------------------------
+//
+// A GATE IS A PAUSE, NOT AN ENDING. Before this, `blocked` was terminal: the only
+// way into a claim was from `queued`, so a job the driver stopped at a gate could
+// never be picked back up. The human ran the command, the work landed, and the row
+// still described the state before the gate, because `claim` refuses anything that
+// is not queued. Measured 2026-09-10 on job_1b957927a714, which shipped a commit and
+// four pull requests while its own row said the push had not happened.
+//
+// THE SIGNATURE IS CHECKED AGAIN HERE, and that is not belt-and-braces. `claim`
+// verifies the body before handing a job to a driver; a blocked job then sits in the
+// table for as long as a human takes, which is exactly the window in which a row
+// could be edited. Resume hands that body back to a session holding local shell and
+// repo credentials, so it re-verifies on the same terms and marks a tampered job
+// failed rather than returning it.
+//
+// WHO MAY RESUME: any write-grant caller, which the tool layer has already checked
+// before this runs. Deliberately not restricted to the original claimer: the point
+// is that a HUMAN approved something, and the seat that approves is routinely not
+// the session that blocked. The reason is required and lands in the audit row, so
+// what was approved is recorded rather than implied.
+export async function resumeJob(
+  env: Env,
+  actor: string,
+  now: Date,
+  id: string,
+  reason: string
+): Promise<JobResult> {
+  if (!ACTOR_SHAPE.test(actor)) {
+    return refuse("resume", `'${actor}' is not a caller identity this queue can hold a lease for. A claim is recorded against a github: login or an opkey: fingerprint.`);
+  }
+  if (!reason?.trim()) {
+    return refuse("resume", "resume needs a reason: what the human approved. A job that came back off a gate with no record of who cleared it is a gate that did not happen.");
+  }
+  // The same one-claim-per-caller rule the claim path runs on, for the same reason:
+  // a resume hands the caller a lease, and a driver holding two has abandoned one.
+  const held = await env.DB.prepare("SELECT * FROM jobs WHERE status = 'claimed' AND claimed_by = ?1 LIMIT 1")
+    .bind(actor)
+    .first<JobRow>();
+  if (held) {
+    return refuse(
+      "resume",
+      `${actor} already holds ${held.id} ('${held.title}' in ${held.namespace}), leased until ${held.lease_expires}. Finish it before resuming another.`
+    );
+  }
+
+  const current = await readJob(env.DB, id);
+  if (!current) return refuse("resume", `no job ${id}.`);
+  if (current.status !== "blocked") {
+    return refuse(
+      "resume",
+      `${id} is ${current.status}, not blocked. Resume is how a job comes back off a gate; a queued job is claimed and a done or failed one is finished.`
+    );
+  }
+
+  const verdict = await verifySignedBody(env.IMPROVE_SCORE_SECRET, current.body, "job body");
+  if (!verdict.ok) {
+    await env.DB.prepare(
+      `UPDATE jobs SET status = 'failed', result_summary = ?2, lease_expires = NULL, updated_at = ?3
+       WHERE id = ?1 AND status = 'blocked' RETURNING id`
+    )
+      .bind(id, verdict.reason, now.toISOString())
+      .first<{ id: string }>();
+    const failed = { ...current, status: "failed" as const, result_summary: verdict.reason, updated_at: now.toISOString() };
+    await env.DB.batch([
+      ...(await mirrorStatements(env.DB, failed, "job-signature-refused", actor)),
+      auditStatement(env.DB, actor, "job-signature-refused", failed, { reason: verdict.reason, at: "resume" }),
+    ]);
+    return refuse("resume", `${id} failed its signature check and has been marked failed: ${verdict.reason}`);
+  }
+
+  const expires = leaseUntil(now);
+  const won = await env.DB.prepare(
+    `UPDATE jobs SET status = 'claimed', claimed_by = ?2, claimed_at = ?3, lease_expires = ?4,
+       resumed_count = resumed_count + 1, updated_at = ?3
+     WHERE id = ?1 AND status = 'blocked' RETURNING id`
+  )
+    .bind(id, actor, now.toISOString(), expires)
+    .first<{ id: string }>();
+  if (!won) {
+    return refuse("resume", `${id} left blocked between reading it and resuming it. Ask again.`);
+  }
+
+  const job = (await readJob(env.DB, id)) as JobRow;
+  await env.DB.batch([
+    ...(await mirrorStatements(env.DB, job, "job-resumed", actor)),
+    auditStatement(env.DB, actor, "job-resumed", job, {
+      approved: reason,
+      lease_expires: expires,
+      resumed_count: job.resumed_count,
+    }),
+  ]);
+  return { ok: true, action: "resume", job };
 }
 
 // ---- the lease sweep ----------------------------------------------------------
@@ -425,7 +550,11 @@ export interface JobsSummary {
   claimed: number;
   blocked: number;
   done_today: number;
-  blocked_jobs: Array<{ id: string; title: string; waiting_on: string | null }>;
+  // blocked_times and resumed say how often this job has hit a gate and how often a
+  // human sent it back. A job on its third gate reads differently from one that has
+  // been stuck at the same gate since it was posted, and the count is what tells
+  // them apart.
+  blocked_jobs: Array<{ id: string; title: string; waiting_on: string | null; blocked_times: number; resumed: number }>;
 }
 
 export async function jobsSummary(db: D1Database, namespace: string, now: Date): Promise<JobsSummary> {
@@ -450,16 +579,22 @@ export async function jobsSummary(db: D1Database, namespace: string, now: Date):
     .first<{ n: number }>();
   const blocked = await db
     .prepare(
-      `SELECT id, title, result_summary FROM jobs
+      `SELECT id, title, result_summary, blocked_count, resumed_count FROM jobs
        WHERE namespace = ?1 AND status = 'blocked' ORDER BY updated_at DESC LIMIT 20`
     )
     .bind(namespace)
-    .all<{ id: string; title: string; result_summary: string | null }>();
+    .all<{ id: string; title: string; result_summary: string | null; blocked_count: number; resumed_count: number }>();
   return {
     queued: byStatus.get("queued") ?? 0,
     claimed: byStatus.get("claimed") ?? 0,
     blocked: byStatus.get("blocked") ?? 0,
     done_today: doneToday?.n ?? 0,
-    blocked_jobs: (blocked.results ?? []).map((r) => ({ id: r.id, title: r.title, waiting_on: r.result_summary })),
+    blocked_jobs: (blocked.results ?? []).map((r) => ({
+      id: r.id,
+      title: r.title,
+      waiting_on: r.result_summary,
+      blocked_times: r.blocked_count,
+      resumed: r.resumed_count,
+    })),
   };
 }

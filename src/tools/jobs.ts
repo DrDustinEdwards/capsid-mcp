@@ -3,7 +3,7 @@ import { hintsFor } from "../tool-annotations";
 import { z } from "zod";
 import { bounded, docPath, MAX_BODY, MAX_TITLE, nsName } from "../limits";
 import { JOB_ACTIONS, JOB_LEASE_SECONDS, JOB_STATUSES, isJobStatus } from "../jobs-schema";
-import { blockJob, claimJob, completeJob, failJob, heartbeatJob, listJobs, postJob } from "../jobs";
+import { blockJob, claimJob, completeJob, failJob, heartbeatJob, listJobs, postJob, resumeJob } from "../jobs";
 import { DENIED, fail, ok, type ToolCtx } from "./docs";
 
 const MAX_JOB_ID = 64;
@@ -25,9 +25,9 @@ export function registerJobTools(server: McpServer, ctx: ToolCtx): void {
     {
       annotations: hintsFor("jobs"),
       description:
-        `The work queue: post work from a chat, claim it from a machine, report back. The jobs table is the source of truth for status; every job also mirrors to <namespace>/jobs/<id>.md so brief and search see it, and that document is rewritten in the same batch as every transition. action "post" (write) queues a job: namespace, title, body (the full prompt the driver executes), optional priority (higher runs first) and gate_required when the work is known to need a human confirmation. The body is SIGNED with the same key and envelope as the improve loop's task documents, and the driver refuses a job whose body does not verify, so an edited row cannot steer a session holding local shell and repo credentials. One open job per (namespace, title): posting a duplicate while one is queued or claimed is refused. action "list" (read) filters by namespace and status. action "claim" (write) takes the highest-priority queued job in a namespace, or a named id, and sets a ${JOB_LEASE_SECONDS / 3600}-hour lease; it refuses if the caller already holds a claim anywhere, and exactly one caller wins a contested job because the claim is a keyed UPDATE with RETURNING. action "heartbeat" (write) extends the lease. action "complete" (write) needs result_summary and takes an optional result_ref (a document key or a PR URL). action "fail" (write) needs a reason. action "block" (write) is for a job that hit a gate and needs the human: it takes a reason and the exact command to run, and blocked jobs are what improve_status surfaces. heartbeat, complete, fail and block only fire for the claimed job THIS caller holds, so a lease the tick already expired cannot be finished out from under its new owner. An expired lease returns the job to queued on the five-minute tick. Every action is audit-logged with the caller's github: login or opkey: fingerprint.`,
+        `The work queue: post work from a chat, claim it from a machine, report back. The jobs table is the source of truth for status; every job also mirrors to <namespace>/jobs/<id>.md so brief and search see it, and that document is rewritten in the same batch as every transition. action "post" (write) queues a job: namespace, title, body (the full prompt the driver executes), optional priority (higher runs first) and gate_required when the work is known to need a human confirmation. The body is SIGNED with the same key and envelope as the improve loop's task documents, and the driver refuses a job whose body does not verify, so an edited row cannot steer a session holding local shell and repo credentials. One open job per (namespace, title): posting a duplicate while one is queued or claimed is refused. action "list" (read) filters by namespace and status. action "claim" (write) takes the highest-priority queued job in a namespace, or a named id, and sets a ${JOB_LEASE_SECONDS / 3600}-hour lease; it refuses if the caller already holds a claim anywhere, and exactly one caller wins a contested job because the claim is a keyed UPDATE with RETURNING. action "heartbeat" (write) extends the lease. action "complete" (write) needs result_summary and takes an optional result_ref (a document key or a PR URL). action "fail" (write) needs a reason. action "block" (write) is for a job that hit a gate and needs the human: it takes a reason and the exact command to run, and blocked jobs are what improve_status surfaces. action "resume" (write) is the way back: BLOCKED IS A PAUSE, NOT AN ENDING. Once the human has run the command, resume moves the blocked job back to claimed for the caller with a fresh lease, takes a required reason recording what was approved, and re-verifies the body's signature, because a blocked job sits in the table for as long as a human takes and resume hands it to a session with shell and repo credentials. Any write-grant caller may resume, deliberately: the seat that approves is routinely not the session that blocked. A job may be blocked and resumed any number of times, and improve_status reports both counts per blocked job. heartbeat, complete, fail and block only fire for the claimed job THIS caller holds, so a lease the tick already expired cannot be finished out from under its new owner. An expired lease returns the job to queued on the five-minute tick. Every action is audit-logged with the caller's github: login or opkey: fingerprint.`,
       inputSchema: {
-        action: z.enum(JOB_ACTIONS).describe("post | list | claim | heartbeat | complete | fail | block."),
+        action: z.enum(JOB_ACTIONS).describe("post | list | claim | heartbeat | complete | fail | block | resume."),
         namespace: nsName.optional().describe('For post, the namespace the work belongs to. For list and claim, the namespace to filter or pick from.'),
         title: bounded(MAX_TITLE).optional().describe('For post: the title. One open job per (namespace, title).'),
         body: bounded(MAX_BODY).optional().describe('For post: the full prompt the driver executes. Signed on the way in.'),
@@ -37,7 +37,7 @@ export function registerJobTools(server: McpServer, ctx: ToolCtx): void {
         id: bounded(MAX_JOB_ID).optional().describe('The job id, for claim (optional, to take a specific one), heartbeat, complete, fail and block.'),
         result_summary: bounded(MAX_TITLE).optional().describe('For complete: what happened, in a sentence the seat can read without opening the diff.'),
         result_ref: docPath.optional().describe('For complete: where the work landed, a document key or a PR URL.'),
-        reason: bounded(MAX_TITLE).optional().describe('For fail and block: why.'),
+        reason: bounded(MAX_TITLE).optional().describe('For fail and block: why. For resume: what the human approved, which is what the audit row records.'),
         command: bounded(MAX_TITLE).optional().describe('For block: the exact command the human must run. It goes into the summary the console shows.'),
       },
     },
@@ -89,6 +89,10 @@ export function registerJobTools(server: McpServer, ctx: ToolCtx): void {
           case "block": {
             if (!args.id) return fail("block needs the job id.");
             return ok(await blockJob(env, actor, now, args.id, { reason: args.reason ?? "", command: args.command }));
+          }
+          case "resume": {
+            if (!args.id) return fail("resume needs the job id.");
+            return ok(await resumeJob(env, actor, now, args.id, args.reason ?? ""));
           }
         }
         return fail(`unknown jobs action '${args.action}'.`);

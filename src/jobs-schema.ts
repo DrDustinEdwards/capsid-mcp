@@ -12,7 +12,7 @@ export type JobStatus = (typeof JOB_STATUSES)[number];
 // let two open jobs share a title.
 export const OPEN_JOB_STATUSES: readonly JobStatus[] = ["queued", "claimed"];
 
-export const JOB_ACTIONS = ["post", "list", "claim", "heartbeat", "complete", "fail", "block"] as const;
+export const JOB_ACTIONS = ["post", "list", "claim", "heartbeat", "complete", "fail", "block", "resume"] as const;
 export type JobAction = (typeof JOB_ACTIONS)[number];
 
 // FOUR HOURS. Long enough for a driver to do a real job without heartbeating on a
@@ -44,6 +44,11 @@ export interface JobRow {
   result_ref: string | null;
   result_summary: string | null;
   gate_required: number;
+  // How many times this job has hit a gate, and how many times a human sent it back
+  // in. Counted where they happen (migrations/0007_jobs_resume.sql says why neither
+  // is derived from the other).
+  blocked_count: number;
+  resumed_count: number;
   created_at: string;
   updated_at: string;
 }

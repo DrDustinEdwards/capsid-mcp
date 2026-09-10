@@ -100,6 +100,56 @@ test("the queue's writes go through the shared document statements, not a second
   assert.doesNotMatch(jobs, /INSERT INTO document_versions/, "src/jobs.ts spells its own snapshot");
 });
 
+// BLOCKED IS NOT TERMINAL (2026-09-10). The counters live in their own migration,
+// so the same derive-from-the-source rule applies to them.
+const RESUME_MIGRATION = readFileSync(join(import.meta.dirname, "..", "migrations", "0007_jobs_resume.sql"), "utf8");
+
+test("both counters the code reads are columns the migration adds", () => {
+  // Both directions: a counter surfaced by src/jobs.ts and never added by a
+  // migration is a query that fails at runtime, and a column added and never read
+  // is dead weight nobody will remove later.
+  const added = [...RESUME_MIGRATION.matchAll(/ALTER TABLE jobs ADD COLUMN (\w+)/g)].map((m) => m[1]).sort();
+  assert.deepEqual(added, ["blocked_count", "resumed_count"]);
+  const jobs = sourceFile("jobs.ts");
+  for (const column of added) {
+    assert.match(jobs, new RegExp(`\\b${column}\\b`), `src/jobs.ts never reads ${column}`);
+  }
+});
+
+test("resume is a keyed UPDATE out of blocked, and it is the only way out of blocked", () => {
+  const jobs = sourceFile("jobs.ts");
+  // Scoped to resumeJob's own body first. Matching the file at large let the
+  // claim path's `SET status = 'claimed'` pair with the signature-failure path's
+  // `status = 'blocked'` clause, which is a match that proves nothing.
+  const resume = /export async function resumeJob[\s\S]*?\n}/.exec(jobs);
+  assert.ok(resume, "resumeJob is gone from src/jobs.ts");
+  const resumeUpdate = /UPDATE jobs SET status = 'claimed'[\s\S]*?RETURNING id/.exec(resume[0]);
+  assert.ok(resumeUpdate, "resume no longer moves a job out of blocked with a keyed UPDATE ... RETURNING");
+  assert.match(resumeUpdate[0], /WHERE id = \?1 AND status = 'blocked'/, "the resume CAS must key on blocked, or it could move a job out of any state");
+  assert.match(resumeUpdate[0], /resumed_count = resumed_count \+ 1/, "a resume that does not count itself cannot be reported");
+  // The claim path must stay closed to blocked jobs: resume is the audited door,
+  // and a claim that also took blocked rows would bypass the approval reason.
+  assert.match(jobs, /AND status = 'queued' RETURNING id/, "the claim CAS no longer keys on queued");
+});
+
+test("resume re-verifies the signature, because a blocked job sits in the table", () => {
+  // The window claim's check cannot cover: a job blocked at a gate waits on a human
+  // for as long as that takes, and resume hands the body back to a session holding
+  // shell and repo credentials.
+  const jobs = sourceFile("jobs.ts");
+  const resume = /export async function resumeJob[\s\S]*?\n}/.exec(jobs);
+  assert.ok(resume, "resumeJob is gone from src/jobs.ts");
+  assert.match(resume[0], /verifySignedBody\(/, "resume hands a body to a driver without re-verifying it");
+  assert.match(resume[0], /status = 'failed'/, "a tampered body must be failed, not handed back");
+});
+
+test("resume enforces one claim per caller, like claim does", () => {
+  const jobs = sourceFile("jobs.ts");
+  const resume = /export async function resumeJob[\s\S]*?\n}/.exec(jobs);
+  assert.ok(resume);
+  assert.match(resume[0], /status = 'claimed' AND claimed_by = \?1/, "resume hands out a lease without checking what the caller already holds");
+});
+
 test("the jobs tool is registered exactly once, and reachable", () => {
   const registrations = [...allSourceText().matchAll(/server\.registerTool\(\s*"jobs"/g)];
   assert.equal(registrations.length, 1, "the jobs tool is registered more than once, or not at all");

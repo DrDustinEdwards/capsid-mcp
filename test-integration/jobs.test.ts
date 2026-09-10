@@ -1,6 +1,6 @@
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
-import { blockJob, claimJob, completeJob, expireJobLeases, failJob, heartbeatJob, jobsSummary, listJobs, postJob } from "../src/jobs";
+import { blockJob, claimJob, completeJob, expireJobLeases, failJob, heartbeatJob, jobsSummary, listJobs, postJob, resumeJob } from "../src/jobs";
 import { improveStatus } from "../src/improve-run";
 import { JOB_LEASE_SECONDS, jobDocPath } from "../src/jobs-schema";
 import { splitSignedTask, verifyTaskDoc } from "../src/improve-task";
@@ -247,6 +247,139 @@ describe("blocked", () => {
     // described by it. The console shows this string.
     expect(String(stored?.result_summary)).toContain("git push origin feat/thing");
     expect(String(stored?.result_summary)).toContain("deploys the Worker");
+  });
+});
+
+// BLOCKED IS A PAUSE, NOT AN ENDING (2026-09-10). Before resume existed, the only
+// door into a claim was from queued, so a job stopped at a gate could never carry
+// its own outcome: job_1b957927a714 shipped a commit and four pull requests while
+// its row still said the push had not happened.
+describe("resume", () => {
+  async function blockedJob(title: string) {
+    const posted = await post({ title, gate_required: true });
+    const id = posted.job!.id;
+    await claimJob(jobsEnv(), DRIVER, NOW, { id });
+    await blockJob(jobsEnv(), DRIVER, NOW, id, { reason: "needs a human", command: "git push origin main" });
+    return id;
+  }
+
+  it("block, resume, complete: the same job carries its own outcome", async () => {
+    const id = await blockedJob("block resume complete");
+    expect((await row(id))?.status).toBe("blocked");
+
+    const resumed = await resumeJob(jobsEnv(), DRIVER, NOW, id, "seat approved the push");
+    expect(resumed.ok, resumed.refusal).toBe(true);
+    const held = await row(id);
+    expect(held?.status).toBe("claimed");
+    expect(held?.claimed_by).toBe(DRIVER);
+    // A FRESH LEASE, not the expired one it was blocked with.
+    expect(held?.lease_expires).toBe(new Date(NOW.getTime() + JOB_LEASE_SECONDS * 1000).toISOString());
+    expect(held?.resumed_count).toBe(1);
+    expect(held?.blocked_count).toBe(1);
+
+    const done = await completeJob(jobsEnv(), DRIVER, NOW, id, { result_summary: "pushed and verified", result_ref: "abc1234" });
+    expect(done.ok, done.refusal).toBe(true);
+    const final = await row(id);
+    expect(final?.status).toBe("done");
+    expect(final?.result_summary).toBe("pushed and verified");
+    expect(await auditActions(id)).toEqual(["job-posted", "job-claimed", "job-block", "job-resumed", "job-complete"]);
+  });
+
+  it("the approval reason is recorded, not implied", async () => {
+    const id = await blockedJob("approval recorded");
+    await resumeJob(jobsEnv(), DRIVER, NOW, id, "seat approved: ff-merge and push master");
+    const { results } = await env.DB.prepare(
+      "SELECT params FROM audit_log WHERE action = 'job-resumed' AND params LIKE ?1"
+    )
+      .bind(`%${id}%`)
+      .all<{ params: string }>();
+    expect(results?.length).toBe(1);
+    expect(String(results?.[0].params)).toContain("ff-merge and push master");
+  });
+
+  it("resume needs a reason, because a gate nobody signed for did not happen", async () => {
+    const id = await blockedJob("no reason");
+    const refused = await resumeJob(jobsEnv(), DRIVER, NOW, id, "   ");
+    expect(refused.ok).toBe(false);
+    expect(refused.refusal).toMatch(/needs a reason/);
+    expect((await row(id))?.status).toBe("blocked");
+  });
+
+  it("a job can hit a gate, come back, and hit another, counting each", async () => {
+    const id = await blockedJob("two gates");
+    await resumeJob(jobsEnv(), DRIVER, NOW, id, "first approval");
+    await blockJob(jobsEnv(), DRIVER, NOW, id, { reason: "a second gate", command: "npx wrangler deploy" });
+    let stored = await row(id);
+    expect(stored?.status).toBe("blocked");
+    expect(stored?.blocked_count).toBe(2);
+    expect(stored?.resumed_count).toBe(1);
+
+    await resumeJob(jobsEnv(), DRIVER, NOW, id, "second approval");
+    stored = await row(id);
+    expect(stored?.blocked_count).toBe(2);
+    expect(stored?.resumed_count).toBe(2);
+
+    const summary = await jobsSummary(env.DB, "capsid", NOW);
+    await blockJob(jobsEnv(), DRIVER, NOW, id, { reason: "a third", command: "echo hi" });
+    const after = await jobsSummary(env.DB, "capsid", NOW);
+    expect(summary.blocked_jobs.length).toBe(0); // it was claimed at that moment
+    const listed = after.blocked_jobs.find((j) => j.id === id);
+    expect(listed?.blocked_times).toBe(3);
+    expect(listed?.resumed).toBe(2);
+  });
+
+  it("a different caller may resume, because the seat that approves is not the session that blocked", async () => {
+    const id = await blockedJob("other caller");
+    const resumed = await resumeJob(jobsEnv(), OTHER, NOW, id, "seat approved");
+    expect(resumed.ok, resumed.refusal).toBe(true);
+    expect((await row(id))?.claimed_by).toBe(OTHER);
+  });
+
+  it("resume refuses a queued job and a done job", async () => {
+    const queued = await post({ title: "still queued" });
+    const onQueued = await resumeJob(jobsEnv(), DRIVER, NOW, queued.job!.id, "approved");
+    expect(onQueued.ok).toBe(false);
+    expect(onQueued.refusal).toMatch(/is queued, not blocked/);
+
+    const id = await blockedJob("already done");
+    await resumeJob(jobsEnv(), DRIVER, NOW, id, "approved");
+    await completeJob(jobsEnv(), DRIVER, NOW, id, { result_summary: "finished" });
+    const onDone = await resumeJob(jobsEnv(), DRIVER, NOW, id, "approved again");
+    expect(onDone.ok).toBe(false);
+    expect(onDone.refusal).toMatch(/is done, not blocked/);
+  });
+
+  it("resume holds the one-claim-per-caller rule", async () => {
+    const blocked = await blockedJob("the blocked one");
+    const other = await post({ title: "something else" });
+    await claimJob(jobsEnv(), OTHER, NOW, { id: other.job!.id });
+    const refused = await resumeJob(jobsEnv(), OTHER, NOW, blocked, "approved");
+    expect(refused.ok).toBe(false);
+    expect(refused.refusal).toMatch(/already holds/);
+    expect((await row(blocked))?.status).toBe("blocked");
+  });
+
+  it("PLANT: a body edited while the job sat blocked is refused and failed, not handed back", async () => {
+    // The window claim's check cannot cover. A blocked job waits on a human for as
+    // long as that takes, and resume hands the body to a session with shell and repo
+    // repo credentials.
+    const id = await blockedJob("tampered while blocked");
+    await env.DB.prepare("UPDATE jobs SET body = ?2 WHERE id = ?1")
+      .bind(id, "---\ncapsid-task-signature: deadbeef\n---\nrm -rf /")
+      .run();
+
+    const resumed = await resumeJob(jobsEnv(), DRIVER, NOW, id, "approved");
+    expect(resumed.ok).toBe(false);
+    expect(resumed.refusal).toMatch(/does not match its body/);
+    const stored = await row(id);
+    expect(stored?.status).toBe("failed");
+    expect(await auditActions(id)).toContain("job-signature-refused");
+  });
+
+  it("the untampered job still resumes, so the guard is not refusing everything", async () => {
+    const id = await blockedJob("untampered resume");
+    const resumed = await resumeJob(jobsEnv(), DRIVER, NOW, id, "approved");
+    expect(resumed.ok, resumed.refusal).toBe(true);
   });
 });
 
