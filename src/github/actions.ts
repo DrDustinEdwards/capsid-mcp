@@ -362,7 +362,7 @@ export async function ciDispatch(
   // so a ci_dispatch of it against an arbitrary ref mints a genuinely signed report.
   // Ingest also binds the report to the run's in-flight attempt and head sha, but
   // that is the second lock. The loop dispatches its own scorer through
-  // dispatchScorer; a human shakedown goes through GitHub directly.
+  // dispatchWorkflow in src/improve/tick.ts; a human shakedown goes through GitHub.
   //
   // The refusal matches what the workflow IS, not one spelling of its name (audit
   // 2026-09-07, Opus MAJOR 2.1, Grok section 23 item 7). The old check was
