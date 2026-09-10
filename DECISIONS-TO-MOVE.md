@@ -78,3 +78,11 @@ Rulings, measurements, and refusal reasons that were recorded only in Worker com
 - **:38-51** `if_match` used to be a pre-read; the window includes the 90-second overwrite confirmation. Body equality rather than a stored sha column (a second source of truth that drifts). `IS` rather than `=` because a NULL body is legitimate and `body = NULL` is never true.
 - **:67-70** Create-path guard fires when the row DOES exist, so a racing create aborts instead of falling into ON CONFLICT and overwriting a body that was never snapshotted.
 - **:86-102** Four-step commit protocol, order load-bearing. Copies had drifted on step 2's consent condition. Unguarded update keeps last-writer-wins on purpose: requiring `if_match` everywhere would refuse every legitimate rapid edit and break append.
+
+## src/write-modes.ts
+
+- **:1-14** Before modes, appending one line to a 32KB decisions.md meant retranscribing 32KB. Fired twice on 2026-08-07. conventions.md answered with a hand-run SQL splice. Every mode returns the full new body; a second write path is how "always snapshot" gets skipped.
+- **:30-45** Wire type stays loose so a client sending `mode:'meta'` plus `body` is refused rather than silently ignored (quality audit 3.1). The union is what assembly sees.
+- **:54-58** Error precedence is load-bearing: replace is checked before existence, so creating a document reports the missing title rather than "cannot replace a document that does not exist".
+- **:76-82** `meta` is not a convenience: without it, closing a task or correcting a type means resupplying the entire body.
+- **:153-160** Spliced by index, not `String.replace` (audit 2, F19). `replace()` with a string pattern still interprets `$&`, `$\``, `$'`, `$$` in the replacement. Two plants on 2026-08-11 were defeated by CRLF vs LF on the patch anchor.
