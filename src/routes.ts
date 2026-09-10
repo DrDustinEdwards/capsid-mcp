@@ -524,13 +524,43 @@ async function handleCspReport(request: Request, env: Env): Promise<Response> {
 // the scope is one hour of object-read-only on backups/json/, always. The jti
 // replay cache runs under the literal namespace "backup", which the roster can
 // never hold (ROSTER is a fixed list without it).
-async function handleBackupCredential(request: Request, env: Env): Promise<Response> {
-  const timestamp = request.headers.get("X-Backup-Timestamp") ?? "";
-  const signature = request.headers.get("X-Backup-Signature") ?? "";
+function signedHeaders(request: Request, kind: "improve" | "backup"): { namespace: string; timestamp: string; signature: string } {
+  if (kind === "backup") {
+    return {
+      namespace: "",
+      timestamp: request.headers.get("X-Backup-Timestamp") ?? "",
+      signature: request.headers.get("X-Backup-Signature") ?? "",
+    };
+  }
+  return {
+    namespace: request.headers.get("X-Improve-Namespace") ?? "",
+    timestamp: request.headers.get("X-Improve-Timestamp") ?? "",
+    signature: request.headers.get("X-Improve-Signature") ?? "",
+  };
+}
 
+async function readSignedBody(
+  request: Request,
+  tooLarge: string,
+  declaredTooLarge?: (n: number) => string
+): Promise<{ ok: true; body: string } | { ok: false; response: Response }> {
+  if (declaredTooLarge) {
+    const declared = Number(request.headers.get("Content-Length") ?? "0");
+    if (Number.isFinite(declared) && declared > MAX_REPORT_BYTES) {
+      return { ok: false, response: textResponse(declaredTooLarge(declared), 413) };
+    }
+  }
   const bounded = await readBoundedText(request, MAX_REPORT_BYTES);
-  if (!bounded.ok) return textResponse(`request too large: exceeds ${MAX_REPORT_BYTES} bytes`, 413);
-  const body = bounded.text;
+  if (!bounded.ok) return { ok: false, response: textResponse(tooLarge, 413) };
+  return { ok: true, body: bounded.text };
+}
+
+async function handleBackupCredential(request: Request, env: Env): Promise<Response> {
+  const { timestamp, signature } = signedHeaders(request, "backup");
+
+  const bounded = await readSignedBody(request, `request too large: exceeds ${MAX_REPORT_BYTES} bytes`);
+  if (!bounded.ok) return bounded.response;
+  const body = bounded.body;
 
   const verdict = await verifyBackupCredentialRequest(env, { timestamp, signature, body }, new Date());
   if (!verdict.ok) {
@@ -560,13 +590,11 @@ async function handleBackupCredential(request: Request, env: Env): Promise<Respo
 // the secrets it needs, live in src/improve-scorer.ts with the rest of the
 // holdout surface.
 async function handleHoldoutCredential(request: Request, env: Env): Promise<Response> {
-  const namespace = request.headers.get("X-Improve-Namespace") ?? "";
-  const timestamp = request.headers.get("X-Improve-Timestamp") ?? "";
-  const signature = request.headers.get("X-Improve-Signature") ?? "";
+  const { namespace, timestamp, signature } = signedHeaders(request, "improve");
 
-  const bounded = await readBoundedText(request, MAX_REPORT_BYTES);
-  if (!bounded.ok) return textResponse(`request too large: exceeds ${MAX_REPORT_BYTES} bytes`, 413);
-  const body = bounded.text;
+  const bounded = await readSignedBody(request, `request too large: exceeds ${MAX_REPORT_BYTES} bytes`);
+  if (!bounded.ok) return bounded.response;
+  const body = bounded.body;
 
   const verdict = await verifySignedReport(env, { namespace, timestamp, signature, body }, new Date());
   if (!verdict.ok) {
@@ -599,9 +627,7 @@ async function handleHoldoutCredential(request: Request, env: Env): Promise<Resp
 }
 
 async function handleImproveScore(request: Request, env: Env): Promise<Response> {
-  const namespace = request.headers.get("X-Improve-Namespace") ?? "";
-  const timestamp = request.headers.get("X-Improve-Timestamp") ?? "";
-  const signature = request.headers.get("X-Improve-Signature") ?? "";
+  const { namespace, timestamp, signature } = signedHeaders(request, "improve");
 
   // Bounded BEFORE any HMAC. The Content-Length fast-path rejects a declared-large
   // body cheaply, but it only fires when the header is present and finite; a report
@@ -610,13 +636,13 @@ async function handleImproveScore(request: Request, env: Env): Promise<Response>
   // bounded reader below is the real enforcement: it stops pulling from the stream
   // once MAX_REPORT_BYTES is exceeded, so neither the memory nor the crypto is
   // spent on an oversized body.
-  const declared = Number(request.headers.get("Content-Length") ?? "0");
-  if (Number.isFinite(declared) && declared > MAX_REPORT_BYTES) {
-    return textResponse(`report too large: ${declared} bytes exceeds ${MAX_REPORT_BYTES}`, 413);
-  }
-  const bounded = await readBoundedText(request, MAX_REPORT_BYTES);
-  if (!bounded.ok) return textResponse(`report too large: exceeds ${MAX_REPORT_BYTES} bytes`, 413);
-  const body = bounded.text;
+  const bounded = await readSignedBody(
+    request,
+    `report too large: exceeds ${MAX_REPORT_BYTES} bytes`,
+    (declared) => `report too large: ${declared} bytes exceeds ${MAX_REPORT_BYTES}`
+  );
+  if (!bounded.ok) return bounded.response;
+  const body = bounded.body;
 
   const verdict = await verifySignedReport(env, { namespace, timestamp, signature, body }, new Date());
   if (!verdict.ok) {

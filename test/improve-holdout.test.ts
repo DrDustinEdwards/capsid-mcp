@@ -224,6 +224,16 @@ test("a credential request without a namespace or jti is refused at the parse", 
   assert.ok(good.ok && good.namespace === "foxing");
 });
 
+test("holdout credential parse refusal strings are pinned byte-for-byte", async () => {
+  const { parseCredentialRequest } = await import("../src/improve-scorer.ts");
+  const notJson = parseCredentialRequest("not json");
+  assert.equal(notJson.ok === false && notJson.refusal, "the credential request body is not JSON");
+  const noNs = parseCredentialRequest(JSON.stringify({ jti: "0123456789" }));
+  assert.equal(noNs.ok === false && noNs.refusal, "the credential request body must name a namespace");
+  const short = parseCredentialRequest(JSON.stringify({ namespace: "foxing", jti: "short" }));
+  assert.equal(short.ok === false && short.refusal, "the credential request body must carry a jti of 8 to 128 characters");
+});
+
 test("the scorer workflow holds NO long-lived R2 secret and asks the Worker instead", () => {
   const yml = readFileSync(join(import.meta.dirname, "..", ".github", "workflows", "improve-score.yml"), "utf8");
   for (const secret of ["IMPROVE_HOLDOUT_R2_ACCESS_KEY_ID", "IMPROVE_HOLDOUT_R2_SECRET_ACCESS_KEY", "IMPROVE_HOLDOUT_R2_ACCOUNT_ID"]) {

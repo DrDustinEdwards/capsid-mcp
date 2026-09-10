@@ -9,6 +9,7 @@ import {
   deriveScoreKey,
   mintBackupCredential,
   parseBackupCredentialRequest,
+  SIGNATURE_MAX_AGE_MS,
   verifyBackupCredentialRequest,
 } from "../src/improve-scorer.ts";
 import { ROSTER } from "../src/improve-schema.ts";
@@ -111,6 +112,39 @@ test("the request body must carry a jti", () => {
   assert.equal(parseBackupCredentialRequest(JSON.stringify({ jti: "short" })).ok, false);
   const good = parseBackupCredentialRequest(JSON.stringify({ jti: "0123456789" }));
   assert.ok(good.ok && good.jti === "0123456789");
+});
+
+test("backup HMAC and parse refusal strings are pinned byte-for-byte", async () => {
+  const now = new Date("2026-09-07T06:00:00Z");
+  const missing = await verifyBackupCredentialRequest({ IMPROVE_SCORE_SECRET: undefined }, { timestamp: now.toISOString(), signature: "x", body: "{}" }, now);
+  assert.equal(missing.ok === false && missing.refusal, "backup credentials are not configured: IMPROVE_SCORE_SECRET is unset");
+  const noTime = await verifyBackupCredentialRequest(fakeEnv({ IMPROVE_SCORE_SECRET: "root-secret" }), { timestamp: "yesterday", signature: "x", body: "{}" }, now);
+  assert.equal(noTime.ok === false && noTime.refusal, "missing or unparseable timestamp header");
+  const staleAt = new Date(now.getTime() - SIGNATURE_MAX_AGE_MS - 60_000);
+  const { createHmac } = await import("node:crypto");
+  const key = await deriveBackupCredentialKey("root-secret");
+  const body = JSON.stringify({ jti: "0123456789" });
+  const sig = createHmac("sha256", key).update(`${staleAt.toISOString()}.${body}`).digest("hex");
+  const stale = await verifyBackupCredentialRequest(fakeEnv({ IMPROVE_SCORE_SECRET: "root-secret" }), { timestamp: staleAt.toISOString(), signature: sig, body }, now);
+  assert.equal(
+    stale.ok === false && stale.refusal,
+    `request timestamp is ${Math.round((now.getTime() - staleAt.getTime()) / 1000)}s from now, outside the accepted window`
+  );
+  const badSig = await verifyBackupCredentialRequest(fakeEnv({ IMPROVE_SCORE_SECRET: "root-secret" }), { timestamp: now.toISOString(), signature: "0".repeat(64), body }, now);
+  assert.equal(badSig.ok === false && badSig.refusal, "backup credential signature does not verify");
+  const notJson = parseBackupCredentialRequest("not json");
+  assert.equal(notJson.ok === false && notJson.refusal, "the credential request body is not JSON");
+  const short = parseBackupCredentialRequest(JSON.stringify({ jti: "short" }));
+  assert.equal(short.ok === false && short.refusal, "the credential request body must carry a jti of 8 to 128 characters");
+});
+
+test("the three signed endpoints keep their distinct refusal strings", () => {
+  const routes = sourceFile("routes.ts");
+  assert.ok(routes.includes("`request too large: exceeds ${MAX_REPORT_BYTES} bytes`"));
+  assert.ok(routes.includes("`report too large: exceeds ${MAX_REPORT_BYTES} bytes`"));
+  assert.ok(routes.includes("`report too large: ${declared} bytes exceeds ${MAX_REPORT_BYTES}`"));
+  assert.ok(routes.includes("the request body names namespace"));
+  assert.ok(routes.includes("the report body names namespace"));
 });
 
 test("ONLY src/improve-scorer.ts names the backup parent key id", () => {
