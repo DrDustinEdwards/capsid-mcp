@@ -167,3 +167,8 @@ Rulings, measurements, and refusal reasons that were recorded only in Worker com
 
 - **:1-29** Resumable D1 state machine, one step per tick, idempotent on expected status. Baseline scoring job exists so the first attempt has something to compare against and so metrics that move on their own are not attributed to attempt 1.
 - **:1709-1743** Dry run uses the same resolver as the real path and resolves the base for real (it used to pass null and report "no base could be resolved" on every namespace). Fails soft to null.
+
+## src/improve-anthropic.ts
+
+- **:1-24** Official SDK, not fetch: thinking config, effort, fallback beta, structured outputs move. No Batch API: attempts are strictly sequential (N+1 branches from N's outcome); skill triage is already one request scoring N skills. A model whose price is not listed is costed at the highest rate, not zero.
+- **:30-36** `ModelEnv = Pick<Env, "ANTHROPIC_API_KEY">` so `improve-attempt.ts` can call without a cast that would erase AttemptEnv.
