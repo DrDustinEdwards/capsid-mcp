@@ -253,9 +253,9 @@ export function improveExec(sql: string, params: unknown[], rows: ImproveRows): 
 
   // ---- the replay cache -----------------------------------------------------
 
-  // INSERT ... ON CONFLICT DO NOTHING RETURNING. The whole point of the statement
-  // is that the DATABASE decides who claimed the nonce, so the fake models the
-  // uniqueness rather than the SQL: a row already present returns nothing.
+  // INSERT ... ON CONFLICT DO NOTHING RETURNING. The DATABASE decides who claimed the
+  // nonce, so the fake models the uniqueness rather than the SQL: a row already present
+  // returns nothing.
   if (/^INSERT INTO improve_jti/i.test(text)) {
     const [scope, jti] = params;
     const already = rows.improve_jti.some((r) => r.scope === scope && r.jti === jti);
