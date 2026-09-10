@@ -192,3 +192,9 @@ Rulings, measurements, and refusal reasons that were recorded only in Worker com
 ## src/truth-report.ts
 
 - **:1-25** Integrity is good-standing subjects over all subjects, unweighted. Stored as `<namespace>/reports/lint-<date>.md` so the trend is a document. Does not judge whether a decision is correct.
+
+## src/github.ts
+
+- **:11-18** AttemptEnv, not Env, so this module cannot name HOLDOUT.
+- **:25-38** All APP_KV keys built here. install key v2 is a rollout guard: until 2026-08-17 a pinned GITHUB_APP_INSTALLATION_ID was written under every owner. Token key v3 is per owner AND repo (audit 2026-09-06 MAJOR 10). Trailing slash on readPrefix: without it, owner/r would match owner/repo2.
+- **:95-107** Installation resolved per owner and repo always (audit 2, F20). The pin is gone; a mirror of GitHub's answer eventually disagrees.
