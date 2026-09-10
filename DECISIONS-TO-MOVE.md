@@ -172,3 +172,7 @@ Rulings, measurements, and refusal reasons that were recorded only in Worker com
 
 - **:1-24** Official SDK, not fetch: thinking config, effort, fallback beta, structured outputs move. No Batch API: attempts are strictly sequential (N+1 branches from N's outcome); skill triage is already one request scoring N skills. A model whose price is not listed is costed at the highest rate, not zero.
 - **:30-36** `ModelEnv = Pick<Env, "ANTHROPIC_API_KEY">` so `improve-attempt.ts` can call without a cast that would erase AttemptEnv.
+
+## src/improve-meta.ts
+
+- **:1-15** Meta-loop cannot edit the run prompt, scores, holdout, anchors, or gates. Entire write surface is `capsid/improve/proposals/`. A system that can edit its own objective has no objective. `assertProposalTarget` plus `test/improve-meta.test.ts`.

@@ -1,19 +1,3 @@
-// The meta-loop: the system proposing an edit to its own instructions.
-//
-// THE ONE THING TO UNDERSTAND ABOUT THIS FILE IS WHAT IT CANNOT DO.
-//
-// It cannot edit the run prompt. It cannot edit any scores document. It cannot
-// touch the holdout bucket, the anchor pins, or the gate logic. Its entire write
-// surface is one prefix, capsid improve/proposals/, and `assertProposalTarget`
-// below is the function that enforces it. Every write this module makes goes
-// through that check, and test/improve-meta.test.ts drives it against the paths
-// it must refuse.
-//
-// The reason is not that the meta-loop is expected to misbehave. It is that a
-// system which can edit its own objective has no objective, and the distinction
-// between "proposes an edit" and "applies an edit" is the entire safety property.
-// A human reads the proposal and applies it, or does not.
-
 import { callModel } from "./improve-anthropic";
 import type { Env } from "./env";
 import {
@@ -27,10 +11,6 @@ import {
 } from "./improve-schema";
 import { improveDocStatements, priorDoc } from "./improve-state";
 
-// WHAT THE META-LOOP MAY NEVER WRITE, by path, whatever namespace it is in.
-// Listed by name as well as covered by the prefix rule, so the refusal message
-// can say which protected thing was aimed at rather than only that the path was
-// not a proposal.
 export const META_PROTECTED_PATHS = [SCORES_PATH, RUN_PROMPT_PATH];
 
 export interface ProposalTarget {
