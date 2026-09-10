@@ -4,7 +4,7 @@ import { z } from "zod";
 import type { Env } from "../env";
 import { parseReposList, REPO_SHAPE, requireSinglePrimary } from "../github";
 import { sha256Hex } from "../auth";
-import { guardedCommit, isMissingRowAbort, requireBodyUnchanged, requireExists } from "../store-guards";
+import { documentUpsert, guardedCommit, isMissingRowAbort, requireBodyUnchanged, requireExists } from "../store-guards";
 import { normalizeDashes } from "../normalize";
 import { parseLinks } from "../links";
 import { validateDocStatus, validateDocType } from "../doc-meta";
@@ -531,21 +531,7 @@ export function registerDocTools(server: McpServer, ctx: ToolCtx): void {
             .bind(namespace, path)
         );
       }
-      statements.push(
-        db
-          .prepare(
-            `INSERT INTO documents (namespace, path, title, body, type, tags, status)
-             VALUES (?1, ?2, ?3, ?4, COALESCE(?5, 'note'), ?6, COALESCE(?7, 'published'))
-             ON CONFLICT(namespace, path) DO UPDATE SET
-               title = COALESCE(?3, documents.title),
-               body = excluded.body,
-               type = COALESCE(?5, documents.type),
-               tags = COALESCE(?6, documents.tags),
-               status = COALESCE(?7, documents.status),
-               updated_at = datetime('now')`
-          )
-          .bind(namespace, path, title ?? null, body, type ?? null, tags ?? null, status ?? null)
-      );
+      statements.push(documentUpsert(db, namespace, path, title ?? null, body, type ?? null, tags ?? null, status ?? null));
       // The PRIOR type, status, tags and title go into the audit params whenever a
       // write changes any of them, and this is the only place they survive.
       // document_versions snapshots title and body ONLY, so a meta write that retyped

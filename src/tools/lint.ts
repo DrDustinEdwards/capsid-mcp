@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { hintsFor } from "../tool-annotations";
 import { z } from "zod";
 import { repoBlobPaths } from "../github";
-import { isMissingRowAbort, requireExists } from "../store-guards";
+import { documentUpsert, isMissingRowAbort, requireExists } from "../store-guards";
 import { authoritativeFor, scanCountClaims } from "../counts";
 import { buildTruthReport, renderTruthReport, reportPath, type ReportDoc, type ReportEdge } from "../truth-report";
 import { docPath, GATHER_BUDGET, LINT_CONSUMED_MAX, nsName } from "../limits";
@@ -238,24 +238,8 @@ export function registerLintTools(server: McpServer, ctx: ToolCtx): void {
               .bind(namespace, path)
           );
         }
-        // THE SAME UPSERT THE `write` TOOL ISSUES, byte for byte. One spelling of the
-        // document upsert in this file, so a change to the write path cannot leave a
-        // second one behind.
-        statements.push(
-          db
-            .prepare(
-              `INSERT INTO documents (namespace, path, title, body, type, tags, status)
-               VALUES (?1, ?2, ?3, ?4, COALESCE(?5, 'note'), ?6, COALESCE(?7, 'published'))
-               ON CONFLICT(namespace, path) DO UPDATE SET
-                 title = COALESCE(?3, documents.title),
-                 body = excluded.body,
-                 type = COALESCE(?5, documents.type),
-                 tags = COALESCE(?6, documents.tags),
-                 status = COALESCE(?7, documents.status),
-                 updated_at = datetime('now')`
-            )
-            .bind(namespace, path, title, body, "reference", null, "published")
-        );
+        // The same upsert the `write` tool issues, from the one helper both call.
+        statements.push(documentUpsert(db, namespace, path, title, body, "reference", null, "published"));
         statements.push(
           db
             .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES (?1, 'lint_report', ?2, ?3, ?4)")
