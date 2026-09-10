@@ -1,30 +1,24 @@
 // ONE SET OF FAKES (quality audit 6.2 and 6.1).
 //
-// Before this there were three fakeKv implementations, two withFetch copies and
-// two D1 dialects, each grown for the test in front of it and each capable of
-// different things. Only one KV could list, only one could inject a failure, only
-// one parsed the "json" get type; a test needing list PLUS failure injection had
-// nowhere to start, and the answer had always been to write a fourth. The capability
-// matrix, before the merge, was:
+// There were three fakeKv implementations, two withFetch copies and two D1 dialects,
+// each grown for the test in front of it. Only one KV could list, only one could inject
+// a failure, only one parsed the "json" get type; a test needing list PLUS failure
+// injection had nowhere to start. The capability matrix before the merge:
 //
 //   KV            get  json  put  ttl  delete  list  seed  token-seed  fail  corrupt
 //   backup         y    n     y    y     y      n     y       n         n      n
 //   oauth-flow     y    n     y    y     n      n     y       n         y      y
 //   repo-tools     y    y     y    n     y      y     n       y         n      n
 //
-// Everything in that matrix survives here, plus two capabilities no fake had and
-// the code needs: cursor pagination on both KV and R2 list, because listAllKeys in
-// backup.ts and invalidateRepoReads in github.ts are both cursor loops whose second
-// page no test had ever reached.
+// Everything in that matrix survives here, plus cursor pagination on both KV and R2
+// list: listAllKeys in backup.ts and invalidateRepoReads in github/client.ts are cursor
+// loops whose second page no test had reached.
 //
-// THE D1 FAKE IS ROW-BACKED (quality audit 6.1), and that is the change that
-// matters. The old one answered on SQL SHAPE alone and ignored the bound params, so
-// `WHERE id = ?1` returned version 42 whatever id was asked for, and `SELECT 1 AS ok
-// FROM documents` answered ok for a row that did not exist. A fake that cannot
-// disagree with the handler cannot test it: every lookup assertion was really
-// asserting that the handler had issued SOME statement. Now the rows are real and
-// the WHERE clauses are resolved against the bound values, so asking for the wrong
-// path or the wrong version id gets nothing, exactly as D1 would answer.
+// THE D1 FAKE IS ROW-BACKED (quality audit 6.1). The old one answered on SQL SHAPE alone
+// and ignored the bound params, so `WHERE id = ?1` returned version 42 whatever id was
+// asked for, and `SELECT 1 AS ok FROM documents` answered ok for a row that did not
+// exist. A fake that cannot disagree with the handler cannot test it. The rows are real
+// now and the WHERE clauses resolve against the bound values.
 
 // THE IMPROVE TABLES live in their own dialect module, delegated to below. Still
 // ONE fakeD1: this is a second SQL dialect inside the one fake, not a second fake.
@@ -198,12 +192,12 @@ export interface FakeD1Options {
   // Rows the backup prune should report as due, per COUNT statement in order.
   dueCounts?: number[];
   // A CONCURRENT WRITER. Runs once, immediately after the handler's pre-read of a
-  // documents row and therefore BEFORE its commit-time read and its batch. That is
-  // exactly the window the write predicate exists to close.
-  // `target` is the (namespace, path) the handler just pre-read, so a race can
-  // land on the document actually under test rather than a hardcoded one. The
-  // bind-unaware fake did not need this: it had a single global "exists" flag that
-  // answered for every path at once, which is exactly the imprecision 6.1 names.
+  // documents row and therefore BEFORE its commit-time read and its batch. That is the
+  // window the write predicate closes.
+  //
+  // `target` is the (namespace, path) the handler just pre-read, so a race lands on the
+  // document under test rather than a hardcoded one. The bind-unaware fake had a single
+  // global "exists" flag that answered for every path at once.
   raceAfterPreRead?: (rows: FakeD1Rows, target: { namespace: string; path: string }) => void;
   // Throw from batch() for any statement matching this, to drive the "a batch
   // failure is a clean refusal" paths. The guards throw on their own.
@@ -247,17 +241,16 @@ export interface FakeD1 {
   db: D1Database;
 }
 
-// The three commit-time guards, evaluated against the ROWS rather than assumed to
-// pass. Each is an INSERT ... SELECT NULL guarded by an EXISTS clause, and each
-// aborts the batch with the same NOT NULL violation, which is what D1 does.
+// The three commit-time guards, evaluated against the ROWS rather than assumed to pass.
+// Each is an INSERT ... SELECT NULL guarded by an EXISTS clause, and each aborts the
+// batch with the same NOT NULL violation, which is what D1 does.
 const GUARD_ERROR = "NOT NULL constraint failed: document_versions.document_id";
 
-// COLUMN PROJECTION. The fake used to hand back whole rows whatever the SELECT
-// list said, which made `SELECT *` and a named column list indistinguishable, so
-// no test could tell which one a handler had issued (quality audit 7.3 is exactly
-// that distinction). Applied only to a plain comma-separated identifier list: a
-// SELECT carrying a function call or an alias is returned whole, because parsing
-// those here would be a second SQL implementation and a source of wrong answers.
+// COLUMN PROJECTION. The fake used to hand back whole rows whatever the SELECT list said,
+// which made `SELECT *` and a named column list indistinguishable (quality audit 7.3 is
+// that distinction). Applied only to a plain comma-separated identifier list: a SELECT
+// carrying a function call or an alias is returned whole, because parsing those here
+// would be a second SQL implementation.
 function project(sql: string, row: Record<string, unknown>): Record<string, unknown> {
   const list = sql.replace(/\s+/g, " ").match(/^SELECT (.+?) FROM /i)?.[1];
   if (!list || list.trim() === "*" || /[(*]/.test(list)) return row;
@@ -325,18 +318,17 @@ export function fakeD1(opts: FakeD1Options = {}): FakeD1 {
     audit_log: opts.auditLog ?? [],
   };
   const recorded: Recorded[] = [];
-  // READS are logged SEPARATELY from writes, deliberately. `recorded` means "what
-  // this handler committed", and a long line of tests assert it is EMPTY after a
-  // refusal; folding reads into it would make every one of those assertions false
-  // for a reason that has nothing to do with what they check. The bounded reads
-  // (audit 9.2) need to prove the LIMIT reached the database, so they read this.
+  // READS are logged SEPARATELY from writes. `recorded` means "what this handler
+  // committed", and a long line of tests assert it is EMPTY after a refusal; folding
+  // reads into it would make every one of those false. The bounded reads (audit 9.2) need
+  // to prove the LIMIT reached the database, so they read this.
   const reads: Recorded[] = [];
   const batches: string[][] = [];
   let raced = false;
 
-  // Every read resolves its WHERE clause from the BOUND PARAMS. This is the whole
-  // point of the row-backed fake: the handler asking for the wrong path or the
-  // wrong version id must get nothing back, the way the database would answer.
+  // Every read resolves its WHERE clause from the BOUND PARAMS. A handler asking for the
+  // wrong path or the wrong version id must get nothing back, the way the database would
+  // answer.
   const answerFirst = (sql: string, params: unknown[]): unknown => {
     const flat = sql.replace(/\s+/g, " ");
     if (isImproveStatement(flat)) {
@@ -376,21 +368,20 @@ export function fakeD1(opts: FakeD1Options = {}): FakeD1 {
       const literalPath = flat.match(/path = '([^']+)'/i);
       const path = literalPath ? literalPath[1] : boundPath;
       // prompts/get binds the path WITHOUT the extension and lets SQL try both:
-      // `path = ?2 OR path = ?2 || '.md'`. A fake that only matched the first
-      // answered null for every prompt document, so the whole prompts surface was
-      // untestable through the real handler.
+      // `path = ?2 OR path = ?2 || '.md'`. A fake that only matched the first answered
+      // null for every prompt document, so the whole prompts surface was untestable
+      // through the real handler.
       const suffixed = /\|\| '\.md'/.test(flat);
       const row =
         rows.documents.find((d) => d.namespace === namespace && (d.path === path || (suffixed && d.path === `${path}.md`))) ?? null;
       const asOk = /SELECT 1 AS ok FROM documents/i.test(flat);
-      // The commit-time read of updated_at is NOT the pre-read, so the racing
-      // writer lands between them.
+      // The commit-time read of updated_at is NOT the pre-read, so the racing writer lands
+      // between them.
       //
-      // The value returned is the one captured BEFORE the hook runs, and that
-      // ordering is the entire point: the handler must go on holding the body it
-      // read while the store underneath it has moved. Re-resolving after the race
-      // would hand the handler the winner's body, its guard would match, and every
-      // predicate test would pass for the wrong reason.
+      // The value returned is the one captured BEFORE the hook runs. The handler must go
+      // on holding the body it read while the store underneath it has moved. Re-resolving
+      // after the race would hand the handler the winner's body, its guard would match,
+      // and every predicate test would pass for the wrong reason.
       const isPreRead = !/SELECT updated_at FROM documents/i.test(flat);
       const snapshot = asOk ? (row ? { ok: 1 } : null) : row ? project(flat, { ...row }) : null;
       if (isPreRead && opts.raceAfterPreRead && !raced) {
@@ -450,27 +441,24 @@ export function fakeD1(opts: FakeD1Options = {}): FakeD1 {
         path: i === 0 ? "conventions.md" : `hit-${i}.md`,
       }));
     }
-    // MULTI-ROW DOCUMENT SELECTS: list, find, the resource listing and gather's
-    // two section queries. Added for the bounded-read work (audit 9.2), which
-    // could not be tested without it: every one of these fell through to the
-    // single-row lookup below, which reads params[0] and params[1] as a
-    // (namespace, path) pair, so `list` asked for a document whose path was its
-    // `type` filter and the fake answered [] to everything. A bound that is only
-    // ever exercised against an empty result set is not tested at all.
+    // MULTI-ROW DOCUMENT SELECTS: list, find, the resource listing and gather's two
+    // section queries. Added for the bounded-read work (audit 9.2), which could not be
+    // tested without it: every one of these fell through to the single-row lookup below,
+    // which reads params[0] and params[1] as a (namespace, path) pair, so `list` asked for
+    // a document whose path was its `type` filter and the fake answered [] to everything.
     //
-    // The LIMIT is honoured from its BOUND PARAM rather than ignored, so a handler
-    // that stops asking the database for a bounded page fails here instead of
-    // being silently rescued by the fake returning everything anyway.
+    // The LIMIT is honoured from its BOUND PARAM rather than ignored, so a handler that
+    // stops asking the database for a bounded page fails here instead of being rescued by
+    // the fake returning everything anyway.
     if (/FROM documents/i.test(flat) && /ORDER BY/i.test(flat) && !/SELECT updated_at/i.test(flat)) {
       const limit = /LIMIT \?\d+/.test(flat) && typeof params[params.length - 1] === "number"
         ? (params[params.length - 1] as number)
         : Infinity;
       let out = [...rows.documents];
       if (/path GLOB \?1/i.test(flat)) {
-        // SQLite GLOB. Only `*` is implemented, which is the only wildcard these
-        // tools are used with; a pattern using any other GLOB metacharacter would
-        // match literally here and the test asserting it would fail loudly rather
-        // than quietly passing on a wrong answer.
+        // SQLite GLOB. Only `*` is implemented, which is the only wildcard these tools are
+        // used with; a pattern using any other GLOB metacharacter would match literally
+        // here and the test asserting it would fail loudly.
         const [glob, ns] = params as [string, string | null];
         out = out.filter((d) => globMatch(glob, d.path) && (ns == null || d.namespace === ns));
       } else if (/\(\?1 IS NULL OR namespace = \?1\)/i.test(flat)) {
@@ -482,10 +470,9 @@ export function fakeD1(opts: FakeD1Options = {}): FakeD1 {
             (status == null || d.status === status)
         );
       } else if (/namespace > \?1 OR \(namespace = \?1 AND path > \?2\)/i.test(flat)) {
-        // resources/list keyset cursor: strictly after the (namespace, path)
-        // tuple named by the cursor. Implemented as a TUPLE compare here too,
-        // because a fake that compared a concatenated key would hide exactly the
-        // boundary bug the real query is written this way to avoid.
+        // resources/list keyset cursor: strictly after the (namespace, path) tuple named
+        // by the cursor. A TUPLE compare here too, because a fake comparing a concatenated
+        // key would hide the boundary bug the real query is written to avoid.
         const [ns, path] = params as [string, string];
         if (ns !== "" || path !== "") {
           out = out.filter((d) => d.namespace > ns || (d.namespace === ns && d.path > path));
@@ -494,10 +481,9 @@ export function fakeD1(opts: FakeD1Options = {}): FakeD1 {
         const ns = params[0] as string;
         out = out.filter((d) => d.namespace === ns);
       }
-      // gather's rules query pins its namespace and its paths as LITERALS rather
-      // than binding them. Resolved here too, or the fake hands gather every
-      // seeded document as "the rules" and the size arithmetic under test is
-      // measuring the wrong rows.
+      // gather's rules query pins its namespace and its paths as LITERALS rather than
+      // binding them. Resolved here too, or the fake hands gather every seeded document as
+      // "the rules" and the size arithmetic under test measures the wrong rows.
       const literalNs = flat.match(/namespace = '([^']+)'/i);
       if (literalNs) out = out.filter((d) => d.namespace === literalNs[1]);
       const pathIn = flat.match(/path IN \(([^)]+)\)/i);
@@ -581,12 +567,11 @@ export function fakeD1(opts: FakeD1Options = {}): FakeD1 {
         // Inflated on purpose: FTS5 triggers inflate meta.changes on this schema,
         // which is why the code counts with a SELECT instead of reading it.
         meta: { changes: 999 },
-        // A BATCHED READ ANSWERS FROM THE ROWS, like a direct one. Added when the
-        // backup export moved into a single batch (residual 4): a batch that
-        // returned [] for every SELECT would have made "the dump is one snapshot"
-        // pass against a dump with no rows in it, which is the vacuous shape this
-        // repo keeps being bitten by. COUNT keeps its own branch, because
-        // dueCounts is how the prune's counters are driven.
+        // A BATCHED READ ANSWERS FROM THE ROWS, like a direct one. Added when the backup
+        // export moved into a single batch (residual 4): a batch returning [] for every
+        // SELECT would make "the dump is one snapshot" pass against a dump with no rows
+        // in it. COUNT keeps its own branch, because dueCounts drives the prune's
+        // counters.
         results: /SELECT COUNT/i.test(s.sql)
           ? [{ n: opts.dueCounts?.[countCall++] ?? 0 }]
           : /^\s*SELECT/i.test(s.sql)
@@ -601,10 +586,9 @@ export function fakeD1(opts: FakeD1Options = {}): FakeD1 {
 
 // ---- HTTP -------------------------------------------------------------------
 
-// contentType added for the improve arc: the Anthropic SDK's streaming helper
-// needs a text/event-stream response, and `text` alone gets no content type at
-// all, which surfaces as "request ended without sending any chunks" a long way
-// from the cause.
+// contentType added for the improve arc: the Anthropic SDK's streaming helper needs a
+// text/event-stream response, and `text` alone gets no content type, which surfaces as
+// "request ended without sending any chunks" a long way from the cause.
 export type RouteSpec = { status?: number; body?: unknown; text?: string; contentType?: string };
 export type Route = RouteSpec | ((requestBody: unknown) => RouteSpec);
 
@@ -613,16 +597,15 @@ export interface FetchCall {
   path: string;
   body: unknown;
   // The QUERY STRING, recorded because routing ignores it. ci_status picks between
-  // GitHub's `branch=` and `head_sha=` parameters from the shape of one `ref`
-  // argument, and that choice is invisible to a harness that only keeps pathnames.
+  // GitHub's `branch=` and `head_sha=` parameters from the shape of one `ref` argument,
+  // and that choice is invisible to a harness that only keeps pathnames.
   search: string;
 }
 
-// Route GitHub calls by "METHOD pathname" (query ignored) to a canned response,
-// and record every call. A route may be a function, so a test can serve a body
-// that CHANGES after a write, which is the only way to tell a fresh read from a
-// cached one. The recorded calls are how a cap is proven by the request that was
-// NOT made.
+// Route GitHub calls by "METHOD pathname" (query ignored) to a canned response, and
+// record every call. A route may be a function, so a test can serve a body that CHANGES
+// after a write, which is the only way to tell a fresh read from a cached one. The
+// recorded calls are how a cap is proven by the request that was NOT made.
 export async function withFetch(
   routes: Record<string, Route>,
   fn: (calls: FetchCall[]) => Promise<void> | void
@@ -638,10 +621,10 @@ export async function withFetch(
     if (!route) return new Response(`no route for ${method} ${parsed.pathname}`, { status: 500 });
     const spec = typeof route === "function" ? route(body) : route;
     const payload = spec.text !== undefined ? spec.text : spec.body === undefined ? "" : JSON.stringify(spec.body);
-    // A JSON route DECLARES ITS CONTENT TYPE. github.ts calls resp.json()
-    // unconditionally and never noticed, but the Anthropic SDK branches on the
-    // header and hands back an unparsed body without it, which surfaces as
-    // `response.content is undefined` a long way from the cause.
+    // A JSON route DECLARES ITS CONTENT TYPE. github/client.ts calls resp.json()
+    // unconditionally and never noticed, but the Anthropic SDK branches on the header and
+    // hands back an unparsed body without it, which surfaces as `response.content is
+    // undefined` a long way from the cause.
     const headers = spec.contentType
       ? { "Content-Type": spec.contentType }
       : spec.text !== undefined || spec.body === undefined
