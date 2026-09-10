@@ -104,3 +104,11 @@ Rulings, measurements, and refusal reasons that were recorded only in Worker com
 - **:95-122** `/csp-report` measured 2026-08-17: 47 reports, all synthetic, zero real browser violations (policy is Report-Only). 300/hour is an aggressive debugging session, not a fit to the measured burst of 3. Per-IP does nothing about a distributed flood.
 - **:156-168** Fails open: the thing guarded is the owner's ability to reconnect. KV is not atomic; the count can undershoot; not worth a Durable Object.
 - **:232-246** 429, not 204: a dropped report must not look stored. Browsers never read the status; curl, the live gate, and a future monitor do.
+
+## src/index.ts
+
+- **:39-53** Cache-Control fail-closed at the outermost exit so it covers everything workers-oauth-provider generates. Consent page shipped with no cache directive (measured 2026-08-09). `/health` is the sole opt-out.
+- **:65-82** `clientRegistrationTTL` is set to the library default rather than left to it, so a patch bump cannot make clients never expire. Measured 2026-08-13: all 30 live registrations carry expiry of registrationDate plus 90 days; 22 of 24 named Claude were written in a two-hour window on 2026-08-09. TASK-capsid-audit-2026-08-09.md's "carry no TTL / 1,460 dead keys a year" was wrong.
+- **:85-92** DCR callback gets no env; provider is constructed at module scope. `currentEnv` stash is idempotent (every request in an isolate gets the same env object). Unset skips the limiter (fail-open).
+- **:95-100** `CANONICAL_MCP_URL` pinned as `resourceMetadata.resource` so every access-token audience is bound (RFC 8707 / RFC 9728). A token minted with no `resource` is otherwise admitted unbound (2026-09-06 MAJOR).
+- **:162-180** Three crons dispatched on `controller.cron`, not the clock: 09:00 UTC matches all three expressions and Cloudflare delivers once per expression. Improve opener is two UTC hours because 03:00 America/Chicago is 08:00 or 09:00 depending on DST. Each branch is its own try.
