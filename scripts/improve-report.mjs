@@ -297,8 +297,8 @@ export function testPassRate(text) {
 }
 
 // One holdout case file passes iff its report has at least one top-level ok and no
-// top-level not-ok. Zero results (the process.exit(0) case, or a load error) is
-// NOT a pass, which is the whole point: silence cannot score.
+// top-level not-ok. Zero results (the process.exit(0) case, or a load error) is NOT a
+// pass: silence cannot score.
 /** @param {string} text */
 export function holdoutFilePassed(text) {
   const { pass, fail } = parseTestReport(text);
