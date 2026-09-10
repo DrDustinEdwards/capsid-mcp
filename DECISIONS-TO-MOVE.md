@@ -133,3 +133,12 @@ Rulings, measurements, and refusal reasons that were recorded only in Worker com
 - **:23-27** Whole files rather than a patch: a unified diff that fails to apply has no recovery inside a cron job.
 - **:99-104** Repository context is the cached prefix, passed separately. It used to be last in the user message, after history, so every attempt busted the prefix cache.
 - **:165-192** One contents-API commit per file: building a multi-file commit means constructing a tree by hand, which is a second write path. `writeRepoFile` direct mode falls back to the default branch if no branch is passed; on capsid that is this server's master, so a dropped branch is a production deploy. Precondition, not a second path. Audit 2026-09-07.
+
+## src/improve-gates.ts
+
+- **:1-12** Monitor reverts one attempt; drift gate stops the namespace. Both written so the expensive half can be absent. A loop whose safety depends on an API call is unsafe exactly when that API is down.
+- **:31-33** Schema rather than "reply with JSON": a monitor whose output cannot be read is a monitor that fails open.
+- **:63-68** Deterministic path half runs first and cannot be argued with.
+- **:122-124** Fail closed: a monitor that cannot run does not approve.
+- **:173-181** Drift uses last three runs, not last one. A window with no attempts does not pause (zero/zero would stop every namespace on the first three nights).
+- **:214-220** An anchor drop pauses immediately. Per-attempt only asks whether the anchor still PASSES, so 1.0 to 0.95 against a floor of 0.9 is invisible to it.

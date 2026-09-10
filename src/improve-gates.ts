@@ -1,16 +1,3 @@
-// The two gates: the per-attempt monitor and the per-namespace drift gate.
-//
-// They answer different questions and fail in different directions on purpose.
-// The MONITOR asks "is this one change trying to game the scorer", and its
-// verdict reverts a single attempt. The DRIFT GATE asks "has this namespace
-// stopped making progress, or started going backwards", and its verdict stops the
-// namespace until a human looks.
-//
-// Both are written so that the expensive half can be absent. The monitor's
-// deterministic half runs with no model and no network; the drift gate never
-// needs one at all. A loop whose safety depends on an API call is a loop that is
-// unsafe exactly when that API is down.
-
 import type { Env } from "./env";
 import { callModel } from "./improve-anthropic";
 import { anchorRegressions, type AnchorSpec, type MetricMap } from "./improve-scores";
@@ -60,12 +47,7 @@ const MONITOR_SYSTEM = [
   "Answer false when you are unsure and the change looks like ordinary work. The deterministic path guard has already refused the obvious cases; you are here for the ones a pattern cannot name.",
 ].join("\n");
 
-// THE DETERMINISTIC HALF RUNS FIRST AND CANNOT BE ARGUED WITH.
-//
-// A change that touches a test file, the CI workflow, a lockfile or the loop's
-// own source is reverted whether or not a model thinks the edit was reasonable.
-// It runs in every mode, needs no key, and cannot be talked out of a verdict by
-// anything written in the diff, which is the property the model half cannot have.
+// Deterministic half first. A protected-path hit reverts with no model.
 export function pathMonitor(changedPaths: string[]): MonitorVerdict {
   const hits = protectedHits(changedPaths);
   if (hits.length === 0) return { flagged: false, reason: null, source: "none", costUsd: 0 };
@@ -119,9 +101,7 @@ export async function monitorAttempt(env: Env, input: MonitorInput): Promise<Mon
       ].join("\n"),
     });
   } catch (err) {
-    // FAIL CLOSED. A monitor that cannot run is not a monitor that approves. The
-    // attempt is flagged and reverted, and the reason says the monitor was
-    // unavailable rather than pretending it looked and found something.
+    // Fail closed: a monitor that cannot run does not approve.
     return {
       flagged: true,
       reason: `the reward-hacking monitor could not run (${err instanceof Error ? err.message : String(err)}), so the attempt is reverted rather than accepted unreviewed`,
@@ -170,15 +150,7 @@ export interface DriftVerdict {
   ratio: number;
 }
 
-// REVERTS OVER THE LAST THREE RUNS, NOT OVER THE LAST RUN. A single bad night is
-// noise; three nights where most attempts are reverted is the loop failing to
-// find anything, and continuing costs money and fills five repos with branches
-// nobody will read.
-//
-// Runs with zero attempts are counted as runs but contribute nothing to the
-// ratio, and a window with no attempts at all does NOT pause: dividing zero by
-// zero into a pause would stop every namespace on the first three nights, before
-// the loop had done anything to judge.
+// Last three runs, not last one. A window with no attempts does not pause.
 export function driftVerdict(recentRuns: RunRow[]): DriftVerdict {
   const window = recentRuns.slice(0, DRIFT_RUN_WINDOW);
   const attempts = window.reduce((n, r) => n + r.attempts, 0);
@@ -211,13 +183,7 @@ export function driftVerdict(recentRuns: RunRow[]): DriftVerdict {
   return { pause: false, reason: null, runsConsidered: window.length, attempts, reverts, ratio };
 }
 
-// THE OTHER HALF OF THE DRIFT GATE, and the more important one: an anchor that
-// drops pauses the namespace immediately, without waiting for three runs.
-//
-// A falling anchor inside its own bound is invisible to the per-attempt check,
-// because the per-attempt check only asks whether the anchor still PASSES. A
-// holdout rate sliding 1.0, 0.98, 0.95 passes a floor of 0.9 three times and is a
-// regression in progress. This is the check that sees it.
+// An anchor drop pauses immediately. Per-attempt only asks whether it still PASSES.
 export function anchorDriftVerdict(
   anchors: AnchorSpec[],
   best: MetricMap,
