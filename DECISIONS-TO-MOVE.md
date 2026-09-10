@@ -86,3 +86,12 @@ Rulings, measurements, and refusal reasons that were recorded only in Worker com
 - **:54-58** Error precedence is load-bearing: replace is checked before existence, so creating a document reports the missing title rather than "cannot replace a document that does not exist".
 - **:76-82** `meta` is not a convenience: without it, closing a task or correcting a type means resupplying the entire body.
 - **:153-160** Spliced by index, not `String.replace` (audit 2, F19). `replace()` with a string pattern still interprets `$&`, `$\``, `$'`, `$$` in the replacement. Two plants on 2026-08-11 were defeated by CRLF vs LF on the patch anchor.
+
+## src/headers.ts
+
+- **:1-25** Headers applied once at the outermost exit because workers-oauth-provider generates `/token`, `/register`, and both `.well-known` documents, none of which appear in this repo. Measured 2026-08-12: consent page carried 4 of 7 headers; every JSON surface carried none. Set only if absent, so the consent dialog's hand-tuned CSP (no `form-action`, ruling e7a0dff) is preserved.
+- **:29-32** HSTS has no `preload`: that is a vendor-list submission and effectively irreversible.
+- **:41-46** `REPORT_PREFIX` was two literals (audit 2, F21); intake and prune have to agree.
+- **:49-60** CSP Report-Only, never enforced. Promotion requires a demonstrated failing case and a ruling. 423bbd6 skipped that and broke consent for 26 days. `form-action` is deliberately absent even on JSON: naming it in a policy that could later be promoted is how the last outage started.
+- **:64-67** COOP Report-Only on HTML: `same-origin` severs `window.opener`; if a client hosts consent in a popup that is a live OAuth change. Ruled 2026-08-12.
+- **:70-77** `/mcp` Origin allowlist (audit 2026-09-06): no Origin passes, same-origin passes, `https://claude.ai` passes. Opaque `"null"` is refused. Spec says servers MUST validate Origin.
