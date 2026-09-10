@@ -54,3 +54,11 @@ Rulings, measurements, and refusal reasons that were recorded only in Worker com
 - **:54-64** Score job no longer holds a long-lived S3 key (platform arc 2026-09-06). It POSTs `/improve/holdout-credential`; the Worker mints a one-hour object-read-only credential. Parent token secret never leaves the dashboard. Omitted from AttemptEnv. Only `improve-scorer.ts` may name the token.
 - **:68-72** Backup mint parent is a separate R2 token, object-read-only on capsid-media, so neither credential family can read the other bucket.
 - **:76-86** AttemptEnv is the type-level half of isolation. Three layers: type, separate bucket, source scan. A type can be cast away, a scan can be evaded by an alias, and a shared bucket defeats both.
+
+## src/counts.ts
+
+- **:1-27** Values are a cache; `test/counts.test.ts` derives them from the artifacts. Keyed by namespace, load-bearing: until 2026-08-14 one global object scanned every namespace, so another project's 24-gate suite was compared against capsid's 9 live gates (16 claims flagged, 14 of them that). A namespace with no entry gets no claims.
+- **:44-49** `Object.hasOwn`, not `?? null`. A lookup of `"constructor"` returned the Object function. Found 2026-09-05 by the capsid holdout suite.
+- **:54-55** A four-digit year is never a count: `tool surface...(\d+)` matched 2026 in "the 2026-07-28 migration".
+- **:58-77** Episodics exempt (history of a run). `decision` exempt, ruled 2026-08-15: an append-only ruling log is history by construction. Three finer exemptions each revealed another false-positive shape.
+- **:191-194** `"all seven"` appears in 25 documents and almost none are about headers, so the flag is scoped to header context. COOP ships Report-Only, so "all seven enforced" overstates what is live.
