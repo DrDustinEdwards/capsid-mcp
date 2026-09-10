@@ -32,6 +32,16 @@ function substitute(sql) {
   HOLE.lastIndex = 0;
   // A hole immediately after FROM or INTO or JOIN is a table name.
   let out = sql.replace(/\b(FROM|INTO|JOIN|UPDATE)\s+\$\{[^}]*\}/gi, "$1 documents");
+  // A hole standing where the whole WHERE clause goes is an optional filter list,
+  // built from however many arguments the caller supplied. Substituted with a
+  // tautology so the statement plans: what the plan check is for is the table and
+  // the ORDER BY, and an optional filter can only narrow the scan the plan reports.
+  // Without this the statement is SKIPPED, which is how a read on a growing table
+  // silently leaves the plan check.
+  out = out.replace(/\$\{clause\}|\$\{where[A-Za-z]*\}/g, "WHERE 1 = 1");
+  // A hole right after a `?` is a bound-parameter INDEX, computed from how many
+  // arguments were pushed. Any index plans the same, so ?1 stands in.
+  out = out.replace(/\?\$\{[^}]*\}/g, "?1");
   // A hole inside a VALUES or IN list is a placeholder list.
   out = out.replace(/\(\s*\$\{[^}]*\}\s*\)/g, "(?1)");
   // A remaining hole in a projection position.
@@ -105,4 +115,4 @@ export function readStatements(statements) {
 // bound: documents is the corpus, document_versions is every snapshot ever taken
 // (53.9MB and doubling every three weeks as of 2026-09-07), audit_log is every
 // write, and the improve_* tables are every attempt.
-export const HOT_TABLES = ["documents", "document_links", "document_versions", "audit_log", "improve_runs", "improve_attempts", "improve_scores", "improve_skills", "improve_jti"];
+export const HOT_TABLES = ["documents", "document_links", "document_versions", "audit_log", "improve_runs", "improve_attempts", "improve_scores", "improve_skills", "improve_jti", "jobs"];

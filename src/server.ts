@@ -13,6 +13,7 @@ import { registerDocTools, type ToolCtx, type ToolGrant } from "./tools/docs";
 import { registerLintTools } from "./tools/lint";
 import { registerRepoTools } from "./tools/repo";
 import { registerImproveTools } from "./tools/improve";
+import { registerJobTools } from "./tools/jobs";
 
 export type { ToolGrant };
 
@@ -62,6 +63,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
   registerLintTools(server, ctx);
   registerRepoTools(server, ctx);
   registerImproveTools(server, ctx);
+  registerJobTools(server, ctx);
 
   // Template metadata spreads onto every listed resource, so it is stated ONCE and
   // applied by both the read registration and the list handler below.

@@ -1,5 +1,6 @@
 import type { Env } from "../env";
 import { dispatchWorkflow } from "../github";
+import { expireJobLeases } from "../jobs";
 import { proposeChange, pushAttempt } from "../improve-attempt";
 import { pathMonitor } from "../improve-gates";
 import {
@@ -59,6 +60,20 @@ export interface TickOutcome {
 }
 
 export async function tickRuns(env: Env, now: Date): Promise<TickOutcome[]> {
+  // THE WORK QUEUE'S LEASE SWEEP RIDES THIS TICK, before anything else and outside
+  // the budget check. It spends nothing: no model call, no GitHub call, one keyed
+  // UPDATE. Gating it on the budget would leave a job held by a session that died
+  // for as long as the caps were exceeded, which is the state the sweep exists to
+  // clear, and an exhausted budget is exactly when nobody is watching.
+  //
+  // Reported through console rather than in TickOutcome, which describes improve
+  // RUNS. A requeued job is not a run transition and folding it into that shape
+  // would make the loop's own outcome list lie about what it advanced.
+  const expired = await expireJobLeases(env, now);
+  if (expired.requeued.length > 0) {
+    console.log(`JOB_LEASE_EXPIRED returned ${expired.requeued.length} job(s) to queued: ${expired.requeued.join(", ")}`);
+  }
+
   const runs = await advanceableRuns(env.DB, RUNS_PER_TICK);
   // THE BUDGET COMES FIRST: an exceeded cap advances nothing, dispatches nothing,
   // calls nothing. Active runs are left where they are and reported; the first tick

@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { hintsFor, TOOL_HINTS } from "../src/tool-annotations.ts";
+import { AUTHORITATIVE } from "../src/counts.ts";
 import { allSourceText, toolBlocks } from "./source-files.ts";
+
+const CAPSID = AUTHORITATIVE.capsid;
 
 // TOOL ANNOTATIONS ARE DERIVED, NOT DECLARED.
 //
@@ -39,13 +42,22 @@ const DESTRUCTIVE = [
   // where an INSERT or a DELETE in this file's own text cannot see them.
   /\bimproveControl\(/,
   /\bimproveRunManual\(/,
+  // The work queue's mutating entry points, named for the same reason: the row and
+  // document writes happen in src/jobs.ts, a module away from this file's text.
+  /\bclaimJob\(/,
+  /\bcompleteJob\(/,
+  /\bfailJob\(/,
+  /\bblockJob\(/,
 ];
 
 const matches = (body: string, res: RegExp[]) => res.some((re) => re.test(body));
 
-test("the scan finds all thirty tools, so nothing here can pass by reading nothing", () => {
+test("the scan finds every tool, so nothing here can pass by reading nothing", () => {
   const blocks = toolBlocks();
-  assert.equal(blocks.length, 30, `the tool-block walk found ${blocks.length} registrations`);
+  // Derived from src/counts.ts rather than spelled, so the surface moves in one
+  // place. Spelled out, every ruled addition broke this test for a reason that had
+  // nothing to do with annotations.
+  assert.equal(blocks.length, CAPSID.tools, `the tool-block walk found ${blocks.length} registrations`);
   assert.ok(blocks.every((b) => b.body.length > 100), "a zero-length block would make every match below vacuous");
 });
 
@@ -68,9 +80,15 @@ test("PLANT: every tool is annotated at its registration, from the table and not
 
 test("PLANT: readOnlyHint is exactly the negation of the write gate", () => {
   const writeGated = toolBlocks().filter((b) => matches(b.body, WRITE_GATE));
-  // Vacuity guard with a floor derived from the surface split recorded in
-  // capsid/core.md: fifteen read, fifteen write-gated.
-  assert.equal(writeGated.length, 15, `the write-gate scan found ${writeGated.length} gated tools, expected 15`);
+  // Vacuity guard. The read half is what is stable: fifteen read tools, and every
+  // tool added since has been write-gated, so the gated count is the surface minus
+  // fifteen and moves with counts.ts rather than by hand.
+  const READ_TOOLS = 15;
+  assert.equal(
+    writeGated.length,
+    CAPSID.tools - READ_TOOLS,
+    `the write-gate scan found ${writeGated.length} gated tools, expected ${CAPSID.tools - READ_TOOLS}`
+  );
 
   const wrong: string[] = [];
   for (const block of toolBlocks()) {

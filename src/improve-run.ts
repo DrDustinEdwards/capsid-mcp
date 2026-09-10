@@ -29,6 +29,7 @@ import {
   readMode,
 } from "./improve-state";
 import { verifyTaskDoc } from "./improve-task";
+import { jobsSummary, type JobsSummary } from "./jobs";
 import { integrityOf, REPORTS_PREFIX } from "./truth-report";
 import {
   checkBudget,
@@ -99,6 +100,11 @@ export interface NamespaceStatus {
   // percentage; this is the read path for it. null means no report has ever been run
   // here, which is NOT an integrity of zero.
   latest_report: { path: string; integrity: number | null; generated: string } | null;
+  // THE WORK QUEUE, per namespace. Counts for the three open states plus what moved
+  // today, and the BLOCKED JOBS THEMSELVES with the command each is waiting on. A
+  // blocked job is not a failure, it is work waiting on a human, and a count of them
+  // tells nobody what to run. This is what the console shows.
+  jobs: JobsSummary;
 }
 
 export interface StatusReport {
@@ -171,6 +177,7 @@ export async function improveStatus(env: Env, only?: string, taskPath?: string):
       latest_report: report
         ? { path: `${namespace}/${report.path}`, integrity: integrityOf(report.body), generated: report.updated_at }
         : null,
+      jobs: await jobsSummary(env.DB, namespace, new Date()),
     });
   }
 

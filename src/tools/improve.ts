@@ -65,7 +65,7 @@ export function registerImproveTools(server: McpServer, ctx: ToolCtx): void {
     {
       annotations: hintsFor("improve_status"),
       description:
-        "The improve loop's current state: the mode, and per namespace the pause reason if any, whether its anchor block is pinned, the best known commit and score, the last run, and lifetime totals for attempts, keeps, reverts, estimated model cost and CI minutes. It also serves protected_paths, the deterministic path guard's pattern list (source and flags per entry), which the subscription-mode driver rebuilds and applies to each attempt's changed paths before any push, so that guard cannot drift from the Worker's. Read-only. cost_usd is an estimate computed from token counts and published rates, not a bill.",
+        "The improve loop's current state: the mode, and per namespace the pause reason if any, whether its anchor block is pinned, the best known commit and score, the last run, and lifetime totals for attempts, keeps, reverts, estimated model cost and CI minutes. Each namespace also carries a jobs block: how many queued, claimed and blocked, how many finished today, and the BLOCKED JOBS THEMSELVES with the command each is waiting on, because a count of blocked jobs tells nobody what to run. It also serves protected_paths, the deterministic path guard's pattern list (source and flags per entry), which the subscription-mode driver rebuilds and applies to each attempt's changed paths before any push, so that guard cannot drift from the Worker's. Read-only. cost_usd is an estimate computed from token counts and published rates, not a bill.",
       inputSchema: {
         namespace: nsName.optional().describe("Limit to one namespace. Omit for the whole roster."),
         task_path: docPath

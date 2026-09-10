@@ -288,6 +288,11 @@ export async function improveDocStatements(
     tags?: string;
     prior: { id: number; title: string | null; body: string | null } | null;
     action: string;
+    // Who the audit row names. Defaults to the loop, which is every improve caller.
+    // The work queue passes the job's own actor, because a job document written by
+    // an operator key must not read as the loop's work: audit_log is the one place
+    // that answers who did it.
+    actor?: string;
   }
 ): Promise<D1PreparedStatement[]> {
   // Server-side dash normalization, the same as the write tool applies. A
@@ -321,7 +326,7 @@ export async function improveDocStatements(
     db
       .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES (?1, ?2, ?3, ?4, ?5)")
       .bind(
-        IMPROVE_ACTOR,
+        doc.actor ?? IMPROVE_ACTOR,
         doc.action,
         doc.namespace,
         doc.path,

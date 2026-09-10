@@ -27,14 +27,17 @@ async function bodyOf(resp: Response): Promise<Record<string, unknown>> {
 }
 
 test("schema_version is the newest applied migration name", async () => {
+  // The fixture is SEEDED FROM migrations/, not spelled out. Spelling it out meant
+  // the assertion compared the last string the test itself passed in, which is the
+  // fake-asserting shape (2026-09-10 slop pass), and it also had to be edited by
+  // hand every time a migration shipped. Derived, a new migration moves both sides.
+  const applied = readdirSync(MIGRATIONS).filter((f) => f.endsWith(".sql")).sort();
+  assert.ok(applied.length >= 6, `the migrations walk found ${applied.length} files; it is broken`);
   const env = healthEnv({
-    DB: fakeD1({ migrations: ["0001_init.sql", "0002_document_links.sql", "0003_improve.sql", "0004_improve_jti.sql", "0005_query_plan_indexes.sql"] }).db,
+    DB: fakeD1({ migrations: applied }).db,
     APP_KV: fakeKv({ seed: { "backup:last-ok": new Date().toISOString() } }).kv,
   });
   const body = await bodyOf(await handleHealth(env));
-  assert.equal(body.schema_version, "0005_query_plan_indexes.sql");
-  // Pinned to the real migrations directory, so a new migration that ships
-  // without this assertion tracking it fails here rather than drifting silently.
   assert.equal(body.schema_version, NEWEST_MIGRATION);
 });
 

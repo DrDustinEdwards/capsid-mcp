@@ -33,6 +33,38 @@ export async function signTaskBody(rootSecret: string, body: string): Promise<st
 
 export type TaskVerification = { ok: true } | { ok: false; reason: string };
 
+// THE SIGNATURE HALF, ON ITS OWN. verifyTaskDoc adds an actor check on top of this,
+// because only the loop writes a run document. A JOB is signed by the same Worker
+// and posted by a human seat, so its audit actor is that seat and the actor check
+// does not apply: what proves a job body went through `post` is that this Worker's
+// key signed it. One implementation of the signature check, two callers, so the two
+// cannot drift on what "signed" means.
+export async function verifySignedBody(
+  rootSecret: string | undefined,
+  stored: string,
+  what: string
+): Promise<TaskVerification> {
+  if (!rootSecret) {
+    return { ok: false, reason: `signing is not configured on this Worker (IMPROVE_SCORE_SECRET is unset), so no ${what} can be verified. Refusing rather than executing an unverifiable plan.` };
+  }
+  const { signature, body } = splitSignedTask(stored);
+  if (!signature) {
+    return {
+      ok: false,
+      reason: `this ${what} carries no ${TASK_SIGNATURE_FIELD} frontmatter line. The Worker signs every one it writes, so an unsigned one did not come from it. Refusing to execute it.`,
+    };
+  }
+  const key = await deriveTaskKey(rootSecret);
+  const expected = await hmacHex(key, body);
+  if (!timingSafeEqual(signature.toLowerCase(), expected)) {
+    return {
+      ok: false,
+      reason: `this ${what}'s ${TASK_SIGNATURE_FIELD} does not match its body. It was edited after the Worker wrote it. Refusing to execute it.`,
+    };
+  }
+  return { ok: true };
+}
+
 // Two halves: HMAC of the body below the frontmatter, and last audit actor
 // improve-loop. Unconfigured (no IMPROVE_SCORE_SECRET) is a refusal, not a skip.
 export async function verifyTaskDoc(
@@ -50,20 +82,5 @@ export async function verifyTaskDoc(
       reason: `this task document was last written by '${actor ?? "(no audit row)"}', not '${expectedActor}'. Only the loop writes task documents; refusing to execute one something else authored.`,
     };
   }
-  const { signature, body } = splitSignedTask(stored);
-  if (!signature) {
-    return {
-      ok: false,
-      reason: `this task document carries no ${TASK_SIGNATURE_FIELD} frontmatter line. The Worker signs every task document it writes, so an unsigned one was not written by the loop. Refusing to execute it.`,
-    };
-  }
-  const key = await deriveTaskKey(rootSecret);
-  const expected = await hmacHex(key, body);
-  if (!timingSafeEqual(signature.toLowerCase(), expected)) {
-    return {
-      ok: false,
-      reason: `this task document's ${TASK_SIGNATURE_FIELD} does not match its body. It was edited after the loop wrote it. Refusing to execute it.`,
-    };
-  }
-  return { ok: true };
+  return verifySignedBody(rootSecret, stored, "task document");
 }

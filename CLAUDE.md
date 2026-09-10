@@ -39,7 +39,7 @@ End: write NOTHING by default. The end-of-session episodic was withdrawn portfol
 
 ## Hard rules, this repo only
 
-1. **Keep the worker lean.** Few tools, no dead code, no speculative abstractions. The surface is 30 tools and stays small (`src/counts.ts` pins it, `test/counts.test.ts` asserts it against the registrations); each recent addition is a ruled exception recorded in `capsid/decisions.md`: history and restore (2026-08-13), improve_run and improve_status (2026-09-04), and repo_refs, repo_history, delete_branch and ci_dispatch (2026-09-06).
+1. **Keep the worker lean.** Few tools, no dead code, no speculative abstractions. The surface is 31 tools and stays small (`src/counts.ts` pins it, `test/counts.test.ts` asserts it against the registrations); each recent addition is a ruled exception recorded in `capsid/decisions.md`: history and restore (2026-08-13), improve_run and improve_status (2026-09-04), repo_refs, repo_history, delete_branch and ci_dispatch (2026-09-06), and jobs (2026-09-10).
 2. **Never commit wrangler.jsonc, .dev.vars, or .env.** The operator key exists only as a sha256 hash in a Worker secret. This is a public MIT repo.
 3. **No real vault content in any seed or fixture.** Sample data is obviously fake (example.com, lorem bodies, namespace "sample").
 4. **The lint loop never calls an LLM from the Worker.** The driving client does all reasoning with ordinary read and write tools. Gather is read-only; finalize archives, never deletes.
@@ -56,4 +56,4 @@ End: write NOTHING by default. The end-of-session episodic was withdrawn portfol
 
     npx wrangler d1 export capsid --remote --no-schema --table <table> --output export-<table>.sql
 
-Export the real tables individually (TEN since migrations/0004_improve_jti.sql added the replay cache; `TABLES` in `src/backup.ts` is the list, and test/backup.test.ts derives it from `migrations/` in both directions), take the schema from `migrations/`, and import `documents` FIRST so the FTS triggers rebuild the index. Never export `documents_fts` or its shadow tables. Full runbook, including the measured traps: `capsid/protocol-restore.md`.
+Export the real tables individually (ELEVEN since migrations/0006_jobs.sql added the work queue; `TABLES` in `src/backup.ts` is the list, and test/backup.test.ts derives it from `migrations/` in both directions), take the schema from `migrations/`, and import `documents` FIRST so the FTS triggers rebuild the index. Never export `documents_fts` or its shadow tables. Full runbook, including the measured traps: `capsid/protocol-restore.md`.
