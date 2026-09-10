@@ -14,7 +14,8 @@
     "verify:live": "node scripts/verify-live.mjs",
     "test:integration": "vitest run",
     "check:integration": "tsc --noEmit -p test-integration/tsconfig.json",
-    "check:scripts": "tsc --noEmit -p tsconfig.scripts.json"
+    "check:scripts": "tsc --noEmit -p tsconfig.scripts.json",
+    "sync:scorer": "node scripts/sync-scorer.mjs"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",
