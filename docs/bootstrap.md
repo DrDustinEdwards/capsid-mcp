@@ -120,20 +120,7 @@ The deploy job fails if the live database is behind, which is deliberate: a Work
 deployed against a schema it does not have is a Worker that answers errors on
 every write path.
 
-**`wrangler d1 export` does not work on this database.** FTS5 virtual tables make
-it fail outright with no file written. The working path is per table, data only,
-with the schema coming from `migrations/`. Import the documents table FIRST so the
-FTS triggers rebuild the index, and never export the FTS table or its shadow
-tables.
-
-Two related traps, both measured rather than assumed:
-
-- **`COUNT(*)` on an external-content FTS table cannot detect index drift.** It
-  reads through to the content table, so it equals the content table's count no
-  matter how broken the index is. Count the `_docsize` shadow table instead.
-  `integrity-check` also passes on an emptied index.
-- **`DELETE FROM <fts_table>` corrupts the index.** The next write that fires a
-  delete trigger fails. The repair is a `'rebuild'` insert.
+Restore is in README Restore; do not use `wrangler d1 export`.
 
 ## 6. Verifying a deploy
 
