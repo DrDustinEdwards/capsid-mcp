@@ -95,3 +95,12 @@ Rulings, measurements, and refusal reasons that were recorded only in Worker com
 - **:49-60** CSP Report-Only, never enforced. Promotion requires a demonstrated failing case and a ruling. 423bbd6 skipped that and broke consent for 26 days. `form-action` is deliberately absent even on JSON: naming it in a policy that could later be promoted is how the last outage started.
 - **:64-67** COOP Report-Only on HTML: `same-origin` severs `window.opener`; if a client hosts consent in a popup that is a live OAuth change. Ruled 2026-08-12.
 - **:70-77** `/mcp` Origin allowlist (audit 2026-09-06): no Origin passes, same-origin passes, `https://claude.ai` passes. Opaque `"null"` is refused. Spec says servers MUST validate Origin.
+
+## src/rate-limit.ts
+
+- **:8-15** No WAF half: Cloudflare rate limiting rules are a zone feature and do not apply to `*.workers.dev`. Capsid deploys with no routes and no custom domain. Named `dcr-rate-limit.ts` until 2026-08-17.
+- **:35-41** `/register` thresholds measured 2026-08-09: claude.ai legitimately registered 22 clients from one IP in about two hours during the OAuth consent outage. A "10 per hour" limit would have locked the owner out mid-incident. Hourly 30, daily 100.
+- **:52-63** At most one non-loopback `redirect_uri` per registered client (audit 2026-09-06). Loopback exempt so a native client can cycle ports. Lives here so it is testable without loading the OAuth provider.
+- **:95-122** `/csp-report` measured 2026-08-17: 47 reports, all synthetic, zero real browser violations (policy is Report-Only). 300/hour is an aggressive debugging session, not a fit to the measured burst of 3. Per-IP does nothing about a distributed flood.
+- **:156-168** Fails open: the thing guarded is the owner's ability to reconnect. KV is not atomic; the count can undershoot; not worth a Durable Object.
+- **:232-246** 429, not 204: a dropped report must not look stored. Browsers never read the status; curl, the live gate, and a future monitor do.
