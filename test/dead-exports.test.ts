@@ -80,10 +80,23 @@ function otherReaders(): Array<{ name: string; text: string }> {
 
 const READERS = otherReaders();
 
+// A BARREL RE-EXPORT IS NOT A CALLER. `export { x } from "./y"` names x in order
+// to forward it, not to use it, so counting it hides exactly what this file
+// exists to surface: put a module behind a barrel and every symbol under it
+// looks called by the barrel. A plain `import { x } from` is left alone, because
+// importing a name in order to use it is what a caller does. This lands before
+// any barrel exists, where it is a no-op, so the guard is already correct on the
+// day one appears.
+const RE_EXPORT_FROM = /export\s+(?:type\s+)?\{[^}]*\}\s*from\s*["'][^"']+["'];?/g;
+const RE_EXPORT_STAR = /export\s+\*(?:\s+as\s+[A-Za-z0-9_]+)?\s+from\s*["'][^"']+["'];?/g;
+function withoutReExports(text: string): string {
+  return text.replace(RE_EXPORT_FROM, "").replace(RE_EXPORT_STAR, "");
+}
+
 function hasCallerElsewhere(name: string, ownFile: string): boolean {
   const re = new RegExp(`\\b${name}\\b`);
-  if (sourceFiles().some((f) => f.name !== ownFile && re.test(f.text))) return true;
-  return READERS.some((f) => re.test(f.text));
+  if (sourceFiles().some((f) => f.name !== ownFile && re.test(withoutReExports(f.text)))) return true;
+  return READERS.some((f) => re.test(withoutReExports(f.text)));
 }
 
 test("the scan finds the exports at all, so nothing here can pass by reading nothing", () => {
@@ -128,33 +141,41 @@ test("PLANT: the two exports the holdout imports are still exported from src", (
 // it appears, so it is reviewed while somebody still remembers writing it; and
 // removing one means editing this list, which is the moment to ask whether a
 // branch was scored.
+// KEYED BY EXPORT NAME, NOT BY FILE. The name is what is under review; the file
+// holding it is not. Keying on "src/<file>: <name>" turned every module move into
+// a apparent change in the no-caller set, and the scorer sandbox runs the DEFAULT
+// branch's tests against an attempt's src/, so a move surfaced there as a test
+// regression no edit to the attempt could clear. Both directions are still
+// asserted, and the failure message still prints where each one currently lives.
 const KNOWN_SUSPECTS = [
-  "src/github.ts: assertRepoArg",
-  "src/github.ts: workflowRunsForBranch",
-  "src/headers.ts: REPORTING_ENDPOINTS",
-  "src/improve-anthropic.ts: clientFor",
-  "src/improve-anthropic.ts: costOf",
-  "src/improve-run.ts: DEFAULT_RUN_PROMPT",
-  "src/improve-run.ts: verifyTaskDocument",
-  "src/improve-schema.ts: ATTEMPT_STATUSES",
-  "src/improve-scorer.ts: BACKUP_BUCKET_NAME",
-  "src/improve-scorer.ts: BACKUP_DUMP_PREFIX",
-  "src/improve-scorer.ts: HOLDOUT_BUCKET_NAME",
-  "src/improve-scorer.ts: HOLDOUT_CREDENTIAL_TTL_SECONDS",
-  "src/store-probe.ts: HEALTH_PROBE_NS",
-  "src/store-probe.ts: HEALTH_PROBE_PATH",
-  "src/store-probe.ts: HEALTH_PROBE_TERM",
+  "ATTEMPT_STATUSES",
+  "BACKUP_BUCKET_NAME",
+  "BACKUP_DUMP_PREFIX",
+  "DEFAULT_RUN_PROMPT",
+  "HEALTH_PROBE_NS",
+  "HEALTH_PROBE_PATH",
+  "HEALTH_PROBE_TERM",
+  "HOLDOUT_BUCKET_NAME",
+  "HOLDOUT_CREDENTIAL_TTL_SECONDS",
+  "REPORTING_ENDPOINTS",
+  "assertRepoArg",
+  "clientFor",
+  "costOf",
+  "verifyTaskDocument",
+  "workflowRunsForBranch",
 ];
 
 test("the set of exports with no caller anywhere is exactly the reviewed list", () => {
   const declared = new Set(declaredByHoldout());
   const suspects: string[] = [];
+  const where = new Map<string, string>();
   for (const { file, name } of exportsOfSrc()) {
     if (hasCallerElsewhere(name, file)) continue;
     // The manifest is the third place to look, and it is the one that cost an
     // anchor when it did not exist.
     if (declared.has(name)) continue;
-    suspects.push(`src/${file}: ${name}`);
+    suspects.push(name);
+    where.set(name, `src/${file}`);
   }
   assert.deepEqual(
     suspects.sort(),
