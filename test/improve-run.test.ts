@@ -542,7 +542,7 @@ test("a proposal touching a protected path is flagged BEFORE any push or dispatc
       assert.ok(attempt, "no attempt row was written");
       assert.equal(attempt.status, "flagged", "the protected-path proposal was not flagged before push");
       assert.equal(attempt.flagged, 1);
-      // The whole point: no branch write and no scorer dispatch ever reached GitHub.
+      // No branch write and no scorer dispatch ever reached GitHub.
       const pushed = calls.find((c) => c.method === "PUT" && /\/contents\//.test(c.path));
       const dispatched = calls.find((c) => /\/dispatches$/.test(c.path));
       assert.equal(pushed, undefined, "a protected-path attempt was pushed to a branch");
