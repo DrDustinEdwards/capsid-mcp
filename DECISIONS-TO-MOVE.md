@@ -176,3 +176,7 @@ Rulings, measurements, and refusal reasons that were recorded only in Worker com
 ## src/improve-meta.ts
 
 - **:1-15** Meta-loop cannot edit the run prompt, scores, holdout, anchors, or gates. Entire write surface is `capsid/improve/proposals/`. A system that can edit its own objective has no objective. `assertProposalTarget` plus `test/improve-meta.test.ts`.
+
+## src/improve-scorer.ts
+
+- **:1-22** Only module in src/ that may name HOLDOUT besides env.ts's declaration. Worker cannot be the scorer: no process to spawn. Worker holds the manifest COUNT, never the tests; a report claiming fewer than the manifest is refused. SCORE_PATH is not under /ops/: an operator-key check there would hand five repos a key that can write every document.

@@ -1,26 +1,3 @@
-// THE SCORER SEAM: dispatching CI, and admitting what CI says back.
-//
-// THIS IS THE ONLY MODULE IN src/ THAT MAY NAME THE HOLDOUT BINDING.
-// src/env.ts declares it, this file uses it, and nothing else may mention it or
-// the bucket name. test/improve-holdout.test.ts fails the build otherwise. The
-// third layer is the type: src/improve-attempt.ts takes AttemptEnv, which is
-// Omit<Env, "HOLDOUT">, so the binding is not merely unused over there, it does
-// not exist in the value's type and a reference does not compile.
-//
-// WHY THE WORKER CANNOT BE THE SCORER, stated once so nobody re-proposes it: a
-// Cloudflare Worker cannot run `npm ci`, a build, or a test suite. There is no
-// process to spawn. Anchor metrics that a Worker "computed" would therefore be
-// proxies wearing an anchor's name, and an anchor is the one number in this
-// system that must not be a proxy. So CI is the scorer, in the target repo, on
-// the target branch, with the target's own toolchain.
-//
-// WHAT THE WORKER STILL HOLDS, and why the binding is not decorative: the
-// MANIFEST. CI pulls the holdout TESTS straight from R2 with its own read-only
-// token; the Worker never reads them and could not hand them out if asked. It
-// reads only `total`, the number of tests that are supposed to exist, and it
-// refuses a report claiming fewer. That single number is what stops the cheapest
-// attack on a hidden suite, which is not to pass it but to shrink it.
-
 import { hmacHex, timingSafeEqual } from "./auth";
 import type { Env } from "./env";
 import { dispatchWorkflow } from "./github";
@@ -31,10 +8,7 @@ import type { MetricMap } from "./improve-scores";
 // without an import cycle); existing importers keep this path.
 export { SCORER_WORKFLOW };
 
-// The report endpoint. Not under /ops/: an /ops/ path means "an operator key
-// opens this", and this path is opened by a per-namespace HMAC instead. Naming
-// it /ops/ would invite the next reader to add the operator-key check to it and
-// hand five repos a key that can write every document in the store.
+// HMAC, not operator key: an /ops/ path would invite adding the operator-key check.
 export const SCORE_PATH = "/improve/score";
 
 // The holdout-credential endpoint (platform arc 2026-09-06). Same auth as
