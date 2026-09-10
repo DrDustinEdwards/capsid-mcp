@@ -1,29 +1,24 @@
 // The reap DECISION, separated from the CLI so it can be driven by a test.
 //
-// WHY THIS EXISTS AS ITS OWN MODULE. reap-probe-clients.mjs is a program: it reads
-// argv and the environment, then exits. Importing it to test it would run it. The
-// decision it makes is the part worth testing, so the decision lives here, takes a
-// fetch, and returns a verdict instead of exiting.
+// reap-probe-clients.mjs is a program: it reads argv and the environment, then exits.
+// Importing it to test it would run it. The decision it makes lives here, takes a fetch,
+// and returns a verdict instead of exiting.
 //
-// WHY THE READ COMES FIRST (2026-08-17). KV DELETE is IDEMPOTENT: deleting a key
-// that was never there returns the same 200 as deleting one that was, and the
-// read-back afterwards returns 404 either way. So the old sequence, DELETE then
-// confirm-404, could not distinguish these three states:
+// WHY THE READ COMES FIRST (2026-08-17). KV DELETE is IDEMPOTENT: deleting a key that
+// was never there returns the same 200 as deleting one that was, and the read-back
+// afterwards returns 404 either way. The old sequence, DELETE then confirm-404, could
+// not distinguish three states:
 //
 //   1. the key existed and this run removed it            (the normal case)
 //   2. the key had already vanished on its own            (a data-loss signal)
 //   3. this script is pointed at the wrong namespace id   (a config error)
 //
-// and it reported all three as "deleted and confirmed gone". That is not a
-// cosmetic difference. On 2026-08-17 an OAuth client record disappeared from
-// OAUTH_KV with no request in the window that could account for it, and the
-// investigation ruled out five hypotheses without finding a cause. This reaper ran
-// against that same keyspace throughout and reported success every time, because
-// success was the only thing it could report. A verification step whose passing
-// result is unconditional is not a verification step.
-//
-// So: read, then delete, then read back. The pre-read is what makes the outcome
-// mean something.
+// and it reported all three as "deleted and confirmed gone". On 2026-08-17 an OAuth
+// client record disappeared from OAUTH_KV with no request in the window that could
+// account for it, and the investigation ruled out five hypotheses without finding a
+// cause. This reaper ran against that keyspace throughout and reported success every
+// time, because success was the only thing it could report. A verification step whose
+// passing result is unconditional is not a verification step.
 
 export const REAP_OUTCOMES = /** @type {const} */ ([
   "deleted",
@@ -40,13 +35,13 @@ export const REAP_OUTCOMES = /** @type {const} */ ([
 export async function reapProbeClient({ fetchImpl, base, key, auth }) {
   const url = `${base}/values/${encodeURIComponent(key)}`;
 
-  // 1. READ FIRST. This is the only step that can tell "removed" from "was never
-  // there", and it runs before anything is changed.
+  // 1. READ FIRST. The only step that can tell "removed" from "was never there", and it
+  // runs before anything is changed.
   const before = await fetchImpl(url, { headers: auth });
 
-  // A transport or auth failure says nothing about the key. Reported as its own
-  // outcome so a broken token can never be read as data loss, which is the
-  // distinction the live-gate canary needs too.
+  // A transport or auth failure says nothing about the key. Reported as its own outcome
+  // so a broken token can never be read as data loss, which is the distinction the
+  // live-gate canary needs too.
   if (!before.ok && before.status !== 404) {
     return {
       outcome: "unreadable",
@@ -57,11 +52,9 @@ export async function reapProbeClient({ fetchImpl, base, key, auth }) {
 
   const existed = before.status !== 404;
 
-  // 2. Delete. Issued even when the pre-read came back 404, deliberately: the
-  // delete is idempotent so it costs nothing, and if that 404 was itself a blip
-  // rather than the truth, skipping the delete would leak the key. Cleanup is the
-  // job; reporting is the other job; doing one badly to do the other is not a
-  // trade worth making.
+  // 2. Delete. Issued even when the pre-read came back 404: the delete is idempotent so
+  // it costs nothing, and if that 404 was a blip rather than the truth, skipping the
+  // delete would leak the key.
   const del = await fetchImpl(url, { method: "DELETE", headers: auth });
   if (!del.ok) {
     return {
@@ -81,11 +74,10 @@ export async function reapProbeClient({ fetchImpl, base, key, auth }) {
 
 // How each outcome is reported, and whether it fails the job.
 //
-// `already-absent` FAILS on purpose. The key it names was written by gate 2 of the
-// same run, minutes earlier, and it carries a 90 day TTL, so there is no ordinary
-// reason for it to be missing. The two explanations are a vanished record or a
-// reaper pointed at the wrong keyspace, and both are things to be told about
-// loudly rather than to find later in a log nobody reads.
+// `already-absent` FAILS on purpose. The key it names was written by gate 2 of the same
+// run, minutes earlier, and it carries a 90 day TTL, so there is no ordinary reason for
+// it to be missing. The two explanations are a vanished record or a reaper pointed at
+// the wrong keyspace.
 export function reportFor(outcome, key) {
   switch (outcome) {
     case "deleted":
