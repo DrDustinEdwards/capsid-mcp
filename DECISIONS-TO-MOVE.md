@@ -180,3 +180,7 @@ Rulings, measurements, and refusal reasons that were recorded only in Worker com
 ## src/improve-scorer.ts
 
 - **:1-22** Only module in src/ that may name HOLDOUT besides env.ts's declaration. Worker cannot be the scorer: no process to spawn. Worker holds the manifest COUNT, never the tests; a report claiming fewer than the manifest is refused. SCORE_PATH is not under /ops/: an operator-key check there would hand five repos a key that can write every document.
+
+## src/improve-scores.ts
+
+- **:1-24** Referee; no model. Anchors are checksummed and may never be edited or regressed by the loop. Secondary is the optimisation surface and may be reweighted without breaking the pin. Checksum covers the anchor section, not the whole file: covering the file would refuse every legitimate secondary-weight edit at 03:00.

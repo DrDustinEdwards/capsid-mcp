@@ -1,28 +1,3 @@
-// The scores document, the anchor checksum, and the keep-or-revert arithmetic.
-//
-// This module is the referee. Everything it decides is decided from a document a
-// human wrote and a checksum a human pinned, and none of it calls a model. That
-// separation is the point: a loop that can edit its own scoring function is not
-// optimising, it is negotiating.
-//
-// THE DOCUMENT IS THE INTERFACE. improve/scores.md in each namespace has two
-// sections and they are governed differently:
-//
-//   ## Anchors    the loop may never edit these and may never regress them.
-//                 Checksummed. sha256 pinned in KV under anchorKey(namespace).
-//                 Verified before every run; a mismatch REFUSES the run.
-//   ## Secondary  what the loop optimises. A human may add or reweight a metric
-//                 here freely, and doing so does NOT break the anchor pin.
-//
-// WHY THE CHECKSUM COVERS THE ANCHOR SECTION AND NOT THE WHOLE FILE, which is
-// the one design decision in here worth arguing with. Covering the file would
-// mean every legitimate human edit to a secondary weight breaks every run until
-// the pin is refreshed by hand, and the failure would be a refusal at 03:00 that
-// nobody sees until morning. Covering the anchor block gives the property that
-// actually matters, which is that the loop cannot move its own floor, and leaves
-// the tuning surface tunable. The arc asked for "the anchor doc is checksummed";
-// this is that, scoped to the part the guarantee is about.
-
 import { sha256Hex } from "./auth";
 import { anchorKey, PROMPTS_PREFIX, RUN_TASK_PREFIX, SCORES_PATH, SKILLS_PREFIX } from "./improve-schema";
 
