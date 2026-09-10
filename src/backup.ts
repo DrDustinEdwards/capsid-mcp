@@ -67,6 +67,10 @@ export const TABLES = [
   "improve_attempts",
   "improve_runs",
   "improve_skills",
+  // The work queue (migrations/0006). Nothing prunes it either: a done job is the
+  // record of who asked for what and what came back, and the mirrored document
+  // carries only the body.
+  "jobs",
   // The replay cache (migrations/0004). Pruned below rather than retained: a jti
   // is only meaningful inside the 30-minute signature window.
   "improve_jti",
