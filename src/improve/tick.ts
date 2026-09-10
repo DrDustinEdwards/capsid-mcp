@@ -60,10 +60,10 @@ export interface TickOutcome {
 
 export async function tickRuns(env: Env, now: Date): Promise<TickOutcome[]> {
   const runs = await advanceableRuns(env.DB, RUNS_PER_TICK);
-  // THE BUDGET COMES FIRST: an exceeded cap advances nothing, dispatches
-  // nothing, calls nothing. Active runs are left exactly where they are and
-  // reported; the first tick after the caps rise or the month turns resumes
-  // them, and RUN_MAX_AGE finalizes any that aged out in the meantime.
+  // THE BUDGET COMES FIRST: an exceeded cap advances nothing, dispatches nothing,
+  // calls nothing. Active runs are left where they are and reported; the first tick
+  // after the caps rise or the month turns resumes them, and RUN_MAX_AGE finalizes any
+  // that aged out.
   if (runs.length > 0) {
     const budgetReason = await enforceBudget(env, now);
     if (budgetReason) {
@@ -82,17 +82,15 @@ export async function tickRuns(env: Env, now: Date): Promise<TickOutcome[]> {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`IMPROVE_TICK_THREW ${run.id} in '${entered}': ${message}`);
       // A throwing step does NOT wedge the run: it is finalized with the error
-      // recorded. The alternative is a namespace whose one active-run slot is
-      // held forever by a run nothing can advance.
+      // recorded. The alternative is a namespace whose one active-run slot is held
+      // forever by a run nothing can advance.
       //
-      // TWO CAS ATTEMPTS, deliberately (audit 2026-09-06, Grok MAJOR 21). The
-      // steps now claim the run (opening/attempting -> awaiting-score) BEFORE
-      // their external calls, so a step that throws mid-work has usually already
-      // moved the run past the status this loop read. The first CAS covers a
-      // throw before the claim; the re-read covers a throw after it. A losing
-      // tick cannot reach here at all (it returns at the failed claim), so the
-      // re-read cannot finalize a run some other tick is driving; and a run that
-      // went terminal in the meantime has no active row and is left alone.
+      // TWO CAS ATTEMPTS (audit 2026-09-06, Grok MAJOR 21). The steps claim the run
+      // (opening/attempting -> awaiting-score) BEFORE their external calls, so a step
+      // that throws mid-work has usually already moved the run past the status this
+      // loop read. The first CAS covers a throw before the claim; the re-read covers a
+      // throw after it. A losing tick returns at the failed claim and cannot reach
+      // here, and a run that went terminal has no active row.
       const finalize = (expected: RunStatus) =>
         advanceRun(env.DB, {
           runId: run.id,
@@ -130,14 +128,12 @@ async function advanceOne(env: Env, run: RunRow, now: Date): Promise<TickOutcome
     case "awaiting-score":
       return checkStaleScore(env, run, now);
     case "judging": {
-      // Only ever held inside an HTTP score ingest. A run found here by a tick
-      // MAY mean that request died mid-decision, or may mean the ingest is alive
-      // right now: the five-minute tick and an HTTP ingest overlap freely, and
-      // yanking a live ingest's run back to awaiting-score re-opens it to the
-      // duplicate report the judging CAS exists to exclude (audit 2026-09-06,
-      // Grok MAJOR 21). So judging is left alone until advanced_at says the
-      // ingest is dead: no request lives SCORE_TIMEOUT_MS, so past that the hop
-      // back to awaiting-score is safe and the stale guard resolves it.
+      // Only ever held inside an HTTP score ingest. A run found here by a tick may mean
+      // that request died mid-decision, or that the ingest is alive right now: the
+      // five-minute tick and an HTTP ingest overlap freely, and yanking a live ingest's
+      // run back to awaiting-score re-opens it to the duplicate report the judging CAS
+      // excludes (audit 2026-09-06, Grok MAJOR 21). Judging is left alone until
+      // advanced_at says the ingest is dead: no request lives SCORE_TIMEOUT_MS.
       const heldMs = now.getTime() - Date.parse(`${run.advanced_at.replace(" ", "T")}Z`);
       if (heldMs < SCORE_TIMEOUT_MS) {
         return { runId: run.id, namespace: run.namespace, from: "judging", to: "judging", note: `an ingest holds this run (${Math.round(heldMs / 1000)}s); left alone` };
@@ -159,13 +155,12 @@ async function dispatchBaseline(env: Env, run: RunRow): Promise<TickOutcome> {
   }
   const id = baselineId(run.id);
   const branch = branchName(id);
-  // THE CLAIM COMES BEFORE ANY GITHUB CALL (audit 2026-09-06, Grok MAJOR 21).
-  // Two overlapping cron ticks both read this run as 'opening'; without the CAS
-  // here, both pushed the branch and both dispatched the scorer, and the loser's
-  // eventual failed transition could not un-run the duplicate CI job. The CAS is
-  // the claim: exactly one tick wins it, the loser returns without spending
-  // anything, and a throw AFTER the claim is finalized by the tick loop's catch
-  // from the claimed status.
+  // THE CLAIM COMES BEFORE ANY GITHUB CALL (audit 2026-09-06, Grok MAJOR 21). Two
+  // overlapping cron ticks both read this run as 'opening'; without the CAS both
+  // pushed the branch and both dispatched the scorer, and the loser's eventual failed
+  // transition could not un-run the duplicate CI job. Exactly one tick wins the CAS,
+  // the loser returns without spending anything, and a throw AFTER the claim is
+  // finalized by the tick loop's catch from the claimed status.
   const claimed = await advanceRun(env.DB, {
     runId: run.id,
     expected: "opening",
@@ -196,13 +191,12 @@ async function startAttempt(env: Env, run: RunRow, now: Date): Promise<TickOutco
   const index = run.attempts + 1;
   const id = attemptId(run.id, index);
   const branch = branchName(id);
-  // THE CLAIM COMES BEFORE ANY ANTHROPIC OR GITHUB CALL (audit 2026-09-06, Grok
-  // MAJOR 21). Two overlapping ticks both read this run as 'attempting'; without
-  // the CAS here both paid for a model proposal and both pushed and dispatched
-  // it. awaiting-score doubles as the working status: the attempt id is claimed
-  // as current_attempt, a loser tick that arrives during the work sees a young
-  // awaiting-score and waits, and a claim owner that dies mid-work is resolved by
-  // the stale guard as "no score report", which is exactly what happened.
+  // THE CLAIM COMES BEFORE ANY ANTHROPIC OR GITHUB CALL (audit 2026-09-06, Grok MAJOR
+  // 21). Two overlapping ticks both read this run as 'attempting'; without the CAS both
+  // paid for a model proposal and both pushed and dispatched it. awaiting-score doubles
+  // as the working status: the attempt id is claimed as current_attempt, a loser tick
+  // arriving during the work sees a young awaiting-score and waits, and a claim owner
+  // that dies mid-work is resolved by the stale guard as "no score report".
   const claimed = await advanceRun(env.DB, {
     runId: run.id,
     expected: "attempting",
@@ -221,20 +215,18 @@ async function startAttempt(env: Env, run: RunRow, now: Date): Promise<TickOutco
 
   const priorAttempts = await attemptsForRun(env.DB, run.id);
   const best = await readBest(env.APP_KV, run.namespace);
-  // CONDITION 'no-memory': lineage history is withheld from base selection, so the
-  // run branches from the best record alone and cannot follow a fertile branch.
-  // That is the ablation the column exists to record, and withholding the input is
-  // the only way the recorded condition means anything.
+  // CONDITION 'no-memory': lineage history is withheld from base selection, so the run
+  // branches from the best record alone and cannot follow a fertile branch. Withholding
+  // the input is the only way the recorded condition means anything.
   const lineage = run.condition === "no-memory" ? [] : await recentAttempts(env.DB, run.namespace, 50);
   const choice = selectBase(best, lineage, run.base_sha);
   const baseSha = choice.sha || run.base_sha || "";
 
-  // A transferred skill is offered on the FIRST attempt of a run only. Later
-  // attempts explore from what this run has already learned, and spending every
-  // attempt on another project's ideas would leave no room for the loop to
-  // follow its own thread.
-  // CONDITION 'no-transfer': no cross-project skill is offered, so the run can
-  // only propose from scratch.
+  // A transferred skill is offered on the FIRST attempt of a run only. Later attempts
+  // explore from what this run has learned, and spending every attempt on another
+  // project's ideas would leave no room for its own thread.
+  //
+  // CONDITION 'no-transfer': no cross-project skill is offered.
   const skills = index === 1 && run.condition !== "no-transfer" ? await candidateSkills(env.DB, run.namespace, 1) : [];
   const skill = skills[0]
     ? { id: skills[0].id, title: skills[0].title, body: await readSkillBody(env.DB, skills[0]) }
@@ -279,14 +271,12 @@ async function startAttempt(env: Env, run: RunRow, now: Date): Promise<TickOutco
   }
 
   // THE DETERMINISTIC PATH MONITOR RUNS BEFORE THE BRANCH IS PUSHED (audit
-  // 2026-09-06). It used to run only at ingest, after pushAttempt and
-  // dispatchWorkflow had already put the attempt's files on a branch and started CI
-  // on them: a change that added a package.json postinstall, or a new
-  // .github/workflows/*.yml with `on: push`, executed in CI (secrets in scope)
-  // before the monitor ever flagged it, and a revert cannot un-run that. Checking
-  // the proposed paths here means a change touching a protected path never reaches
-  // GitHub at all. The model half still runs at ingest for the cases a pattern
-  // cannot name; this is only the half that can be decided with no push and no key.
+  // 2026-09-06). It used to run only at ingest, after pushAttempt and dispatchWorkflow
+  // had put the attempt's files on a branch and started CI on them: a change adding a
+  // package.json postinstall, or a new .github/workflows/*.yml with `on: push`,
+  // executed in CI with secrets in scope before the monitor flagged it, and a revert
+  // cannot un-run that. The model half still runs at ingest for cases a pattern cannot
+  // name; this is the half decidable with no push and no key.
   const preflight = pathMonitor(proposal.changedPaths);
   if (preflight.flagged) {
     await env.DB.batch([
@@ -321,10 +311,9 @@ async function startAttempt(env: Env, run: RunRow, now: Date): Promise<TickOutco
     files: proposal.files,
   });
 
-  // The archive document is written BEFORE the score arrives, so a change that is
-  // never scored still leaves a record of what was tried. "Never delete" in the
-  // arc means the record survives the outcome, including the outcome "nothing
-  // came back".
+  // The archive document is written BEFORE the score arrives, so a change that is never
+  // scored still leaves a record of what was tried. "Never delete" means the record
+  // survives the outcome, including the outcome "nothing came back".
   const archive = archivePath(run.id, id);
   const prior = await priorDoc(env.DB, run.namespace, archive);
   await env.DB.batch([
@@ -358,9 +347,9 @@ async function startAttempt(env: Env, run: RunRow, now: Date): Promise<TickOutco
   return { runId: run.id, namespace: run.namespace, from: "attempting", to: "awaiting-score", note: `attempt ${index} dispatched on ${branch}` };
 }
 
-// THE STALE GUARD. A dispatched scorer that has not reported in 20 minutes is
-// treated as a revert, and the run continues. Never a wedge: the arc's ruling is
-// that a missing score is a revert, and this is where "missing" is decided.
+// THE STALE GUARD. A dispatched scorer that has not reported in 20 minutes is treated
+// as a revert and the run continues. Never a wedge: the arc's ruling is that a missing
+// score is a revert, and this is where "missing" is decided.
 async function checkStaleScore(env: Env, run: RunRow, now: Date): Promise<TickOutcome> {
   const id = run.current_attempt;
   if (!id) {
@@ -378,8 +367,8 @@ async function checkStaleScore(env: Env, run: RunRow, now: Date): Promise<TickOu
 
   const note = `no score report after ${Math.round(waited / 60_000)} minutes; treated as a revert`;
   if (isBaseline) {
-    // A baseline that never scores means every later comparison is unprovable,
-    // so the run ends here rather than making ten attempts that must all revert.
+    // A baseline that never scores makes every later comparison unprovable, so the run
+    // ends here rather than making ten attempts that must all revert.
     await advanceRun(env.DB, { runId: run.id, expected: "awaiting-score", next: "finalizing", patch: { note: `the baseline scoring job never reported: ${note}` } });
     return { runId: run.id, namespace: run.namespace, from: "awaiting-score", to: "finalizing", note };
   }

@@ -57,16 +57,15 @@ export function registerRepoTools(server: McpServer, ctx: ToolCtx): void {
     } catch (err) {
       return fail(err instanceof Error ? err.message : String(err));
     }
-    // THE MUTATION ALREADY LANDED (audit 2, F17). fn() has committed to GitHub by
-    // the time this row is written, and the audit INSERT is a separate statement
-    // that cannot be rolled into it. When it failed, the caller was told the tool
-    // failed, so the honest report of "the branch exists, the PR is open, and the
-    // log does not know" came out as "nothing happened". A caller acting on that
-    // retries, and the retry is a second commit.
+    // THE MUTATION ALREADY LANDED (audit 2, F17). fn() has committed to GitHub by the
+    // time this row is written, and the audit INSERT is a separate statement that
+    // cannot be rolled into it. When it failed the caller was told the tool failed, so
+    // "the branch exists, the PR is open, and the log does not know" came out as
+    // "nothing happened", and a caller acting on that retries into a second commit.
     //
     // The D1-only tools do not need this: delete, move and finalize put the audit
-    // INSERT inside the same batch as the mutation, so there both land or neither
-    // does. GitHub cannot join that transaction.
+    // INSERT inside the same batch as the mutation. GitHub cannot join that
+    // transaction.
     try {
       await db
         .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES (?1, ?2, ?3, ?4, ?5)")
@@ -84,11 +83,10 @@ export function registerRepoTools(server: McpServer, ctx: ToolCtx): void {
     return ok(result);
   };
 
-  // A namespace can map to more than one repo (e.g. foxhound -> foxhound primary
-  // + recova legacy). The optional `repo` argument on every repo tool selects one:
-  // pass a label ("primary", "legacy") or a full "owner/name" that is mapped to
-  // the namespace. Omit it to target the primary repo. Use `namespaces` to see
-  // the mapping.
+  // A namespace can map to more than one repo (foxhound -> foxhound primary plus
+  // recova legacy). The optional `repo` argument on every repo tool selects one: a
+  // label ("primary", "legacy") or a full "owner/name" mapped to the namespace. Omit
+  // it to target the primary. `namespaces` shows the mapping.
   const REPO_ARG = "Optional repo selector for a multi-repo namespace: a label (\"primary\", \"legacy\") or a mapped \"owner/name\". Defaults to the primary repo.";
 
   server.registerTool(
@@ -121,8 +119,7 @@ export function registerRepoTools(server: McpServer, ctx: ToolCtx): void {
     ({ namespace, path, paths, ref, repo }) =>
       guarded(() => {
         // EXACTLY ONE OF THE TWO. Accepting both and preferring one would make the
-        // ignored argument invisible, which is the shape that gets shipped and then
-        // debugged later as "the tool ignored my paths".
+        // ignored argument invisible.
         if (path && paths) throw new Error("read_repo_file: pass path for one file or paths for several, not both");
         if (!path && !paths) throw new Error("read_repo_file: pass path for one file, or paths for several");
         return paths ? readRepoFiles(env, namespace, paths, ref, repo) : readRepoFile(env, namespace, path as string, ref, repo);
@@ -280,15 +277,15 @@ export function registerRepoTools(server: McpServer, ctx: ToolCtx): void {
       guarded(() => ciStatus(env, namespace, repo, { limit, logTail: mayWrite, ref, runId: run_id }))
   );
 
-// THE REPO FALLTHROUGH WIDENING, and it is the SECOND ruled exception to hard rule 1
-  // in one day (capsid/decisions.md, 2026-09-06). The justification is not that these
-  // are useful: it is that the claude.ai GitHub connector authenticates and then 404s
-  // on every private repo in the portfolio, while Capsid's App token has reached them
-  // all since 2026-07-06. These four make existing reach callable.
+  // THE REPO FALLTHROUGH WIDENING, the SECOND ruled exception to hard rule 1 in one
+  // day (capsid/decisions.md, 2026-09-06). The justification is not that these are
+  // useful: the claude.ai GitHub connector authenticates and then 404s on every
+  // private repo in the portfolio, while Capsid's App token has reached them all since
+  // 2026-07-06. These four make existing reach callable.
   //
-  // repo_refs and repo_history are READS and stay open to ro: keys, like every other
-  // read tool. delete_branch and ci_dispatch are write-gated: one destroys refs, the
-  // other spends CI minutes and can start a deploy.
+  // repo_refs and repo_history are READS and stay open to ro: keys. delete_branch and
+  // ci_dispatch are write-gated: one destroys refs, the other spends CI minutes and
+  // can start a deploy.
 
   server.registerTool(
     "repo_refs",

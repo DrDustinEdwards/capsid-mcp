@@ -14,7 +14,7 @@ function tablesInMigrations(): string[] {
   const names = new Set<string>();
   for (const file of readdirSync(dir).filter((f) => f.endsWith(".sql")).sort()) {
     const sql = readFileSync(join(dir, file), "utf8");
-    // CREATE VIRTUAL TABLE does not match, which is what we want.
+    // CREATE VIRTUAL TABLE does not match, which keeps documents_fts out.
     for (const m of sql.matchAll(/CREATE TABLE(?: IF NOT EXISTS)?\s+(\w+)/gi)) {
       if (!DERIVED.test(m[1])) names.add(m[1]);
     }
@@ -45,13 +45,11 @@ test("the FTS5 virtual table and its shadow tables are not exported", () => {
 
 // ---- the run itself ---------------------------------------------------------
 //
-// FAKES, AND WHY THEY ARE SHAPED THIS WAY (audit 2 batch B). There was no fake R2
-// in this repo at all, so one is added here, and it is written to be capable of the
-// thing under test: it holds real state, and it RECORDS EVERY DELETE. A bucket that
-// cannot express a delete would make "refuses to delete the mirror" pass whether or
-// not anything was refused, which is the vacuous-guard shape this repo has been
-// bitten by repeatedly. Disclosed here in the same spirit as batch A's fake D1
-// extension.
+// FAKES, AND WHY THEY ARE SHAPED THIS WAY (audit 2 batch B). There was no fake R2 in
+// this repo, so one is added here and it is written to be capable of the thing under
+// test: it holds real state and it RECORDS EVERY DELETE. A bucket that cannot express a
+// delete would make "refuses to delete the mirror" pass whether or not anything was
+// refused, which is the vacuous-guard shape.
 //
 // The fake D1 answers three shapes: SELECT * FROM <table> (the export), the pinned
 // FTS probe (the preflight), and the count-then-delete batch. Its batch deliberately
@@ -72,7 +70,7 @@ function makeEnv(dbOpts: FakeD1Options, seedR2: Record<string, string> = {}, see
 }
 
 // Captures console.error so a test can assert the run was LOUD, not just that it
-// returned a field nobody reads.
+// returned a field.
 async function captureErrors<T>(fn: () => Promise<T>): Promise<{ result: T; logged: string[] }> {
   const original = console.error;
   const logged: string[] = [];

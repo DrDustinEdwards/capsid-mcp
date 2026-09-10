@@ -189,8 +189,8 @@ test("a rate-limited caller gets a 429 with a usable Retry-After, not a 204", as
 // ---- the wiring, which the source is the only witness to -------------------
 
 test("the handler checks the limit BEFORE it reads the body", async () => {
-  // Ordering, not decoration: a limited caller must not be able to make the Worker
-  // read and parse a 16KB body first, and must not reach the R2 write at all.
+  // Ordering is load-bearing: a limited caller must not be able to make the Worker read
+  // and parse a 16KB body first, and must not reach the R2 write at all.
   const routes = read("../src/routes.ts");
   const handler = routes.slice(routes.indexOf("async function handleCspReport"), routes.indexOf("export const defaultHandler"));
   const limitAt = handler.indexOf("checkRate");

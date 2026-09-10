@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { proposeChange } from "../src/improve-attempt.ts";
 import { fakeEnv, withFetch } from "./fakes.ts";
+import { sseMessage } from "./improve-fakes.ts";
 import { sourceFile } from "./source-files.ts";
 
 // PROMPT CACHING ON THE ATTEMPT PATH.
@@ -29,36 +30,10 @@ function captured(calls: Array<{ path: string; body: unknown }>) {
   };
 }
 
-// A REAL SSE RESPONSE. The attempt path uses the SDK's streaming helper, so a
-// plain JSON body is answered with "request ended without sending any chunks".
-// Building the event stream is what makes this test exercise the path the loop
-// actually takes rather than a non-streaming lookalike.
-function sse(text: string): string {
-  const events: Array<[string, unknown]> = [
-    [
-      "message_start",
-      {
-        type: "message_start",
-        message: {
-          id: "msg_1",
-          type: "message",
-          role: "assistant",
-          model: "claude-sonnet-5",
-          content: [],
-          stop_reason: null,
-          stop_details: null,
-          usage: { input_tokens: 100, output_tokens: 0, cache_creation_input_tokens: 4000, cache_read_input_tokens: 0 },
-        },
-      },
-    ],
-    ["content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }],
-    ["content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } }],
-    ["content_block_stop", { type: "content_block_stop", index: 0 }],
-    ["message_delta", { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 20 } }],
-    ["message_stop", { type: "message_stop" }],
-  ];
-  return events.map(([name, data]) => `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`).join("");
-}
+// The cache token counters are what this file is about, so they are passed in. The
+// event stream itself is ./improve-fakes.ts, shared with the two loop tests.
+const sse = (text: string) =>
+  sseMessage(text, { cache_creation_input_tokens: 4000, cache_read_input_tokens: 0 });
 
 const ROUTE = {
   "POST /v1/messages": {
@@ -131,8 +106,8 @@ test("THE CACHED PREFIX IS BYTE-IDENTICAL ACROSS ATTEMPTS, which is what makes i
 
 test("the prefix is large enough to be worth caching", () => {
   // Below the model's minimum cacheable prefix nothing caches, silently, and the
-  // breakpoint is decoration. This is a floor rather than an exact figure: the
-  // context is bounded elsewhere and the minimum is model-dependent.
+  // breakpoint has no effect. This is a floor rather than an exact figure: the context
+  // is bounded elsewhere and the minimum is model-dependent.
   assert.ok(CONTEXT.length > 4000, "the fixture context is too small to exercise the case this guards");
 });
 

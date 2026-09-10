@@ -26,6 +26,7 @@ const WRITE_GATE = [/if \(!mayWrite\) return fail\(DENIED\)/, /\bguardedWrite\(/
 // incident.
 const DESTRUCTIVE = [
   /INSERT INTO documents/i, // an overwrite goes through the same insert as a create
+  /\bdocumentUpsert\(/,
   /\bpathMutation\(/,
   /UPDATE namespaces/i,
   /\bdeleteRepoFile\(/,

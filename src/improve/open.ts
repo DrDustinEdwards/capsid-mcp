@@ -96,11 +96,10 @@ export function scoreStatements(
 
 // ---- the budget kill switch -------------------------------------------------
 
-// Cloudflare's budget alerts are informational and cannot stop a Worker
-// (platform arc 2026-09-06), so this is the loop's own hard stop: monthly caps
-// on Actions minutes and model spend, read from KV (changeable without a
-// deploy, defaults 300 minutes / $50), checked by the opener and the tick
-// BEFORE they open or advance anything.
+// Cloudflare's budget alerts are informational and cannot stop a Worker (platform arc
+// 2026-09-06), so this is the loop's own hard stop: monthly caps on Actions minutes
+// and model spend, read from KV (changeable without a deploy, defaults 300 minutes
+// and $50), checked by the opener and the tick BEFORE they open or advance anything.
 export interface BudgetStatus {
   month: string;
   caps: { actions_minutes_month: number; model_usd_month: number };
@@ -132,10 +131,10 @@ export async function checkBudget(env: Env, now: Date): Promise<BudgetStatus> {
 }
 
 // Returns the refusal reason when a cap is exceeded, after pausing every roster
-// namespace with reason "budget" (skipping ones already paused, so a five-minute
-// tick does not rewrite eight KV keys forever). The pause is deliberate double
-// coverage: the opener and tick refuse on their own, and the pause makes the
-// stop visible in improve_status and survives a code path that forgets to ask.
+// namespace with reason "budget" (skipping ones already paused, so a five-minute tick
+// does not rewrite eight KV keys forever). The pause is deliberate double coverage:
+// the opener and tick refuse on their own, and the pause makes the stop visible in
+// improve_status and survives a code path that forgets to ask.
 export async function enforceBudget(env: Env, now: Date): Promise<string | null> {
   const budget = await checkBudget(env, now);
   if (!budget.exceeded) return null;
@@ -272,10 +271,10 @@ export async function openOne(
          VALUES (?1, ?2, ?3, 'opening', ?4, ?5)`
       )
       .bind(runIdValue, namespace, mode, choice.sha || null, condition),
-    // THE CONDITION IS IN THE AUDIT ROW, not only in the row it describes. The
-    // ruling is that an ablation should be a query, and `improve_runs` is pruned
-    // by nothing while `audit_log` is the one place a single query answers "what
-    // did the loop do and under what condition".
+    // THE CONDITION IS IN THE AUDIT ROW, not only in the row it describes. The ruling
+    // is that an ablation should be a query: `improve_runs` is pruned by nothing, and
+    // `audit_log` is the one place a single query answers what the loop did and under
+    // what condition.
     improveAudit(env.DB, "improve-run-opened", namespace, {
       run_id: runIdValue,
       base: choice.sha,
@@ -358,13 +357,13 @@ function renderSubscriptionTask(
   ].join("\n");
 }
 
-// EVERY TASK DOCUMENT THE OPENER WRITES IS SIGNED (audit 2026-09-07). The
-// `/improve` driver executes this document as its instruction list, so it has to
-// be able to tell a plan the Worker authored from one something else wrote. The
-// signature covers the rendered body; the frontmatter block carrying it is added
-// on top and is not itself signed. Signing happens BEFORE improveDocStatements,
-// which normalizes wide dashes: the rendered bodies contain none, and
-// normalization is idempotent, so the stored bytes still verify.
+// EVERY TASK DOCUMENT THE OPENER WRITES IS SIGNED (audit 2026-09-07). The `/improve`
+// driver executes this document as its instruction list, so it has to tell a plan the
+// Worker authored from one something else wrote. The signature covers the rendered
+// body; the frontmatter block carrying it is added on top and is not itself signed.
+// Signing happens BEFORE improveDocStatements, which normalizes wide dashes: the
+// rendered bodies contain none and normalization is idempotent, so the stored bytes
+// still verify.
 //
 // An unconfigured Worker writes the document UNSIGNED rather than not at all, and
 // the driver then refuses it by name. That is the fail-closed direction: a

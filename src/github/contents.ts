@@ -66,12 +66,10 @@ export async function readRepoFile(env: Env, namespace: string, path: string, re
 //
 // Verified 2026-07-17 via the live search_code tool: GitHub's GET /search/code
 // returns HTTP 200 with total_count 0 and an empty items array for these private
-// repos when queried with a GitHub App installation token, even for terms that
-// read_repo_file confirms are present (e.g. "normalizeDashes"). It is not a 403
-// or 422 (those would surface as an error); the code search index simply does
-// not serve App-token requests on private repos, which is why both Capsid and
-// the hosted GitHub connector returned 0. So we fetch the repo tree and grep the
-// blobs ourselves instead of trusting the search index.
+// repos under a GitHub App installation token, even for terms read_repo_file
+// confirms are present. It is not a 403 or 422; the code search index does not
+// serve App-token requests on private repos, which is why the hosted GitHub
+// connector returns 0 as well.
 const SEARCH_EXCLUDE_DIRS = ["node_modules/", ".git/", "dist/"];
 const SEARCH_EXCLUDE_FILES = new Set(["package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb"]);
 const SEARCH_EXCLUDE_EXTS = new Set([
@@ -84,9 +82,8 @@ const SEARCH_TREE_LIMIT = 5000; // refuse to scan a tree bigger than this whole
 
 // Statuses that mean the scan itself is compromised rather than one file being
 // unavailable. 401 and 403 cover token expiry, revoked installation access, and
-// GitHub's primary and secondary rate limits (both of which answer 403); 429 is
-// the explicit rate-limit status. None of them are per-file conditions, so a
-// scan that keeps going past one is reporting on a repository it did not read.
+// GitHub's primary and secondary rate limits, which both answer 403; 429 is the
+// explicit rate-limit status. None is a per-file condition.
 export async function searchCode(
   env: Env,
   namespace: string | undefined,
@@ -98,14 +95,12 @@ export async function searchCode(
   }
   const { owner, repo, full } = await resolveRepo(env, namespace, opts.repoSelector);
   const ref = opts.ref || (await getDefaultBranch(env, owner, repo));
-  // Capped server-side, the same shape ci_status already uses for its limit. The
-  // schema only said "positive", so a caller could pass max_files: 100000 and the
-  // walk would fetch one blob per candidate file: a single call that burns the App
-  // installation's hourly quota and leaves every later search_code, and every
-  // other repo tool, answering errors. The 5,000-blob tree refusal does not cover
-  // it, because the cost is per file FETCHED, not per candidate listed. Over the
-  // cap it clamps rather than refusing, because the result already reports
-  // truncation honestly and carries a next_start to resume from.
+  // Capped server-side, the same shape ci_status uses for its limit. The schema
+  // only said "positive", so max_files: 100000 would fetch one blob per candidate
+  // file and burn the App installation's hourly quota for every later repo call.
+  // The 5,000-entry tree refusal does not cover it: the cost is per file FETCHED,
+  // not per candidate listed. Over the cap it clamps rather than refusing, because
+  // the result reports truncation and carries a next_start to resume from.
   const maxResults = Math.min(opts.maxResults && opts.maxResults > 0 ? opts.maxResults : DEFAULT_SCAN_RESULTS, MAX_SCAN_CAP);
   const maxFiles = Math.min(opts.maxFiles && opts.maxFiles > 0 ? opts.maxFiles : DEFAULT_SCAN_FILES, MAX_SCAN_CAP);
   const start = opts.start && opts.start > 0 ? Math.floor(opts.start) : 0;
@@ -139,8 +134,8 @@ export async function searchCode(
 
   const needle = query.toLowerCase();
   const items: Array<{ path: string; line: number; text: string }> = [];
-  // Blobs that returned a survivable error. Reported so a caller can see that a
-  // zero-result scan did not actually read everything it counted.
+  // Blobs that returned a survivable error. Reported so a zero-result scan cannot
+  // pass for one that read everything it counted.
   const unreadable: string[] = [];
   let filesScanned = 0;
   let index = start;
@@ -148,7 +143,7 @@ export async function searchCode(
   for (; index < candidates.length; index++) {
     if (filesScanned >= maxFiles) {
       // Cap reached before candidates[index] was scanned, so it is the first
-      // unsearched file: a caller can resume the scan from here.
+      // unsearched file and a caller can resume from here.
       stoppedAtFileCap = true;
       break;
     }
@@ -156,20 +151,16 @@ export async function searchCode(
     const c = candidates[index];
     const blob = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/git/blobs/${c.sha}`);
     if (!blob.ok) {
-      // A blob this scan could not read is NOT the same as a blob with no match,
-      // and conflating the two is how this tool lied. On 2026-08-10 a scan for
-      // EMAIL_QUEUE across foxhound returned total_results 0 with
-      // truncated=false while that string sat on three lines of one file: the
-      // installation's rate limit was exhausted, every blob fetch 403'd, and
-      // each one hit the bare `continue` that used to be here. The caller could
-      // not distinguish "not present" from "not checked", which is the exact
-      // fail-open capsid/conventions.md rules against for guards.
+      // A blob this scan could not read is NOT the same as a blob with no match.
+      // On 2026-08-10 a scan for EMAIL_QUEUE across foxhound returned total_results
+      // 0 with truncated=false while that string sat on three lines of one file:
+      // the installation's rate limit was exhausted, every blob fetch 403'd, and
+      // each one hit the bare `continue` that used to be here. That is the
+      // fail-open capsid/conventions.md rules against.
       //
-      // Quota and auth failures abort the whole scan, because they do not
-      // apply to one file: once the limit is hit every subsequent fetch fails
-      // the same way, so continuing produces a confidently empty answer over an
-      // unread repository. Everything else (a 404 on a raced deletion, a 5xx on
-      // one blob) is survivable, so it is counted and reported instead.
+      // Quota and auth failures abort the whole scan: once the limit is hit every
+      // later fetch fails the same way. Everything else (a 404 on a raced deletion,
+      // a 5xx on one blob) is survivable, so it is counted and reported.
       if (blob.status === 401 || blob.status === 403 || blob.status === 429) {
         throw new Error(
           `search_code aborted at ${filesScanned} of ${candidates.length} candidate files: GitHub returned ${blob.status} fetching ${c.path}. ` +
@@ -190,8 +181,8 @@ export async function searchCode(
     } catch {
       continue; // binary that slipped past the extension filter
     }
-    // Match line by line, then let text and its lines fall out of scope so only
-    // one blob is ever held in memory at a time.
+    // Match line by line, then let text and its lines fall out of scope, so only one
+    // blob is held in memory at a time.
     const lines = text.split("\n");
     for (let i = 0; i < lines.length && items.length < maxResults; i++) {
       if (lines[i].toLowerCase().includes(needle)) {
@@ -267,8 +258,8 @@ async function putFile(
   branch: string,
   allowWorkflowWrite?: boolean
 ): Promise<{ commitSha: string; fileSha: string }> {
-  // The write primitive's own copy of the workflow refusal, so a caller added
-  // later inherits it without remembering to ask. See workflowWriteRefusal.
+  // The write primitive's own copy of the workflow refusal, so a caller added later
+  // inherits it. See workflowWriteRefusal.
   const workflowRefusal = workflowWriteRefusal(path, allowWorkflowWrite);
   if (workflowRefusal) throw new Error(workflowRefusal);
   const sha = await getFileSha(env, owner, repo, path, branch);
@@ -284,35 +275,33 @@ async function putFile(
   });
   if (!resp.ok) throw new Error(`commit failed (${resp.status}): ${await resp.text()}`);
   const data = (await resp.json()) as { commit: { sha: string }; content: { sha: string } };
-  // Invalidation is NOT here any more: commitOnBranch owns it for every mutation
-  // that goes through the shared dance, so there is one site rather than one per
-  // verb (quality audit 1.5).
+  // Invalidation is not here: commitOnBranch owns it for every mutation through the
+  // shared dance, so there is one site rather than one per verb (quality audit 1.5).
   return { commitSha: data.commit.sha, fileSha: data.content.sha };
 }
 
 // The repo this Worker deploys from. A write landing on its default branch is a
-// production deploy of the server itself, which is why commitOnBranch refuses
-// direct mode (and pr mode aimed at the default branch) against it.
+// production deploy of the server itself, which is why commitOnBranch refuses direct
+// mode, and pr mode aimed at the default branch, against it.
 export const SELF_REPO = "DrDustinEdwards/capsid-mcp";
 
 // THE WORKFLOW DIRECTORY IS NOT ORDINARY REPO CONTENT. The App holds Workflows:
-// write, verified by probe rather than assumed, contradicting a standing note
-// claiming it could not. A workflow is not a file, it is code CI executes with
-// that repo's secrets in scope.
+// write, verified by probe. A workflow is code CI executes with that repo's secrets
+// in scope.
 //
 // Refused unless the caller passes allow_workflow_write, which is audit-logged.
-// Checked in TWO places on purpose: commitOnBranch covers both verbs including
-// the delete path (which never reaches putFile), and putFile covers the write
-// primitive, so a third caller added later inherits the refusal.
+// Checked in TWO places: commitOnBranch covers both verbs including the delete path
+// (which never reaches putFile), and putFile covers the write primitive, so a third
+// caller added later inherits the refusal.
 //
-// The improve loop never passes the flag and never can: .github/ is a protected
-// path, so an attempt touching one is reverted before it is pushed.
+// The improve loop never passes the flag: .github/ is a protected path, so an
+// attempt touching one is reverted before it is pushed.
 export const WORKFLOW_DIR = ".github/workflows/";
 
 export function workflowWriteRefusal(path: string, allow: boolean | undefined): string | null {
   if (allow === true) return null;
-  // Normalised the way encodePath will see it, so "./.github/workflows/x.yml"
-  // and a leading slash cannot slip past a bare startsWith.
+  // Normalised the way encodePath will see it, so "./.github/workflows/x.yml" and a
+  // leading slash cannot slip past a bare startsWith.
   const segments = path.split("/").filter((seg) => seg.length > 0 && seg !== ".");
   const joined = `${segments.join("/")}/`;
   if (!joined.startsWith(WORKFLOW_DIR)) return null;
@@ -328,19 +317,16 @@ function branchSlug(path: string): string {
 
 // THE REPO MUTATION DANCE, once (quality audit 1.5).
 //
-// write_repo_file and delete_repo_file are the same six steps with a different
-// verb in the middle: resolve the repo, find the default branch, cut a work branch
-// in pr mode, mutate, INVALIDATE THE READ CACHE, and open a PR in pr mode. They
-// were written out twice, and the specific hazard is the fifth step: a stale read
-// cache serves the pre-write body for up to 60 seconds, and the third mutation to
-// be added here would have had to remember a call that nothing enforces.
-// Invalidation now happens once, in this function, on a path neither verb can
-// skip.
+// write_repo_file and delete_repo_file are the same six steps with a different verb
+// in the middle: resolve the repo, find the default branch, cut a work branch in pr
+// mode, mutate, INVALIDATE THE READ CACHE, and open a PR in pr mode. The fifth step
+// is the hazard: a stale read cache serves the pre-write body for up to 60 seconds,
+// and nothing enforced the call when the steps were written out twice.
 //
-// Response SHAPING deliberately stays with each caller. The two responses really
-// do differ (write carries a fileSha, delete does not, and write's pr mode omits
-// it), and folding those differences in here would either change what a caller
-// sees or push per-verb conditionals into the shared step.
+// Response SHAPING stays with each caller. The two responses differ (write carries a
+// fileSha, delete does not, and write's pr mode omits it), and folding that in here
+// would either change what a caller sees or push per-verb conditionals into the
+// shared step.
 async function commitOnBranch<R>(
   env: Env,
   namespace: string,
@@ -363,26 +349,23 @@ async function commitOnBranch<R>(
 }> {
   assertRepoArg("path", path);
   if (branch) assertRepoArg("branch", branch);
-  // BEFORE ANY NETWORK CALL, and before the repo is even resolved: a refusal that
-  // costs a round trip is a refusal an attacker can use to probe. This covers
+  // BEFORE ANY NETWORK CALL, and before the repo is resolved: a refusal that costs a
+  // round trip is a refusal an attacker can probe with. This covers
   // delete_repo_file too, whose mutate does its own ghFetch and never reaches
   // putFile.
   const workflowRefusal = workflowWriteRefusal(path, op.allowWorkflowWrite);
   if (workflowRefusal) throw new Error(workflowRefusal);
   const { owner, repo } = await resolveRepo(env, namespace, repoSelector);
   // THE SERVER'S OWN DEFAULT BRANCH CANNOT BE WRITTEN: CI deploys this Worker on
-  // every push to it, so a commit landing there IS a production deploy behind
-  // nothing but a write-grant key.
+  // every push to it, so a commit landing there IS a production deploy behind a
+  // write-grant key.
   //
-  // SCOPED TO THE DEFAULT BRANCH. It used to refuse mode "direct" against this
-  // repo outright, whichever branch was named, and that was too wide in a way
-  // nothing caught: the improve loop pushes every attempt to a branch in direct
-  // mode, so on the namespace mapping to this very repo, EVERY attempt threw on
-  // its first file. The deploy is what the refusal is about, and only the default
-  // branch deploys.
-  // The cheap half, kept from the 2026-09-06 fix: direct mode with NO branch
-  // always resolves to the default branch, so it can be refused without knowing
-  // what that branch is called, and the refusal costs no GitHub round trip.
+  // SCOPED TO THE DEFAULT BRANCH. Refusing mode "direct" against this repo outright
+  // was too wide: the improve loop pushes every attempt to a branch in direct mode,
+  // so on the namespace mapping to this repo EVERY attempt threw on its first file.
+  //
+  // The cheap half, kept from the 2026-09-06 fix: direct mode with NO branch always
+  // resolves to the default branch, so it is refused without a GitHub round trip.
   if (`${owner}/${repo}` === SELF_REPO && mode === "direct" && !branch) {
     throw new Error(
       `refuses: a direct commit with no branch lands on the default branch of this server's own repo (${SELF_REPO}) and redeploys the Worker. Name a work branch, or use mode "pr" and merge through manage_pr.`
@@ -406,16 +389,16 @@ async function commitOnBranch<R>(
 
   const result = await op.mutate(owner, repo, target);
 
-  // The commit has landed, so every cached read of this repo is now potentially
-  // stale. Swept here, for both verbs, before the PR is opened.
+  // The commit has landed, so every cached read of this repo is potentially stale.
+  // Swept here, for both verbs, before the PR is opened.
   await invalidateRepoReads(env, owner, repo);
 
   const base = { repo: `${owner}/${repo}`, mode, branch: target, path };
   if (mode === "direct") return { base, result, pr: null };
 
   const title = message.split("\n")[0] || op.fallbackTitle;
-  // Pass the resolved repo full name so the PR lands on the same repo the file
-  // was committed to, not the namespace default.
+  // Pass the resolved repo full name so the PR lands on the repo the file was
+  // committed to, not the namespace default.
   const pr = await openPr(env, namespace, title, target, defaultBranch, op.prBody, `${owner}/${repo}`);
   return { base, result, pr: { number: pr.number, url: pr.url } };
 }
@@ -438,12 +421,11 @@ export async function writeRepoFile(
     allowWorkflowWrite,
     mutate: (owner, repo, target) => putFile(env, owner, repo, path, content, message, target, allowWorkflowWrite),
   });
-  // The flag is RETURNED so it lands in audit_log: guardedWrite files the whole
-  // result, so a workflow authored through this tool is greppable afterwards.
+  // The flag is RETURNED so it lands in audit_log via guardedWrite, which files the
+  // whole result. A workflow authored through this tool is greppable afterwards.
   const flag = allowWorkflowWrite === true ? { allow_workflow_write: true } : {};
-  // direct carries the file sha as well as the commit sha; pr mode never has.
-  // That asymmetry is preserved rather than tidied, because tidying it would
-  // change what a caller receives.
+  // direct carries the file sha as well as the commit sha; pr mode never has. The
+  // asymmetry is preserved because tidying it would change what a caller receives.
   if (!pr) return { ...base, ...result, ...flag };
   return { ...base, commitSha: result.commitSha, pr, ...flag };
 }
@@ -467,9 +449,9 @@ export async function deleteRepoFile(
     prBody: `Delete \`${path}\` via Capsid.`,
     allowWorkflowWrite,
     mutate: async (owner, repo, target) => {
-      // GitHub's contents DELETE needs the CURRENT file sha, so a missing file is
-      // an error rather than a no-op. Read on the target branch, which in pr mode
-      // is the work branch just cut from the default.
+      // GitHub's contents DELETE needs the CURRENT file sha, so a missing file is an
+      // error rather than a no-op. Read on the target branch, which in pr mode is
+      // the work branch just cut from the default.
       const sha = await getFileSha(env, owner, repo, path, target);
       if (!sha) throw new Error(`delete_repo_file: ${path} does not exist on ${owner}/${repo}@${target}`);
       const resp = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/contents/${encodePath(path)}`, {
@@ -491,12 +473,12 @@ export const REPO_BATCH_MAX_FILES = 20;
 export const REPO_FILE_BUDGET = 200 * 1024;
 
 /** Read up to REPO_BATCH_MAX_FILES files, each independently. ONE MISSING PATH DOES
- *  NOT FAIL THE BATCH: the point of a batch is triage, and a triage call that throws
- *  because one of twenty paths moved is a call the caller has to retry by bisection.
+ *  NOT FAIL THE BATCH: a batch is triage, and a triage call that throws because one
+ *  of twenty paths moved has to be retried by bisection.
  *
  *  THE PER-FILE BUDGET APPLIES HERE AND NOT TO THE SINGLE-PATH READ. There was no
- *  repo read budget before this, so applying one to readRepoFile would have made an
- *  existing call start truncating silently. New surface takes the new bound. */
+ *  repo read budget before this, so applying one to readRepoFile would make an
+ *  existing call start truncating silently. */
 export async function readRepoFiles(env: Env, namespace: string, paths: string[], ref?: string, repoSelector?: string) {
   if (paths.length === 0) throw new Error("read_repo_file: paths was empty");
   if (paths.length > REPO_BATCH_MAX_FILES) {
@@ -536,14 +518,13 @@ export async function readRepoFiles(env: Env, namespace: string, paths: string[]
 // EVERY BLOB PATH ON THE DEFAULT BRANCH, in one call.
 //
 // Added 2026-09-07 for the truth report's doc-vs-code drift check, which asks a
-// set-membership question about a few hundred paths and needs the whole tree
-// rather than a directory at a time. It reuses searchCode's tree fetch and its
-// size refusal for the same reason searchCode has them: a recursive tree on a
-// large repo is one response, and GitHub truncates it silently past a limit.
+// set-membership question about a few hundred paths. It reuses searchCode's tree
+// fetch and size refusal: a recursive tree on a large repo is one response, and
+// GitHub truncates it silently past a limit.
 //
 // Returns null rather than throwing when the tree cannot be read or is too large.
-// The caller reports that check as UNRUN; an empty set would report every cited
-// path as drift, which is worse than not looking.
+// The caller reports that check as UNRUN; an empty set would report every cited path
+// as drift.
 export async function repoBlobPaths(env: Env, namespace: string, repoSelector?: string): Promise<Set<string> | null> {
   try {
     const { owner, repo } = await resolveRepo(env, namespace, repoSelector);

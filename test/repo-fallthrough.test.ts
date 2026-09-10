@@ -270,7 +270,7 @@ test("repo_history REFUSES an ambiguous combination rather than picking one", as
 test("delete_branch REFUSES the default branch, and force does not lift it", async () => {
   await withFetch({ "GET /repos/o/r": REPO_META }, async () => {
     await assert.rejects(() => deleteBranch(makeEnv(), "ns", "main"), /is the default branch/);
-    // The whole point of this refusal is that it is not liftable.
+    // This refusal is not liftable.
     await assert.rejects(() => deleteBranch(makeEnv(), "ns", "main", { force: true }), /force does not lift/);
   });
 });

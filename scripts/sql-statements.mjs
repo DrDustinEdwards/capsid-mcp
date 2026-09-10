@@ -1,33 +1,30 @@
 // EVERY SQL STATEMENT IN src/, EXTRACTED FROM THE SOURCE.
 //
-// The point is that it is a WALK rather than a list. A hand-maintained catalogue of
-// queries to check the plan of is a catalogue that goes stale the first time
-// somebody adds a query, and the query nobody added to the list is exactly the one
-// that will table-scan a growing table at 03:00. capsid/conventions.md: where code
-// hardcodes a list mirroring the state of something else, derive the list.
+// A WALK rather than a list. A hand-maintained catalogue of queries goes stale the first
+// time somebody adds a query, and the query nobody added is the one that table-scans a
+// growing table at 03:00. capsid/conventions.md: where code hardcodes a list mirroring
+// the state of something else, derive the list.
 //
-// WHAT IT CAN AND CANNOT SEE, stated rather than glossed. It reads the argument of
-// every `.prepare(...)` call, which covers a plain string and a template literal.
-// A template literal with a `${...}` hole is kept with the hole replaced by a
-// placeholder that is valid SQL in that position where one can be guessed, and
-// SKIPPED otherwise; the skipped ones are returned too, so a caller can assert how
-// many were skipped and notice when that number grows. Nothing here parses
-// TypeScript: this is a regex over source text, and it is honest about being one.
+// WHAT IT CAN AND CANNOT SEE. It reads the argument of every `.prepare(...)` call, which
+// covers a plain string and a template literal. A template literal with a `${...}` hole
+// is kept with the hole replaced by a placeholder that is valid SQL in that position
+// where one can be guessed, and SKIPPED otherwise; the skipped ones are returned too, so
+// a caller can assert how many were skipped. Nothing here parses TypeScript: this is a
+// regex over source text.
 
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-// A `${...}` hole inside a prepared statement is almost always one of three
-// things in this codebase, and each has a substitution that keeps the statement
-// parseable so SQLite can plan it:
+// A `${...}` hole inside a prepared statement is one of three things in this codebase,
+// and each has a substitution that keeps the statement parseable so SQLite can plan it:
 //
 //   a table name        (backup.ts dumps `SELECT * FROM ${table}`)
 //   a placeholder list  (`?1, ?2, ...` built from an array length)
 //   a column list       (a projection built from a set of field names)
 //
-// Anything else is skipped rather than guessed at. A statement this cannot
-// reconstruct is reported, not silently dropped: a plan check that quietly covers
-// 40 of 60 statements is the "assertion that can pass by reading nothing" failure.
+// Anything else is skipped rather than guessed at, and reported rather than dropped: a
+// plan check that quietly covers 40 of 60 statements is the "assertion that can pass by
+// reading nothing" failure.
 const HOLE = /\$\{[^}]*\}/g;
 
 function substitute(sql) {
@@ -45,15 +42,12 @@ function substitute(sql) {
 }
 
 /**
- * RECURSIVE, because src/ has subdirectories. The 2026-09-10 split moved the
- * tool, github and improve modules under src/tools, src/github and src/improve,
- * and a flat readdirSync silently stopped seeing them: the statement count fell
- * from over 80 to 41 and every query-plan assertion below would have been
- * checking a third of the Worker. query-plans.test.ts has a floor assertion that
- * caught it, which is the only reason this was a red build rather than a quiet
- * hole. Names are returned relative to srcDir with forward slashes, so a
- * top-level file keeps its basename (backup.ts, which the ALLOW list keys on)
- * and a nested one is addressable as github/client.ts.
+ * RECURSIVE, because src/ has subdirectories. The 2026-09-10 split moved the tool,
+ * github and improve modules under src/tools, src/github and src/improve, and a flat
+ * readdirSync silently stopped seeing them: the statement count fell from over 80 to 41.
+ * query-plans.test.ts has a floor assertion that caught it. Names are returned relative
+ * to srcDir with forward slashes, so a top-level file keeps its basename (backup.ts,
+ * which the ALLOW list keys on) and a nested one is addressable as github/client.ts.
  *
  * @param {string} root
  * @returns {string[]}
@@ -100,9 +94,8 @@ export function extractStatements(srcDir) {
   return { statements, skipped };
 }
 
-// Only the statements SQLite can plan. A plan is meaningless for a write, and
-// EXPLAIN QUERY PLAN on an INSERT reports the plan of its SELECT half or nothing
-// at all, so reads are what this is about.
+// Only the statements SQLite can plan. A plan is meaningless for a write, and EXPLAIN
+// QUERY PLAN on an INSERT reports the plan of its SELECT half or nothing at all.
 /** @param {{ file: string; sql: string }[]} statements */
 export function readStatements(statements) {
   return statements.filter((s) => /^SELECT\b/i.test(s.sql));

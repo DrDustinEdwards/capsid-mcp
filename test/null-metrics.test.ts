@@ -9,7 +9,7 @@ import { parseScoresDoc } from "../src/improve-scores";
 import { seedScoresDoc } from "./seed-scores.ts";
 import { ROSTER } from "../src/improve-schema";
 
-// A DECLARED METRIC THAT NOTHING REPORTS IS A LIE THE DOCUMENT TELLS.
+// A DECLARED METRIC THAT NOTHING REPORTS IS A FALSE CLAIM IN THE DOCUMENT.
 //
 // Both 2026-09-07 audits rated this MAJOR 5.7: error_count and p95_latency_ms were
 // emitted as a literal null on every run by every repo since the loop was built,

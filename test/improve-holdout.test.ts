@@ -108,9 +108,9 @@ test("the attempt module takes AttemptEnv, and AttemptEnv omits the binding", ()
 });
 
 test("THE CI R2 READ TOKEN IS NOT IN THE WORKER'S ENVIRONMENT AT ALL", () => {
-  // CI pulls the holdout tests with its own read-only R2 token, held as a repo
-  // secret. If that token were also a Worker binding, the attempt path could read
-  // the suite over the R2 API and every layer above would be decoration.
+  // CI pulls the holdout tests with its own read-only R2 token, held as a repo secret. If
+  // that token were also a Worker binding, the attempt path could read the suite over the
+  // R2 API and every layer above would have no effect.
   const env = sourceFile("env.ts");
   for (const forbidden of ["R2_ACCESS_KEY", "R2_SECRET", "HOLDOUT_TOKEN", "R2_TOKEN"]) {
     assert.equal(env.includes(forbidden), false, `src/env.ts declares ${forbidden}; the R2 read token must live only in CI`);

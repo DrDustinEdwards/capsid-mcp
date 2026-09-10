@@ -53,9 +53,9 @@ function blob(text: string) {
 // list of blob paths actually requested is DERIVED from those calls rather than
 // tracked separately: one source of truth for "what did the scan fetch".
 //
-// fetchedBlobs is how a cap is proven. files_scanned is the tool's own account of
-// itself, and a cap reporting 1 while fetching 3 still burns three requests of the
-// quota the cap exists to protect.
+// blobsOf is how a cap is proven. files_scanned is the tool's own account of itself,
+// and a cap reporting 1 while fetching 3 still burns three requests of the quota the
+// cap exists to protect.
 const blobsOf = (calls: FetchCall[], paths: string[]) =>
   calls
     .filter((c) => c.path.includes("/git/blobs/sha"))

@@ -121,9 +121,9 @@ test("the runner script exists and is the one the derive script points restorers
 
 // ---- cross-table consistency (residual 4) -----------------------------------
 //
-// The dump is now one D1 batch, so it is a single transaction and the ten table
-// objects agree with each other. This is the half that CHECKS that, because a
-// consistency guarantee nothing verifies is a comment.
+// The dump is now one D1 batch, so it is a single transaction and the ten table objects
+// agree with each other. This is the half that CHECKS that: nothing else verifies the
+// consistency guarantee.
 //
 // THE CHECKS ARE THE TEARING SIGNATURE, NOT PLAIN REFERENTIAL INTEGRITY, and the
 // difference was measured rather than assumed. Live on 2026-09-08 the store held

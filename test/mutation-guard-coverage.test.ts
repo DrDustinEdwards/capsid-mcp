@@ -24,7 +24,7 @@ import { allSourceText, toolBlocks } from "./source-files.ts";
 // A handler mutates the document store if it inserts a documents row or calls the
 // one path-mutation helper. Matched by SHAPE rather than by tool name, so the
 // next mutation is caught by what it does.
-const MUTATION_MARKERS = [/INSERT INTO documents/i, /\bpathMutation\(/];
+const MUTATION_MARKERS = [/INSERT INTO documents/i, /\bdocumentUpsert\(/, /\bpathMutation\(/];
 
 function mutationTools() {
   return toolBlocks().filter((t) => MUTATION_MARKERS.some((re) => re.test(t.body)));

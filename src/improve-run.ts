@@ -40,15 +40,12 @@ import {
 } from "./improve/open";
 import { tickRuns, type TickOutcome } from "./improve/tick";
 
-export { ingestScore, type IngestResult } from "./improve/ingest";
-export {
-  checkBudget,
-  openRuns,
-  type BudgetStatus,
-  type OpenOutcome,
-  type OpenSummary,
-} from "./improve/open";
-export { DEFAULT_RUN_PROMPT, tickRuns, type TickOutcome } from "./improve/tick";
+// The barrel. Only what something outside src/improve/ actually imports: src/index.ts
+// and src/routes.ts take openRuns, tickRuns and ingestScore, and test/ takes
+// checkBudget. A re-export nothing imports is a name the split invented.
+export { ingestScore } from "./improve/ingest";
+export { checkBudget, openRuns } from "./improve/open";
+export { tickRuns } from "./improve/tick";
 
 // WHAT THE DRIVER ASKS BEFORE IT EXECUTES A PLAN. Returns the verification of one
 // task document: its signature against the Worker's derived key, and its last
@@ -97,12 +94,10 @@ export interface NamespaceStatus {
     note: string | null;
   } | null;
   totals: { runs: number; attempts: number; kept: number; reverts: number; cost_usd: number; ci_minutes: number };
-  // THE LATEST TRUTH REPORT for this namespace (2026-09-07). `lint` mode
-  // `report` stores one document per namespace per day under reports/, carrying
-  // one integrity percentage; this is the read path for it, so the number is
-  // visible without anyone knowing the path convention. null means no report has
-  // ever been run here, which is NOT the same as an integrity of zero and is
-  // reported as null for exactly that reason.
+  // THE LATEST TRUTH REPORT for this namespace (2026-09-07). `lint` mode `report`
+  // stores one document per namespace per day under reports/, carrying one integrity
+  // percentage; this is the read path for it. null means no report has ever been run
+  // here, which is NOT an integrity of zero.
   latest_report: { path: string; integrity: number | null; generated: string } | null;
 }
 
@@ -117,12 +112,11 @@ export interface StatusReport {
   cost_note: string;
   // Monthly spend against the KV caps the opener and tick enforce.
   budget: BudgetStatus;
-  // THE DETERMINISTIC PATH GUARD'S LIST, SERVED (residual 10). The
-  // subscription-mode driver runs on a laptop, outside every guard in this
-  // Worker, and had no path monitor at all. It now fetches these and applies
-  // them to each attempt's changed paths before any push, through
-  // scripts/path-guard.mjs. Served rather than copied so the list cannot drift:
-  // a pattern added to PROTECTED_PATH_PATTERNS is in the next call's response.
+  // THE DETERMINISTIC PATH GUARD'S LIST, SERVED (residual 10). The subscription-mode
+  // driver runs on a laptop, outside every guard in this Worker, and had no path
+  // monitor. It fetches these and applies them to each attempt's changed paths before
+  // any push, through scripts/path-guard.mjs. Served rather than copied so a pattern
+  // added to PROTECTED_PATH_PATTERNS is in the next call's response.
   protected_paths: ServedProtectedPath[];
   namespaces: NamespaceStatus[];
 }
@@ -171,10 +165,9 @@ export async function improveStatus(env: Env, only?: string, taskPath?: string):
       best: best ? { sha: best.sha, score: best.score, recorded_at: best.recorded_at } : null,
       last_run: last ?? null,
       totals: totals ?? { runs: 0, attempts: 0, kept: 0, reverts: 0, cost_usd: 0, ci_minutes: 0 },
-      // ORDER BY path DESC gives the newest date because the filename is
-      // ISO-dated, which sorts lexically. Deliberate: updated_at would give the
-      // most recently REWRITTEN report, and a re-run of an old date is not the
-      // latest measurement.
+      // ORDER BY path DESC gives the newest date because the filename is ISO-dated and
+      // sorts lexically. updated_at would give the most recently REWRITTEN report, and
+      // a re-run of an old date is not the latest measurement.
       latest_report: report
         ? { path: `${namespace}/${report.path}`, integrity: integrityOf(report.body), generated: report.updated_at }
         : null,
@@ -217,9 +210,9 @@ export async function improveRunManual(
   opts: { namespace?: string; dryRun: boolean; condition?: string }
 ): Promise<ManualResult> {
   const { mode, reason } = await readMode(env.APP_KV);
-  // An unrecognised condition is REFUSED rather than silently defaulted: a run
-  // labelled 'full' that was asked to be an ablation is a row that lies, and the
-  // whole point of the column is that the label is trustworthy.
+  // An unrecognised condition is REFUSED rather than silently defaulted. A run labelled
+  // 'full' that was asked to be an ablation is a row that lies, and the column exists
+  // so the label can be trusted.
   if (opts.condition !== undefined && !isRunCondition(opts.condition)) {
     throw new Error(
       `unknown condition '${opts.condition}'. Valid conditions: ${RUN_CONDITIONS.join(", ")}. Nothing was opened.`
@@ -242,10 +235,9 @@ export async function improveRunManual(
 }
 
 // THE CONTROL ACTIONS. improve_run's non-run verbs: set the mode, pause or unpause
-// namespaces, set the budget caps. Each is a KV write, audited, and READ BACK from
-// KV so the caller sees the value that actually landed rather than the one it asked
-// for. improve_status reads the same keys, so it reflects the change on its next
-// call. All of it is write-gated at the tool boundary.
+// namespaces, set the budget caps. Each is a KV write, audited, and READ BACK from KV
+// so the caller sees the value that landed rather than the one it asked for.
+// improve_status reads the same keys. All of it is write-gated at the tool boundary.
 export type ImproveControlResult =
   | { action: "mode"; requested: string; mode: ImproveMode; mode_note: string | null }
   | { action: "pause" | "unpause"; namespaces: string[]; paused: Record<string, string | null> }
@@ -287,36 +279,31 @@ export async function improveControl(
     release?: boolean;
   }
 ): Promise<ImproveControlResult> {
-  // MINT A READ-ONLY OPERATOR KEY, and stop one step short of installing it.
+  // MINT A READ-ONLY OPERATOR KEY, stopping one step short of installing it.
   //
-  // WHY THE LAST STEP IS MANUAL, which is the only interesting thing here. This
-  // action generates the key and prints the command that would add its hash to
-  // OPERATOR_KEY_HASH. It does not run that command and it cannot: a Worker that
-  // can widen its own authorization list has an authorization list that is
-  // decorative, and every guard downstream of it inherits that. Minting is
-  // cheap and reversible; installing is the gate, and the gate stays with a
-  // human holding Cloudflare credentials the Worker does not have.
+  // THE LAST STEP IS MANUAL. This action generates the key and prints the command
+  // that would add its hash to OPERATOR_KEY_HASH. It does not run that command and
+  // cannot: a Worker that can widen its own authorization list has one that is
+  // decorative, and every guard downstream inherits that. Minting is cheap and
+  // reversible; installing is the gate, and it stays with a human holding Cloudflare
+  // credentials the Worker does not have.
   //
-  // The KEY IS RETURNED ONCE and stored nowhere. Not in KV, not in a document,
-  // and NOT IN THE AUDIT ROW: OPERATOR_KEY_HASH is the verifier, so writing the
-  // hash into audit_log would copy the verifier into a table this same key can
-  // read. The audit row records that a mint happened and a fingerprint, which is
-  // what an operator needs to tell two mints apart.
+  // The KEY IS RETURNED ONCE and stored nowhere: not in KV, not in a document, and NOT
+  // IN THE AUDIT ROW. OPERATOR_KEY_HASH is the verifier, so writing the hash into
+  // audit_log would copy the verifier into a table this same key can read. The audit
+  // row records that a mint happened, plus a fingerprint.
   if (action === "mint_operator_key") {
     const bytes = new Uint8Array(32);
     crypto.getRandomValues(bytes);
     // bytesToHex, not an inline map: src/encoding.ts owns the byte encodings and
-    // test/encoding.test.ts fails the build on a second implementation. A
-    // duplicated crypto-adjacent helper is not a tidiness problem, it is the copy
-    // nobody looked at mishandling the high byte.
+    // test/encoding.test.ts fails the build on a second implementation. A duplicated
+    // crypto-adjacent helper is the copy nobody looked at mishandling the high byte.
     const key = `capsid_${bytesToHex(bytes)}`;
-    // THE `ro:` PREFIX GOES ON THE LIST ENTRY, NOT ON THE KEY. src/auth.ts hashes
-    // the presented key and then compares it against each entry with the prefix
-    // stripped, so the tier is a property of what the OPERATOR wrote down, not of
-    // what the caller presents. Getting this backwards mints a WRITE key from a
-    // helper whose whole purpose is the read-only tier, which is why the test
-    // resolves the minted key through the real verifier rather than trusting the
-    // label on this response.
+    // THE `ro:` PREFIX GOES ON THE LIST ENTRY, NOT ON THE KEY. src/auth.ts hashes the
+    // presented key and compares it against each entry with the prefix stripped, so the
+    // tier is a property of what the OPERATOR wrote down. Getting this backwards mints
+    // a WRITE key from a helper whose purpose is the read-only tier, which is why the
+    // test resolves the minted key through the real verifier.
     const hash = await sha256Hex(key);
     const entry = `ro:${hash}`;
     const existing = (env.OPERATOR_KEY_HASH ?? "").split(",").map((h) => h.trim()).filter(Boolean);
@@ -347,16 +334,15 @@ ${next.join(",")}`,
     };
   }
 
-  // THE DRIVER LEASE (residual 9). Claimed before a subscription-mode run touches
-  // a clone, released when it finishes.
+  // THE DRIVER LEASE (residual 9). Claimed before a subscription-mode run touches a
+  // clone, released when it finishes.
   //
-  // BEST-EFFORT, AND SAID SO. KV has no compare-and-set, so this is a get then a
-  // put with nothing atomic between them, exactly like the backup lease: it stops
-  // a second driver started minutes or hours later, and does not stop two claims
-  // landing in the same millisecond. The window it closes is the one that exists.
+  // BEST-EFFORT, AND SAID SO. KV has no compare-and-set, so this is a get then a put
+  // with nothing atomic between them, like the backup lease: it stops a second driver
+  // started minutes or hours later, not two claims landing in the same millisecond.
   //
-  // The TTL is what makes a crashed driver cost one night rather than forever:
-  // the release does not run if the session dies, so the key expires on its own.
+  // The TTL is what makes a crashed driver cost one night rather than forever: the
+  // release does not run if the session dies, so the key expires on its own.
   if (action === "claim") {
     const target = (opts.namespace ?? "").trim();
     if (!target) throw new Error('claim needs a namespace. Nothing was changed.');
@@ -371,8 +357,8 @@ ${next.join(",")}`,
     }
     const holder = await env.APP_KV.get(key);
     if (holder !== null) {
-      // REFUSED, and the holder is NOT overwritten. A claim that took the lease
-      // anyway would turn a lock into a log line.
+      // REFUSED, and the holder is NOT overwritten. A claim that took the lease anyway
+      // would turn a lock into a log line.
       return {
         action: "claim",
         namespace: target,
@@ -402,8 +388,8 @@ ${next.join(",")}`,
     }
     await env.APP_KV.put(MODE_KEY, value);
     await env.DB.batch([improveAudit(env.DB, "improve-mode-set", null, { mode: value })]);
-    // Read back through the same resolver the loop uses, so an unexpected stored
-    // value would surface here rather than at 3am.
+    // Read back through the same resolver the loop uses, so an unexpected stored value
+    // surfaces here rather than at 3am.
     const read = await readMode(env.APP_KV);
     return { action: "mode", requested: value, mode: read.mode, mode_note: read.reason };
   }

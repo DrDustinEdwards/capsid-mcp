@@ -30,8 +30,8 @@ test("append, patch and meta refuse a document that does not exist", () => {
 });
 
 test("meta leaves the body byte-identical", () => {
-  // The whole point: closing a task or fixing a mistyped document must not cost
-  // a full-body retranscription.
+  // Closing a task or fixing a mistyped document must not cost a full-body
+  // retranscription.
   const body = "# Doc\n\nFirst section.\n";
   const r = assembleBody({ exists: true, priorBody: body, mode: "meta" });
   assert.deepEqual(r, { body });
@@ -92,8 +92,8 @@ test("patch replaces a unique anchor", () => {
 });
 
 test("patch REFUSES a missing anchor rather than writing anything", () => {
-  // This is the whole point. The hand-run splice guarded with instr(...) > 0 for
-  // the same reason: a missed anchor must not silently corrupt the body.
+  // The hand-run splice guarded with instr(...) > 0 for the same reason: a missed
+  // anchor must not silently corrupt the body.
   const r = assembleBody({ ...existing, mode: "patch", find: "Nonexistent.", replace_with: "x" });
   assert.match((r as { error: string }).error, /anchor not found/);
   assert.ok(!("body" in r));

@@ -65,10 +65,9 @@ test("live gate count matches the distinct gates in verify-live.mjs", () => {
 // separately and withSecurityHeaders deliberately preserves a header that is
 // already present.
 //
-// This used to read `enforced.length + 1`, and the "+ 1" was the bug in miniature:
-// it hardcoded the very number the test exists to derive. A seventh enforced header
-// added to the consent dialog would have left 5 + 1 = 6 and passed, with
-// counts.ts's authoritative 6 now wrong and nothing saying so. Deriving the union
+// This used to read `enforced.length + 1`, hardcoding the number the test exists to
+// derive. A seventh enforced header added to the consent dialog would have left
+// 5 + 1 = 6 and passed, with counts.ts's authoritative 6 now wrong. Deriving the union
 // means an enforced header added to EITHER file moves the number.
 const NOT_SECURITY_HEADERS = new Set(["Content-Type", "Set-Cookie", "Location", "Reporting-Endpoints"]);
 const isEnforcedSecurityHeader = (name: string) =>
@@ -191,10 +190,9 @@ test("'all seven' is flagged when it is about headers", () => {
 });
 
 test("'all seven' about anything else is NOT flagged", () => {
-  // Measured against the live corpus 2026-08-12: "all seven" appears in 25
-  // documents and almost none are about headers. Seven ROWS files, seven
-  // manifest fields, seven migrations, seven width probes. An unscoped match
-  // flagged every one of them, which is a lint nobody would read twice.
+  // Measured against the live corpus 2026-08-12: "all seven" appears in 25 documents
+  // and almost none are about headers. Seven ROWS files, seven manifest fields, seven
+  // migrations, seven width probes. An unscoped match flagged every one of them.
   const decoys = [
     "PARITY-ROWS split seven ways. All seven written BEFORE the index cited them.",
     "buildNotificationSettingsUpdate exists with all seven fields and a passing unit test.",
@@ -218,9 +216,9 @@ test("the scan never returns a rewritten body, only a flag", () => {
   }
 });
 
-// The three false-positive classes measured portfolio-wide on 2026-08-14, when 16
-// claims were flagged and 14 of them were wrong. Each is a regression test, because
-// each was a lint that cried wolf, and a lint nobody reads is a lint that is off.
+// The three false-positive classes measured portfolio-wide on 2026-08-14, when 16 claims
+// were flagged and 14 of them were wrong. Each is a regression test: a lint with that
+// false-positive rate gets turned off.
 
 test("a namespace with no authoritative numbers gets NO claims", () => {
   // dustinedwards has its own 24-gate suite and its own tool counts. Comparing them

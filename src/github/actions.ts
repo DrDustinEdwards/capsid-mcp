@@ -11,23 +11,18 @@ import {
 } from "./client";
 
 // Recent CI workflow runs for a namespace's repo, via the GitHub App. Read-only.
-// For the most recent failed run it also returns the failing jobs/steps and a
-// bounded log tail, so a green-or-not verdict is reachable from claude.ai without
-// opening the Actions tab. Needs the App's Actions: Read permission; a 403 is
-// surfaced as a clear, actionable error rather than an opaque failure.
+// For the most recent failed run it also returns the failing jobs and steps and a
+// bounded log tail. Needs the App's Actions: Read permission; a 403 is surfaced as
+// a named error.
 //
 // THE LOG TAIL IS GATED OFF READ-ONLY KEYS. Ruled 2026-08-13. Run metadata (name,
-// sha, conclusion) is inert; raw job logs are not the same class of data. A build
-// log carries whatever the workflow echoed: resolved binding ids, account ids,
-// wrangler output, and the contents of any variable a step printed by accident. An
-// `ro:` key exists so an agent can read the knowledge base, and handing it the
-// deploy logs of every repo in the portfolio is a wider grant than that. The
-// runs list stays open to ro: keys, because the green-or-not verdict is the part
-// they need.
-// A ref that looks like a hex object name is filtered as a head sha, anything else
-// as a branch. GitHub has two different query parameters for these and no single one
-// that accepts either, so the tool takes one `ref` and decides here rather than
-// making the caller know which kind of thing they are holding.
+// sha, conclusion) is inert; a build log carries whatever the workflow echoed:
+// resolved binding ids, account ids, wrangler output, and any variable a step
+// printed by accident. The runs list stays open to ro: keys.
+
+// A ref matching this shape is filtered as a head sha, anything else as a branch.
+// GitHub has two query parameters for these and none that accepts either, so the
+// tool takes one `ref` and decides here.
 const SHA_SHAPE = /^[0-9a-f]{7,40}$/i;
 
 export async function ciStatus(
@@ -41,8 +36,8 @@ export async function ciStatus(
   const limit = opts.limit && opts.limit > 0 ? Math.min(opts.limit, 20) : 10;
   let query = `/repos/${owner}/${repo}/actions/runs?per_page=${limit}`;
   if (opts.runId) {
-    // One run, by id. Wrapped back into the same shape as the list so everything
-    // downstream, including the failed-run drill-in, has one code path.
+    // One run, by id. Wrapped back into the list's shape so the failed-run drill-in
+    // has one code path.
     const one = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/actions/runs/${opts.runId}`);
     if (one.status === 404) throw new Error(`ci_status: run ${opts.runId} does not exist on ${full}`);
     if (!one.ok) throw new Error(`ci_status run lookup failed (${one.status}): ${(await one.text()).slice(0, 200)}`);
@@ -54,8 +49,8 @@ export async function ciStatus(
       // AN ABBREVIATED SHA MUST BE EXPANDED FIRST. Measured 2026-09-06 against
       // dustinedwards-info: `head_sha=3bcf858` returns total_count 0 while the full
       // 40-character sha returns the run. GitHub matches this parameter exactly and
-      // says nothing about it, so the failure is an empty run list for precisely the
-      // input a human types. One extra GET, only when the ref is short.
+      // documents nothing, so a short sha yields an empty run list. One extra GET,
+      // only when the ref is short.
       let full40 = opts.ref;
       if (opts.ref.length < 40) {
         const commit = await cachedGet(env, owner, repo, `/repos/${owner}/${repo}/commits/${encodeURIComponent(opts.ref)}`);
@@ -95,27 +90,21 @@ interface CiRun {
 
 // THE FAILING STEP'S LOG, 64KB FROM ITS END, for write-grant keys.
 //
-// This REVERSES the earlier 2000-character job tail for the write tier only, and the
-// reason is measured rather than stylistic: a job log ends with post-run cleanup, so
-// the last 2000 characters of a failed run on these repos were `git config
-// --unset-all` lines and the actual failure was thousands of lines earlier. A tail
-// that reliably returns the wrong region is worse than no tail, because it reads as
-// an answer. So the region is found by the failing STEP's group marker and then
-// tailed, which puts the diagnosis in view. The ro: tier is unchanged; see
-// capsid/decisions.md, 2026-09-06.
+// This reverses the earlier 2000-character job tail for the write tier only. A job
+// log ends with post-run cleanup, so the last 2000 characters of a failed run on
+// these repos were `git config --unset-all` lines and the failure was thousands of
+// lines earlier. The region is found by the failing STEP's group marker and then
+// tailed. The ro: tier is unchanged; see capsid/decisions.md, 2026-09-06.
 export const CI_LOG_BUDGET = 64 * 1024;
 
-// THE STEP IS FOUND BY TIMESTAMP, NOT BY NAME, and the first attempt at this got it
-// wrong in a way worth recording. Actions labels each group `##[group]Run <command>`,
-// NOT `##[group]<step name>`, so a step called "Gates" appears nowhere in its own
-// log. Searching for the name matched an incidental later occurrence and the tool
-// then reported a region it had not actually located: a false claim, which is worse
-// than the tail it replaced. Measured on dustinedwards-info run 34002625535.
+// THE STEP IS FOUND BY TIMESTAMP, NOT BY NAME. Actions labels each group
+// `##[group]Run <command>`, NOT `##[group]<step name>`, so a step called "Gates"
+// appears nowhere in its own log and a name search matches an incidental later
+// occurrence. Measured on dustinedwards-info run 34002625535.
 //
 // Every log line carries an ISO timestamp and the jobs API gives each step's
-// started_at and completed_at, so the step's own output is the lines inside that
-// window. On that run it is 51 lines and 3137 bytes, with the real `check:floors ...
-// FAILED` inside it and no post-run cleanup, against a 93KB job log.
+// started_at and completed_at, so the step's output is the lines inside that
+// window. On that run it is 51 lines and 3137 bytes against a 93KB job log.
 function failingStepLog(
   log: string,
   step: { name?: string; started_at?: string | null; completed_at?: string | null } | undefined
@@ -145,9 +134,8 @@ function failingStepLog(
     }
   }
 
-  // NAMED FALLBACK, not a silent one. If the window could not be applied the caller
-  // is told so, because "the end of the job log" and "the failing step" are different
-  // claims and only one of them is being made here.
+  // NAMED FALLBACK, not a silent one. "The end of the job log" and "the failing
+  // step" are different claims and the caller is told which one this is.
   return {
     text: log.slice(-CI_LOG_BUDGET),
     how: name
@@ -186,11 +174,9 @@ async function ciStatusFromRuns(
   // Drill into the most recent failed run so the caller sees why, not just that.
   //
   // EVERY DEGRADED PATH IS NAMED (audit 2, F34). Both sub-fetches used to fail into
-  // silence: a jobs fetch that errored dropped failed_run entirely, so the answer
-  // looked like a run that failed for no reason, and a log fetch that errored
-  // returned neither log_tail nor log_tail_withheld, so a caller with a write grant
-  // could not tell "no log" from "the log was refused for you". A tool reporting on
-  // whether CI is healthy is the last place to answer by omission.
+  // silence: an errored jobs fetch dropped failed_run entirely, and an errored log
+  // fetch returned neither log_tail nor log_tail_withheld, so a write-grant caller
+  // could not tell "no log" from "the log was refused for you".
   const failed = workflowRuns.find((r) => r.conclusion === "failure");
   if (failed) {
     const failedRun: Record<string, unknown> = {
@@ -244,30 +230,23 @@ async function ciStatusFromRuns(
 
 // ---- the improve loop's two GitHub needs -------------------------------------
 //
-// Both live here rather than in src/improve-scorer.ts, and the reason is the one
-// already written above commitOnBranch: the App token dance, the 401 retry and
-// the per-owner installation lookup exist ONCE in this module. A second module
-// calling api.github.com would be a second copy of that dance, and the copy that
-// drifts is always the one nobody is looking at.
+// Both live here rather than in src/improve-scorer.ts for the reason stated above
+// commitOnBranch: the App token dance, the 401 retry and the per-owner installation
+// lookup exist ONCE in this module.
 
-// Fire a workflow_dispatch. The REF IS DELIBERATELY NOT THE ATTEMPT BRANCH.
+// Fire a workflow_dispatch. THE REF IS DELIBERATELY NOT THE ATTEMPT BRANCH.
 //
 // workflow_dispatch runs the workflow file as it exists AT `ref`, so dispatching
-// against the attempt branch would let an attempt rewrite its own scorer: change
-// improve-score.yml on the branch, and the thing measuring the change is the
-// change. Dispatching against the default branch and passing the branch as an
-// INPUT means the scorer is always the reviewed copy on main, and the attempt is
-// data to it rather than code.
+// against the attempt branch would let an attempt rewrite its own scorer.
+// Dispatching against the default branch and passing the branch as an INPUT keeps
+// the scorer the reviewed copy on main.
 //
-// The deterministic monitor also refuses any diff touching .github/, so this is
-// belt and braces. Both are kept: the monitor is a policy that could be relaxed,
-// this is a mechanism that cannot be argued with.
-// THE REF ARGUMENT IS OPTIONAL AND DEFAULTS TO THE DEFAULT BRANCH, which is what
-// the paragraph above is about. It was added for ci_dispatch, where a human asking
-// to run a workflow on a branch means that branch. The improve loop passes no ref
-// and therefore still dispatches against the default branch, unchanged, so the
-// property above is intact for the caller it was written for. Do not give this
-// parameter a value at the improve loop's call site.
+// The deterministic monitor also refuses any diff touching .github/. Both are kept:
+// the monitor is a policy that could be relaxed, this is a mechanism.
+//
+// `ref` is optional and defaults to the default branch. It exists for ci_dispatch,
+// where a human asking to run a workflow on a branch means that branch. DO NOT PASS
+// IT AT THE IMPROVE LOOP'S CALL SITE.
 export async function dispatchWorkflow(
   env: Env,
   namespace: string,
@@ -300,14 +279,13 @@ export async function dispatchWorkflow(
   return { repo: full, workflow: workflowFile, ref, inputs };
 }
 
-// What CI is doing on one branch. Read by the tick so a timeout can say WHICH
-// failure it was: the workflow never started, the workflow is still running, or
-// the workflow finished and the report never arrived. Those three have different
-// fixes and a bare "timed out" distinguishes none of them.
-// `id` and `head_sha` are returned ADDITIVELY, for ci_dispatch. workflow_dispatch
-// replies 204 with no body, so the only way to name the run it started is to look
-// for a run that did not exist before; that needs the id, which this used to drop.
-// The tick reads status, conclusion and the timestamps and is unaffected.
+// What CI is doing on one branch. Read by the tick so a timeout can name WHICH
+// failure it was: the workflow never started, it is still running, or it finished
+// and the report never arrived. Those three have different fixes.
+//
+// `id` and `head_sha` are returned ADDITIVELY, for ci_dispatch: workflow_dispatch
+// replies 204 with no body, so naming the run it started means looking for a run
+// that did not exist before. The tick reads status, conclusion and the timestamps.
 export async function workflowRunsForBranch(
   env: Env,
   namespace: string,
@@ -372,32 +350,28 @@ export async function ciDispatch(
   namespace: string,
   args: { workflow?: string; ref?: string; run_id?: number; inputs?: Record<string, string> },
   repoSelector?: string,
-  // THE POLL TIMING IS INJECTABLE FOR TESTS ONLY, and it is a seam rather than a
-  // setting: the tool never passes it, so production always uses the constants
-  // above. Without this the timeout case costs 30 seconds of real waiting in the
-  // suite, and a test nobody will run is a test that stops being true.
+  // THE POLL TIMING IS INJECTABLE FOR TESTS ONLY. The tool never passes it, so
+  // production always uses the constants above. Without it the timeout case costs 30
+  // seconds of real waiting in the suite.
   poll: { timeoutMs?: number; intervalMs?: number } = {}
 ) {
   const timeoutMs = poll.timeoutMs ?? CI_DISPATCH_POLL_MS;
   const intervalMs = poll.intervalMs ?? CI_DISPATCH_POLL_INTERVAL_MS;
-  // THE SCORER IS NOT HAND-DISPATCHABLE THROUGH THIS TOOL (audit 2026-09-06,
-  // Fable MAJOR 7). improve-score.yml signs whatever it measured with the repo's
-  // score key, so a ci_dispatch of it against an arbitrary ref mints a genuinely
-  // signed report the ingest endpoint has no reason to doubt. Ingest also binds
-  // the report to the run's in-flight attempt and head sha, but that is the
-  // second lock; this is the first. The loop dispatches its own scorer through
-  // dispatchScorer, and a human shakedown goes through GitHub directly.
-  // THE SCORER IS NOT HAND-DISPATCHABLE THROUGH THIS TOOL, and the refusal now
-  // matches what the workflow IS rather than one spelling of its name (audit
+  // THE SCORER IS NOT HAND-DISPATCHABLE THROUGH THIS TOOL (audit 2026-09-06, Fable
+  // MAJOR 7). improve-score.yml signs whatever it measured with the repo's score key,
+  // so a ci_dispatch of it against an arbitrary ref mints a genuinely signed report.
+  // Ingest also binds the report to the run's in-flight attempt and head sha, but
+  // that is the second lock. The loop dispatches its own scorer through
+  // dispatchWorkflow in src/improve/tick.ts; a human shakedown goes through GitHub.
+  //
+  // The refusal matches what the workflow IS, not one spelling of its name (audit
   // 2026-09-07, Opus MAJOR 2.1, Grok section 23 item 7). The old check was
-  // `args.workflow === "improve-score.yml"`, an exact basename compare, and
-  // GitHub's dispatch endpoint accepts the numeric workflow id or the full path
-  // at that position just as happily, so the refusal was one `gh api` call away
-  // from being bypassed. Three checks now, in cost order.
+  // `args.workflow === "improve-score.yml"`, and GitHub's dispatch endpoint accepts
+  // the numeric workflow id or the full path at that position too. Three checks now,
+  // in cost order.
   if (args.workflow !== undefined) {
-    // 1. Shape. A workflow is a YAML file in .github/workflows; a numeric id is
-    //    not a name this tool accepts, which closes the alias without needing a
-    //    lookup to notice it.
+    // 1. Shape. A workflow is a YAML file in .github/workflows. A numeric id is not
+    //    a name this tool accepts, which closes the alias without a lookup.
     const basename = args.workflow.split("/").pop() ?? "";
     if (!/^[A-Za-z0-9._-]+\.ya?ml$/.test(basename)) {
       throw new Error(
@@ -413,14 +387,13 @@ export async function ciDispatch(
   }
   const { owner, repo, full } = await resolveRepo(env, namespace, repoSelector);
 
-  // 3. CONTENT. A scorer renamed, copied or vendored under another file name is
-  //    still a scorer: what makes it dangerous is that it holds the signing key
-  //    and posts to the score endpoint. Read the file on the DEFAULT branch (the
-  //    ref a dispatch resolves the workflow from) and refuse anything that
-  //    declares it. Read failures do NOT refuse: a workflow this tool cannot see
-  //    is the ordinary case for a repo whose default branch differs, and failing
-  //    closed here would make ci_dispatch unusable on a network blip. The two
-  //    checks above are the ones that hold without a lookup.
+  // 3. CONTENT. A scorer renamed, copied or vendored under another file name still
+  //    holds the signing key and posts to the score endpoint. Read the file on the
+  //    DEFAULT branch (the ref a dispatch resolves the workflow from) and refuse
+  //    anything that declares it. A read failure does NOT refuse: a workflow this
+  //    tool cannot see is ordinary for a repo whose default branch differs, and
+  //    failing closed here would break ci_dispatch on a network blip. Checks 1 and 2
+  //    hold without a lookup.
   if (args.workflow) {
     try {
       const resp = await cachedGet(env, owner, repo, `/repos/${owner}/${repo}/contents/${encodePath(`.github/workflows/${args.workflow.split("/").pop()}`)}`);
@@ -443,8 +416,7 @@ export async function ciDispatch(
   if (args.run_id) {
     if (args.workflow) throw new Error("ci_dispatch: pass workflow and ref to start a run, or run_id to rerun one, not both");
     // A RERUN IS A DISPATCH BY ANOTHER NAME. Rerunning the scorer's failed jobs
-    // re-executes the Post step with the key, against whatever ref that run used,
-    // so it is refused for the same reason a fresh dispatch is.
+    // re-executes the Post step with the key, against whatever ref that run used.
     const runResp = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/actions/runs/${args.run_id}`);
     if (runResp.ok) {
       const runData = (await runResp.json()) as { path?: string; name?: string };
@@ -476,9 +448,8 @@ export async function ciDispatch(
     await dispatchWorkflow(env, namespace, args.workflow, args.inputs ?? {}, repoSelector, args.ref);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    // GitHub answers 422 naming workflow_dispatch when the workflow file has no
-    // such trigger. Saying so is the difference between "this workflow cannot be
-    // started by hand" and an opaque 422 the caller has to go and read the YAML for.
+    // GitHub answers 422 naming workflow_dispatch when the workflow file has no such
+    // trigger. Saying so beats an opaque 422 the caller has to read the YAML for.
     if (/workflow_dispatch/i.test(message)) {
       throw new Error(
         `ci_dispatch refuses: ${args.workflow} has no workflow_dispatch trigger on ${full}, so it cannot be started by hand. Add "on: workflow_dispatch:" to that workflow, or trigger it the way it is configured. GitHub said: ${message.slice(0, 200)}`
@@ -488,7 +459,7 @@ export async function ciDispatch(
   }
 
   // POLL, because 204 means accepted, not started. A caller with no run id has
-  // nothing to watch, which is the whole reason this tool returns one.
+  // nothing to watch, which is what this tool returns one for.
   const deadline = Date.now() + timeoutMs;
   let appeared: Awaited<ReturnType<typeof workflowRunsForBranch>>[number] | undefined;
   let polls = 0;

@@ -101,3 +101,39 @@ export function guardedCommit(opts: {
     },
   };
 }
+
+// THE DOCUMENT UPSERT, ONE SPELLING. `write` and `lint` mode `report` both store a
+// document and both have to store it the same way, or two write paths disagree about
+// what a write is. The split of 2026-09-10 put them in different files, which is
+// where a second spelling comes from.
+//
+// COALESCE on every optional column, so an argument the caller did not supply leaves
+// the stored value alone rather than nulling it. The improve loop's own writer is
+// deliberately NOT folded in here: it always sets every column and has no COALESCE.
+//
+// test/mutation-guard-coverage.test.ts and test/tool-annotations.test.ts both match
+// this call as a mutation marker, the same way they match pathMutation().
+export function documentUpsert(
+  db: D1Database,
+  namespace: string,
+  path: string,
+  title: string | null,
+  body: string,
+  type: string | null,
+  tags: string | null,
+  status: string | null
+): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO documents (namespace, path, title, body, type, tags, status)
+       VALUES (?1, ?2, ?3, ?4, COALESCE(?5, 'note'), ?6, COALESCE(?7, 'published'))
+       ON CONFLICT(namespace, path) DO UPDATE SET
+         title = COALESCE(?3, documents.title),
+         body = excluded.body,
+         type = COALESCE(?5, documents.type),
+         tags = COALESCE(?6, documents.tags),
+         status = COALESCE(?7, documents.status),
+         updated_at = datetime('now')`
+    )
+    .bind(namespace, path, title, body, type, tags, status);
+}

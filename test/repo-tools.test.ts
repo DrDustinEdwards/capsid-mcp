@@ -533,8 +533,8 @@ test("ci_status returns the failing step's log by its timestamp window, not the 
       // The in-window failure lines are present.
       assert.match(failed.log ?? "", /not ok 3 - the assertion that failed/);
       assert.match(failed.log ?? "", /FAILED with exit code 1/);
-      // The before-window setup and the after-window cleanup are excluded, which is
-      // the whole point: the cleanup line is what the old whole-job tail returned.
+      // The before-window setup and the after-window cleanup are excluded: the cleanup
+      // line is what the old whole-job tail returned.
       assert.doesNotMatch(failed.log ?? "", /setup output before the failing step/);
       assert.doesNotMatch(failed.log ?? "", /git config --unset-all/);
     }
@@ -722,8 +722,8 @@ test("manage_pr leaves a FORK's head branch alone", async () => {
 });
 
 test("A FAILED BRANCH DELETE DOES NOT FAIL THE MERGE, because the merge already landed", async () => {
-  // Reporting the whole call as failed because a cleanup step failed would be a lie
-  // about the merge. Same rule invalidateRepoReads follows.
+  // Reporting the whole call as failed because a cleanup step failed would misreport the
+  // merge. Same rule invalidateRepoReads follows.
   await withFetch(
     {
       "PUT /repos/o/r/pulls/5/merge": { body: { sha: "merged-sha", merged: true, message: "merged" } },

@@ -61,23 +61,20 @@ export async function readBoundedText(
   return { ok: true, text: new TextDecoder().decode(joined) };
 }
 
-// Claim a report's nonce, or refuse it. THE DATABASE DECIDES, not the code
-// (audit 2026-09-07, Grok MAJOR 3).
+// Claim a report's nonce, or refuse it. THE DATABASE DECIDES, not the code (audit
+// 2026-09-07, Grok MAJOR 3).
 //
-// This was a KV get-then-put: read the key, and write it if absent. Those are two
-// round trips with nothing atomic between them, so two requests carrying the same
-// captured signature both read absent and both proceed. The signature is valid
-// for 30 minutes either side, so a captured POST could be replayed for an hour by
-// racing it against itself, on all three signed endpoints.
+// This was a KV get-then-put: two round trips with nothing atomic between them, so
+// two requests carrying the same captured signature both read absent and both
+// proceeded. The signature is valid for 30 minutes either side, so a captured POST
+// could be replayed for an hour by racing it against itself, on all three signed
+// endpoints.
 //
-// An INSERT against a PRIMARY KEY has no such window: it either returns the row,
-// meaning this call claimed the nonce, or returns nothing, meaning someone else
-// already had it. RETURNING rather than meta.changes, for the reason stated all
-// over this repo.
+// An INSERT against a PRIMARY KEY has no such window: it returns the row, meaning
+// this call claimed the nonce, or nothing, meaning someone else already had it.
+// RETURNING rather than meta.changes.
 //
-// FAILS CLOSED on a database error, because these endpoints move the improve
-// state machine and a replay slipping past a sick database is exactly what the
-// cache exists to stop.
+// FAILS CLOSED on a database error: these endpoints move the improve state machine.
 export async function claimJti(
   db: D1Database,
   scope: string,
@@ -108,15 +105,12 @@ export async function claimJti(
 // ONE WORKER SECRET, N REPO SECRETS.
 //
 // IMPROVE_SCORE_SECRET never leaves the Worker. Each repo holds only
-// HMAC(root, "capsid-improve-score:v1:<namespace>"), so a repo secret leaking
-// from one repo's Actions logs authorises reports for that namespace and no
-// other, and rotating one namespace does not touch the rest. The alternative,
-// one shared secret in five repos, makes the blast radius of any one repo the
-// whole system.
+// HMAC(root, "capsid-improve-score:v1:<namespace>"), so a repo secret leaking from
+// one repo's Actions logs authorises reports for that namespace and no other, and
+// rotating one namespace does not touch the rest.
 //
-// The version segment is in the derivation string on purpose: rotating every
-// derived key at once is then a one-character change here rather than a new
-// secret and five re-pastes.
+// The version segment is in the derivation string so rotating every derived key at
+// once is a one-character change here rather than a new secret and five re-pastes.
 export async function deriveScoreKey(rootSecret: string, namespace: string): Promise<string> {
   return hmacHex(rootSecret, `capsid-improve-score:v1:${namespace}`);
 }
@@ -273,9 +267,9 @@ async function verifyHmac(
 }
 
 // EVERY FAILURE PATH HERE REFUSES. There is no fall-through that admits a report
-// because something was missing, which is the one property this function has to
-// have: the arc's ruling is that any missing or unauthenticated score is treated
-// as a revert, and a revert is what the caller does with a refusal.
+// because something was missing. The arc's ruling is that any missing or
+// unauthenticated score is treated as a revert, which is what the caller does with a
+// refusal.
 export async function verifySignedReport(
   env: Pick<Env, "IMPROVE_SCORE_SECRET">,
   signed: SignedRequest,
@@ -310,13 +304,12 @@ export async function readHoldoutManifest(env: Env, namespace: string): Promise<
   }
 }
 
-// EVERY ROSTER NAMESPACE'S MANIFEST, for the nightly dump (residual 4). The
-// manifest is a COUNT and a date, never a test, so putting it in a backup that
-// leaves the account discloses nothing the loop's own refusals do not already
-// state out loud. It is here rather than in src/backup.ts because only this
-// module may name the HOLDOUT binding (test/improve-holdout.test.ts), and the
-// dump is the only copy of the hidden suites' sizes outside one R2 bucket: lose
-// the bucket and every namespace scores as "no manifest", which is a refusal.
+// EVERY ROSTER NAMESPACE'S MANIFEST, for the nightly dump (residual 4). A manifest is
+// a COUNT and a date, never a test, so a backup that leaves the account discloses
+// nothing the loop's refusals do not state out loud. It is here rather than in
+// src/backup.ts because only this module may name the HOLDOUT binding
+// (test/improve-holdout.test.ts), and the dump is the only copy of the hidden suites'
+// sizes outside one R2 bucket: lose the bucket and every namespace refuses.
 export async function readHoldoutManifests(env: Env): Promise<Record<string, HoldoutManifest | null>> {
   const manifests: Record<string, HoldoutManifest | null> = {};
   for (const namespace of ROSTER) {
@@ -340,10 +333,9 @@ export interface HoldoutVerdict {
   passRate: number | null;
 }
 
-// NO MANIFEST IS A REFUSAL. The alternative, trusting the report's own total when
-// no manifest exists, means a namespace with no holdout set scores exactly like
-// one with a passing holdout set, and the anchor becomes decorative for whichever
-// namespace forgot to upload it.
+// NO MANIFEST IS A REFUSAL. Trusting the report's own total when no manifest exists
+// means a namespace with no holdout set scores exactly like one with a passing set,
+// and the anchor becomes decorative for whichever namespace forgot to upload it.
 export function checkHoldout(manifest: HoldoutManifest | null, report: ScoreReport): HoldoutVerdict {
   if (!manifest) {
     return {
@@ -352,11 +344,10 @@ export function checkHoldout(manifest: HoldoutManifest | null, report: ScoreRepo
       passRate: null,
     };
   }
-  // ZERO TESTS IS A REFUSAL, exactly like no manifest (audit 2026-09-06). An
-  // empty hidden suite scores 1.0 by arithmetic, so a namespace whose manifest
-  // says total: 0 would pass the one anchor the loop rests on without a single
-  // hidden test running. Uploading an empty manifest is indistinguishable from
-  // forgetting to write the suite, and both must stop scoring, not pass it.
+  // ZERO TESTS IS A REFUSAL, exactly like no manifest (audit 2026-09-06). An empty
+  // hidden suite scores 1.0 by arithmetic, so a manifest saying total: 0 would pass
+  // the one anchor the loop rests on with no hidden test running. An empty manifest is
+  // indistinguishable from forgetting to write the suite.
   if (manifest.total === 0) {
     return {
       ok: false,
@@ -445,12 +436,11 @@ export interface HoldoutCredential {
   expires_in: number;
 }
 
-// The ONE call to the temp-access-credentials API, shared by the holdout and
-// backup mints: object-read-only, one hour, one bucket, one prefix, derived from
-// the named parent token. Both parents' secrets never leave the dashboard; the
-// Worker holds only their ACCESS KEY IDS plus the API token that authorizes the
-// mint, and those live outside AttemptEnv, the same structural withholding as
-// the HOLDOUT binding itself: attempt code cannot mint its way to anything.
+// The ONE call to the temp-access-credentials API, shared by the holdout and backup
+// mints: object-read-only, one hour, one bucket, one prefix, derived from the named
+// parent token. Both parents' secrets never leave the dashboard; the Worker holds
+// only their ACCESS KEY IDS plus the API token that authorizes the mint, and those
+// live outside AttemptEnv, the same structural withholding as the HOLDOUT binding.
 async function mintScopedCredential(
   env: Env,
   scope: { bucket: string; prefix: string; parentAccessKeyId: string }

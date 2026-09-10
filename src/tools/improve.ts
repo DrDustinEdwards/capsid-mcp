@@ -9,12 +9,11 @@ import { DENIED, fail, ok, type ToolCtx } from "./docs";
 export function registerImproveTools(server: McpServer, ctx: ToolCtx): void {
   const { env, mayWrite } = ctx;
 
-  // THE IMPROVE LOOP'S TWO TOOLS, and they are a ruled exception to hard rule 1
-  // ("the surface is small and stays that way"), recorded in capsid/decisions.md
-  // alongside the history/restore exception of 2026-08-13. The subsystem is driven
-  // by cron; these exist because a cron-only subsystem is one nobody can inspect
-  // or start by hand, and the 2026-08-09 outage was 26 days undetected for exactly
-  // that shape of reason.
+  // THE IMPROVE LOOP'S TWO TOOLS, a ruled exception to hard rule 1 (the surface is
+  // small and stays that way), recorded in capsid/decisions.md alongside the
+  // history/restore exception of 2026-08-13. The subsystem is driven by cron, and a
+  // cron-only subsystem is one nobody can inspect or start by hand: the 2026-08-09
+  // outage went 26 days undetected for that shape of reason.
   server.registerTool(
     "improve_run",
     {

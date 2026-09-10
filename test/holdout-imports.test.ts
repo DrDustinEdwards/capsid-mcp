@@ -56,8 +56,8 @@ test("a multi-line import clause is one statement", () => {
 });
 
 test("nothing that is not an identifier can reach the comparison", () => {
-  // Belt and braces after the regex. A parse artefact compared against the
-  // manifest is a refusal nobody can act on.
+  // A second check after the regex. A parse artefact compared against the manifest is a
+  // refusal nobody can act on.
   for (const name of importedNames(REALISTIC)) {
     assert.match(name, /^[A-Za-z_$][A-Za-z0-9_$]*$/, `${JSON.stringify(name)} is not an identifier`);
   }

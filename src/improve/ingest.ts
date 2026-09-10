@@ -37,15 +37,13 @@ export async function ingestScore(env: Env, report: ScoreReport, now: Date): Pro
     return { ok: false, message: `report namespace '${report.namespace}' does not match run ${run.id} ('${run.namespace}')` };
   }
 
-  // THE THREE STOPS APPLY HERE TOO (audit 2026-09-07, Grok MAJOR 6, Opus section
-  // 5 budget note). Pause was checked in openOne, mode in openOne, budget in the
-  // opener and the tick. None of them was checked at ingest, so a score POST
-  // still kept the change, wrote improve:best, abstracted a skill and advanced
-  // the run in a namespace a human had explicitly paused, or after the mode was
-  // switched off, or past the spend cap. A stop that only stops new work is not
-  // a stop: the in-flight attempt is the one someone paused the namespace to
-  // stop. Ingest is the last gate an attempt passes, so it is the one that has to
-  // hold.
+  // THE THREE STOPS APPLY HERE TOO (audit 2026-09-07, Grok MAJOR 6, Opus section 5
+  // budget note). Pause and mode were checked in openOne, budget in the opener and the
+  // tick. None was checked at ingest, so a score POST still kept the change, wrote
+  // improve:best, abstracted a skill and advanced the run in a paused namespace, after
+  // the mode was switched off, or past the spend cap. A stop that only stops new work
+  // is not a stop: the in-flight attempt is the one someone paused the namespace to
+  // stop.
   const paused = await pausedReason(env.APP_KV, run.namespace);
   if (paused) {
     return { ok: false, message: `${run.namespace} is paused (${paused}); this score is not ingested and the attempt is not kept. Delete the pause key to resume.` };
@@ -68,17 +66,16 @@ export async function ingestScore(env: Env, report: ScoreReport, now: Date): Pro
   const isBaseline = report.attempt_id === baselineId(run.id);
 
   if (isBaseline) {
-    // BIND THE BASELINE LIKE AN ATTEMPT (audit 2026-09-07, Grok MAJOR 5). Until
-    // now the baseline branch only had to name `<run>-baseline` and win the CAS.
-    // It was not checked against the run's in-flight attempt or against the
-    // commit it claimed to measure, so a rerun of the baseline Actions job after
-    // the run had moved on, or a hand dispatch naming that attempt_id with a
-    // chosen branch, would overwrite the run's baseline metrics with a
-    // measurement of something else. Every later comparison is against those
-    // numbers, so this is the one row that silently changes every verdict.
+    // BIND THE BASELINE LIKE AN ATTEMPT (audit 2026-09-07, Grok MAJOR 5). The baseline
+    // branch only had to name `<run>-baseline` and win the CAS. It was not checked
+    // against the run's in-flight attempt or the commit it claimed to measure, so a
+    // rerun of the baseline Actions job after the run moved on, or a hand dispatch
+    // naming that attempt_id with a chosen branch, would overwrite the run's baseline
+    // metrics with a measurement of something else. Every later comparison is against
+    // those numbers.
     //
-    // The baseline branch is created at base_sha and nothing is committed to it,
-    // so its head IS base_sha. That is what the report must carry.
+    // The baseline branch is created at base_sha and nothing is committed to it, so
+    // its head IS base_sha. That is what the report must carry.
     if (run.current_attempt !== report.attempt_id) {
       return {
         ok: true,
@@ -99,11 +96,10 @@ export async function ingestScore(env: Env, report: ScoreReport, now: Date): Pro
     ]);
     const verdict = anchorVerdict((await loadScores(env, run.namespace)).doc.anchors, anchors);
     if (!verdict.passed) {
-      // The BASE does not pass its own anchors. Nothing the loop does tonight can
-      // be judged, and the honest response is to stop and say so rather than to
-      // measure ten attempts against a broken floor.
-      // Checked (audit 2026-09-06): a lost judging CAS means a tick's stale
-      // guard reclaimed the run mid-ingest, and pretending the stop landed would
+      // The BASE does not pass its own anchors. Nothing the loop does tonight can be
+      // judged, so it stops and says so rather than measuring ten attempts against a
+      // broken floor. Checked (audit 2026-09-06): a lost judging CAS means a tick's
+      // stale guard reclaimed the run mid-ingest, and pretending the stop landed would
       // report a state the row does not hold.
       const stopped = await advanceRun(env.DB, {
         runId: run.id,
@@ -128,17 +124,15 @@ export async function ingestScore(env: Env, report: ScoreReport, now: Date): Pro
   const attempt = await attemptById(env.DB, report.attempt_id);
   if (!attempt) return { ok: false, message: `unknown attempt ${report.attempt_id}` };
 
-  // BIND THE REPORT TO THE RUN'S IN-FLIGHT ATTEMPT (audit 2026-09-06). Before this,
-  // ingest looked the attempt up by id alone and moved on: a signed report minted by
-  // ci_dispatch of the scorer against an arbitrary ref, or a captured report
-  // replayed, could score a DIFFERENT attempt (or the same run's stale attempt, or
-  // the attempt's code at a different commit) than the one the run is waiting on.
-  // Three checks close that:
+  // BIND THE REPORT TO THE RUN'S IN-FLIGHT ATTEMPT (audit 2026-09-06). Ingest used to
+  // look the attempt up by id alone, so a signed report minted by ci_dispatch of the
+  // scorer against an arbitrary ref, or a captured report replayed, could score a
+  // DIFFERENT attempt, the same run's stale attempt, or the attempt's code at a
+  // different commit. Three checks close that:
   //   1. the attempt belongs to this run,
-  //   2. the run is still awaiting a score for THIS attempt (else it is a
-  //      duplicate, a replay, or a report for an attempt already decided), and
-  //   3. the report scored the commit the attempt actually pushed, not some other
-  //      ref (this is the ci_dispatch-against-master defeat).
+  //   2. the run is still awaiting a score for THIS attempt (else it is a duplicate, a
+  //      replay, or a report for an attempt already decided), and
+  //   3. the report scored the commit the attempt pushed, not some other ref.
   if (attempt.run_id !== run.id) {
     return { ok: false, message: `attempt ${attempt.id} belongs to run ${attempt.run_id}, not ${run.id}` };
   }
@@ -164,8 +158,8 @@ export async function ingestScore(env: Env, report: ScoreReport, now: Date): Pro
   const anchorsVerdict = anchorVerdict(doc.anchors, anchors);
 
   // THE MONITOR RUNS BEFORE THE SCORE IS BELIEVED, and its verdict outranks it. A
-  // flagged attempt is reverted regardless of how well it scored, which is the
-  // whole point: a change that games the scorer scores WELL.
+  // flagged attempt is reverted regardless of how well it scored: a change that games
+  // the scorer scores WELL.
   const change = (await readDoc(env.DB, run.namespace, attempt.diff_ref ?? "")) ?? "";
   const monitor = await monitorAttempt(env, {
     changedPaths: changedPathsFrom(change),
@@ -193,9 +187,9 @@ export async function ingestScore(env: Env, report: ScoreReport, now: Date): Pro
     env.DB
       .prepare(
         // STATUS-KEYED with RETURNING (audit 2026-09-06). The run-level judging CAS
-        // above already serialises ingest, but keying the attempt write on its own
+        // above already serialises ingest, and keying the attempt write on its own
         // awaiting-score status makes a late or duplicated write unable to flip an
-        // attempt that a timeout already marked timed-out, or score one twice.
+        // attempt a timeout already marked timed-out, or score one twice.
         `UPDATE improve_attempts
          SET status = ?2, kept = ?3, reason = ?4, score_before = ?5, score_after = ?6,
              flagged = ?7, flag_reason = ?8, anchors_json = ?9, secondary_json = ?10

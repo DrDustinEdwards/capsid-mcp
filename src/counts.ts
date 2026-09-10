@@ -28,13 +28,11 @@ const YEAR = /^(?:19|20)\d{2}$/;
 // Standing-claim types only. Episodics and decisions are history.
 const LINTED_TYPES = new Set(["core", "concept", "semantic", "procedural", "spec", "reference", "protocol"]);
 
-// The numbered decision volumes are history too, and the exemption is by PATH as
-// well as by type because the type is the part a hand write can get wrong. The
-// 2026-09-09 split moved everything before 2026-08-10 out of decisions.md into
-// decisions-vol-1..3; each volume quotes tool counts and gate counts as they
-// stood on the day of the ruling, which is the point of a closed volume and
-// exactly what a count claim would flag. A volume mistyped as `reference` would
-// otherwise report every historical number as stale.
+// The numbered decision volumes are history too. The exemption is by PATH as well
+// as by type, because the type is the part a hand write gets wrong. The 2026-09-09
+// split moved everything before 2026-08-10 into decisions-vol-1..3; each volume
+// quotes tool and gate counts as they stood on the day of the ruling, so a volume
+// mistyped as `reference` would report every historical number as stale.
 const DECISION_VOLUME = /^decisions-vol-\d+\.md$/;
 
 export interface CountClaim {

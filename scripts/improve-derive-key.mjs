@@ -1,40 +1,36 @@
 #!/usr/bin/env node
 // Derive the per-namespace score-report key for one repo's IMPROVE_SCORE_KEY secret.
 //
-// WHY THIS EXISTS. The Worker holds ONE secret, IMPROVE_SCORE_SECRET, and derives a
-// separate key per namespace from it. Each roster repo holds only its own derived
-// key. So a key leaking out of one repo's Actions log authorises score reports for
-// that namespace and no other, and rotating one namespace does not touch the rest.
-// The alternative, one shared secret in five repos, makes the blast radius of any
-// one repo the whole system.
+// The Worker holds ONE secret, IMPROVE_SCORE_SECRET, and derives a separate key per
+// namespace from it. Each roster repo holds only its own derived key, so a key leaking
+// out of one repo's Actions log authorises score reports for that namespace and no
+// other, and rotating one namespace does not touch the rest.
 //
-// The derivation has to be reproducible outside the Worker to set those secrets up,
-// and this is that. It is the same computation src/improve-scorer.ts performs:
-// HMAC-SHA256(root, "capsid-improve-score:v1:<namespace>").
+// The derivation has to be reproducible outside the Worker to set those secrets up. It
+// is the same computation src/improve-scorer.ts performs: HMAC-SHA256(root,
+// "capsid-improve-score:v1:<namespace>").
 //
-// USAGE. The root secret comes from the environment, never from an argument: an
-// argument lands in the shell history and in the process list.
+// USAGE. The root secret comes from the environment, never from an argument: an argument
+// lands in the shell history and in the process list.
 //
 //   IMPROVE_SCORE_SECRET=... node scripts/improve-derive-key.mjs foxing
 //
-// Then set the printed value as the repo secret IMPROVE_SCORE_KEY on that repo, and
-// set the repo VARIABLE IMPROVE_NAMESPACE to the namespace name. Both are read by
+// Then set the printed value as the repo secret IMPROVE_SCORE_KEY on that repo, and set
+// the repo VARIABLE IMPROVE_NAMESPACE to the namespace name. Both are read by
 // .github/workflows/improve-score.yml.
 //
-// WHAT IT PRINTS. The derived key and nothing else, so it can be piped:
+// It prints the derived key and nothing else, so it can be piped:
 //
 //   IMPROVE_SCORE_SECRET=... node scripts/improve-derive-key.mjs foxing \
 //     | gh secret set IMPROVE_SCORE_KEY --repo DrDustinEdwards/foxing
 //
-// It never prints the root secret. Everything explanatory goes to stderr so stdout
-// stays a single value.
+// It never prints the root secret. Everything explanatory goes to stderr.
 
 import { createHmac } from "node:crypto";
 
-// The roster, restated here rather than imported: this script is a plain .mjs with
-// no build step and src/improve-schema.ts is TypeScript. The list is short and the
-// check is a courtesy, so a typo in a namespace name is caught before a secret is
-// set on the wrong repo rather than at 03:00 when a report fails to verify.
+// The roster, restated here rather than imported: this script is a plain .mjs with no
+// build step and src/improve-schema.ts is TypeScript. The check catches a typo in a
+// namespace name before a secret is set on the wrong repo.
 const ROSTER = ["capsid", "dustinedwards", "foxhound", "foxing", "germomics"];
 
 const namespace = process.argv[2];

@@ -1,80 +1,65 @@
 name: CI
 
-# capsid had no .github/workflows at all until 2026-08-11. That is batch-two
-# item 1, and it matters more here than in a leaf project: capsid is the
-# dependency of every other repo in the portfolio.
+# THE TESTED ARTIFACT IS NOT THE SHIPPED ARTIFACT. checks and deploy run on separate
+# runners and each does its own npm ci, so what ships is a REBUILD of the tested
+# commit, not the bytes that passed. Closing this means uploading the build from checks
+# and downloading it in deploy. foxhound's ci.yml records the same gap.
 #
-# Be honest about what this buys. Offline checks would NOT have caught the
-# outage that motivated the whole audit: a "form-action 'self'" CSP landed in
-# 423bbd6, type-checked perfectly, passed every unit test, and broke the OAuth
-# consent flow for 26 days. tsc and node --test never touch a live surface.
-# Only scripts/verify-live.mjs catches that class, and it already existed.
-# Nothing invoked it, so it was not yet a gate. What this workflow adds is that
-# the live gate runs at all, on every push and every six hours.
+# Two mitigations stand: the runner checks out clean, so BUILD_DIRTY=false means
+# something, and the live job asserts /health reports this exact commit before the run
+# goes green.
 #
-# THE TESTED ARTIFACT IS NOT THE SHIPPED ARTIFACT. Accepted, and recorded rather
-# than glossed. checks and deploy run on separate runners and each does its own
-# npm ci, so what ships is a REBUILD of the tested commit, not the bytes that
-# passed. This is the same gap foxhound's ci.yml records; closing it means
-# uploading the build from checks and downloading it in deploy.
-#
-# It is materially better than session 2, where the deploy happened on Dustin's
-# machine from a working tree CI never saw. Two mitigations now stand: the runner
-# checks out clean, so BUILD_DIRTY=false actually means something here, and the
-# live job asserts /health reports this exact commit before the run goes green.
+# Offline checks do not catch the class of outage that motivated the audit: a
+# "form-action 'self'" CSP landed in 423bbd6, type-checked, passed every unit test, and
+# broke the OAuth consent flow for 26 days. Only scripts/verify-live.mjs catches that,
+# and it already existed with nothing invoking it.
 
 on:
   push:
     branches: [master]
   pull_request:
     branches: [master]
-  # Every six hours. The outage ran 26 days; a six hour ceiling on
-  # time-to-detect is the point of the schedule, not the offline checks.
+  # Every six hours. The outage ran 26 days; a six hour ceiling on time-to-detect is
+  # the point of the schedule, not the offline checks.
   schedule:
     - cron: "17 */6 * * *"
   workflow_dispatch:
 
-# Least privilege for GITHUB_TOKEN. Absent, the token's scopes come from the
-# repository default, which for this account is read and WRITE on contents. No job
-# here pushes, comments, or touches the API at all: checks runs tsc and node --test,
-# deploy talks to Cloudflare with its own secrets, and the live gate talks to a URL.
-# Declaring it here means the token cannot be used for more than the checkout even
-# if a step, or something a step installs, tries.
+# Least privilege for GITHUB_TOKEN. Absent, the token's scopes come from the repository
+# default, which for this account is read and WRITE on contents. No job here pushes,
+# comments, or touches the API: checks runs tsc and node --test, deploy talks to
+# Cloudflare with its own secrets, and the live gate talks to a URL.
 permissions:
   contents: read
 
-# Rapid pushes supersede each other: a newer run on the same ref cancels the
-# older one, so two push deploys cannot interleave and a stale commit cannot
-# deploy after a newer one. Keyed on the event name too, because the six-hourly
-# schedule run shares refs/heads/master with push runs and must never cancel a
-# deploy mid-flight (nor be cancelled by one; its whole job is time-to-detect).
+# Rapid pushes supersede each other: a newer run on the same ref cancels the older one,
+# so two push deploys cannot interleave. Keyed on the event name too, because the
+# six-hourly schedule run shares refs/heads/master with push runs and must never cancel
+# a deploy mid-flight, nor be cancelled by one.
 concurrency:
   group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
-# THIRD PARTY ACTIONS ARE PINNED BY COMMIT SHA, not by tag. A tag is a moving
-# pointer that the tag's owner can repoint at any time, and these actions run with
-# the checkout of this repository and the environment of the deploy job next to
-# them. `@v5` means "whatever v5 means the next time this workflow runs"; a sha
-# means one immutable tree. Dependabot understands the `# v5.x.x` comment form and
-# will still offer bumps.
+# THIRD PARTY ACTIONS ARE PINNED BY COMMIT SHA, not by tag. A tag is a moving pointer
+# its owner can repoint, and these actions run with this repository's checkout and the
+# deploy job's environment beside them. Dependabot understands the `# v5.x.x` comment
+# form and still offers bumps.
 #
-# The shas below are what actions/checkout@v5 and actions/setup-node@v5 resolved to
-# on 2026-08-13, read with `gh api repos/<action>/git/ref/tags/v5`. Both actions now
-# have a v7; this change pins the version already in use and deliberately does not
-# ride a major bump in on the back of a security fix.
+# The shas below are what actions/checkout@v5 and actions/setup-node@v5 resolved to on
+# 2026-08-13, read with `gh api repos/<action>/git/ref/tags/v5`. Both actions now have a
+# v7; this pins the version already in use rather than riding a major bump in on the
+# back of a security fix.
 #
-# Nothing here sets continue-on-error, and nothing should. A step that fails fails
-# its job, and the live job does not run unless checks passed.
+# Nothing here sets continue-on-error, and nothing should.
 jobs:
   checks:
     name: checks
     runs-on: ubuntu-latest
-    # TIMEOUTS ON EVERY JOB (residual 6). Without one a job inherits GitHub's
-    # 360-minute default, so a hung test or a wedged wrangler call burns six hours
-    # of the Actions budget the improve loop's kill switch is metered against, and
-    # holds the concurrency group against every later push. Each number is roughly
-    # four times the job's observed run, so a slow runner never trips it.
+    # TIMEOUTS ON EVERY JOB (residual 6). Without one a job inherits GitHub's 360-minute
+    # default, so a hung test or a wedged wrangler call burns six hours of the Actions
+    # budget the improve loop's kill switch is metered against, and holds the
+    # concurrency group against every later push. Each number is roughly four times the
+    # job's observed run.
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -84,66 +69,57 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
 
-      # Verified on a fresh clone 2026-08-11 before this workflow was written:
-      # npm ci, npm run check and npm test all succeed with no wrangler.jsonc
-      # present, because tsconfig pulls its types from @cloudflare/workers-types
-      # in node_modules rather than from generated bindings. That is why the
-      # checks job needs no config and no secrets.
+      # Verified on a fresh clone 2026-08-11: npm ci, npm run check and npm test all
+      # succeed with no wrangler.jsonc present, because tsconfig pulls its types from
+      # @cloudflare/workers-types rather than from generated bindings. That is why this
+      # job needs no config and no secrets.
       - name: Install dependencies
         run: npm ci
 
-      # tsc --noEmit is the safe form here: a conventional single-project config
-      # with an explicit include of ["src"]. See capsid/conventions.md on why
-      # `tsc -b` is required elsewhere in the portfolio.
-      #
-      # This step covers src only. The test suite has its own step below; the gap
-      # this comment used to record as unfixed was closed on 2026-08-17.
+      # tsc --noEmit is the safe form here: a conventional single-project config with an
+      # explicit include of ["src"]. See capsid/conventions.md on why `tsc -b` is
+      # required elsewhere in the portfolio. This step covers src only.
       - name: Typecheck
         run: npm run check
 
-      # The test suite is type-checked too, under its own config (quality audit
-      # 10.2). tsconfig.json includes only src, so until 2026-08-17 the files that
-      # guard every other invariant were never seen by tsc: node's type stripping
-      # erases types without checking them, so a test could stop compiling and
-      # still report green. Two configs rather than one widened include, because
-      # only this one carries node types and the shipping config must keep
-      # rejecting a node API in src/.
+      # The test suite is type-checked under its own config (quality audit 10.2).
+      # tsconfig.json includes only src, so until 2026-08-17 the files guarding every
+      # other invariant were never seen by tsc: node's type stripping erases types
+      # without checking them, so a test could stop compiling and still report green.
+      # Two configs rather than one widened include, because only this one carries node
+      # types and the shipping config must keep rejecting a node API in src/.
       - name: Typecheck tests
         run: npm run check:test
 
-      # The integration suite has its own config too, because it needs the
-      # workers-types experimental surface and the pool's `cloudflare:test`
-      # ambient module, and the shipping config must keep rejecting both in src/.
+      # The integration suite has its own config: it needs the workers-types experimental
+      # surface and the pool's `cloudflare:test` ambient module, and the shipping config
+      # must keep rejecting both in src/.
       - name: Typecheck integration tests
         run: npm run check:integration
 
-      # scripts/improve-report.mjs is copied BYTE-IDENTICAL into four other repos,
-      # and they do not all gate it the same way. On 2026-09-07 this repo shipped
-      # ten type errors in it that only dustinedwards-info's stricter gate could
-      # see. A guard scoped to one repo is a guess about where the next bug will be
-      # written; this is the guard, in the repo the file is authored in.
+      # scripts/improve-report.mjs is copied BYTE-IDENTICAL into four other repos, which
+      # do not all gate it the same way. On 2026-09-07 this repo shipped ten type errors
+      # in it that only dustinedwards-info's stricter gate could see. This is the guard,
+      # in the repo the file is authored in.
       - name: Typecheck the copied scorer script
         run: npm run check:scripts
 
       - name: Tests
         run: npm test
 
-      # THE INTEGRATION LAYER (audit 2026-09-07). The whole Worker inside workerd,
-      # with a real D1 the migrations are applied to, real KV and real R2. It is a
-      # SEPARATE step rather than folded into `npm test` because the two suites
-      # fail differently and a reader of a red run needs to know which one went:
-      # a unit failure is a handler issuing the wrong statement, an integration
-      # failure is SQLite, the OAuth provider or the runtime refusing it.
+      # THE INTEGRATION LAYER (audit 2026-09-07). The whole Worker inside workerd, with a
+      # real D1 the migrations are applied to, real KV and real R2. A SEPARATE step
+      # rather than part of `npm test` because the two suites fail differently: a unit
+      # failure is a handler issuing the wrong statement, an integration failure is
+      # SQLite, the OAuth provider or the runtime refusing it.
       - name: Integration tests
         run: npm run test:integration
 
-  # Ordered after checks, exactly the foxhound shape that has proved itself
-  # twice: a failing typecheck or test never reaches production. No
-  # continue-on-error, and deliberately no `if: secrets.X != ''` guard. A job
-  # that skips when its credentials are missing makes "deployed" and "could not
-  # deploy" indistinguishable, which is the fail-open shape
-  # capsid/conventions.md rules against. If the secrets are absent this job
-  # fails loudly, which is the correct signal.
+  # Ordered after checks: a failing typecheck or test never reaches production. No
+  # continue-on-error, and deliberately no `if: secrets.X != ''` guard. A job that skips
+  # when its credentials are missing makes "deployed" and "could not deploy"
+  # indistinguishable, which is the fail-open shape capsid/conventions.md rules against.
+  # If the secrets are absent this job fails loudly.
   deploy:
     name: deploy
     needs: checks
@@ -162,10 +138,10 @@ jobs:
         run: npm ci
 
       # wrangler.jsonc is gitignored, so a runner has no deployable config.
-      # scripts/ci-config.mjs rebuilds it: every binding is resolved by NAME
-      # against the account, then checked against an id pinned in the script,
-      # and any disagreement is a hard failure. Resolving by name alone is the
-      # trap that would silently rebind this Worker to the wrong database.
+      # scripts/ci-config.mjs rebuilds it: every binding is resolved by NAME against the
+      # account, then checked against an id pinned in the script, and any disagreement is
+      # a hard failure. Resolving by name alone would silently rebind this Worker to the
+      # wrong database.
       - name: Reconstruct wrangler.jsonc
         run: node scripts/ci-config.mjs
         env:
@@ -173,12 +149,11 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
       # Refuse to ship code against a database missing a migration. Migrations are
-      # applied by hand (README), so a commit that adds migrations/000N and pushes
-      # would otherwise deploy a Worker whose SQL assumes a table the live D1 does
-      # not have. wrangler prints "No migrations to apply!" when the remote is
-      # current and lists the pending ones otherwise; its exit code is 0 either
-      # way, so the confirmation string is the signal. Fails closed: an unreadable
-      # or unexpected output is a missing confirmation and stops the deploy.
+      # applied by hand (README), so a commit that adds migrations/000N and pushes would
+      # otherwise deploy a Worker whose SQL assumes a table the live D1 lacks. wrangler
+      # prints "No migrations to apply!" when the remote is current and exits 0 either
+      # way, so the confirmation string is the signal. Fails closed: an unreadable or
+      # unexpected output is a missing confirmation and stops the deploy.
       - name: Assert all migrations are applied
         run: |
           set -euo pipefail
@@ -203,13 +178,13 @@ jobs:
     needs: [checks, deploy]
     # Above the poll budget (40 x 3s per polling gate) with room for every gate.
     timeout-minutes: 15
-    # Never on pull_request. A PR head sha is not deployed and never will be, so
-    # asserting anything about production from one is meaningless.
+    # Never on pull_request. A PR head sha is not deployed, so asserting anything about
+    # production from one is meaningless.
     #
-    # !failure() && !cancelled() rather than always(): on a schedule run the
-    # deploy job is SKIPPED, and a plain `needs: deploy` would skip this job too,
-    # silently retiring the six-hourly check that exists to cap time-to-detect.
-    # This form runs when a dependency was skipped but not when one failed.
+    # !failure() && !cancelled() rather than always(): on a schedule run the deploy job
+    # is SKIPPED, and a plain `needs: deploy` would skip this job too, retiring the
+    # six-hourly check. This form runs when a dependency was skipped but not when one
+    # failed.
     if: github.event_name != 'pull_request' && !failure() && !cancelled()
     runs-on: ubuntu-latest
     steps:
@@ -219,32 +194,27 @@ jobs:
         with:
           node-version-file: .nvmrc
 
-      # No npm ci on purpose: scripts/verify-live.mjs imports nothing outside the
-      # Node standard library and runs on global fetch, so it needs no node_modules.
-      # Keeping it dependency-free is what lets the live gate run even if install is
-      # broken.
+      # No npm ci on purpose: scripts/verify-live.mjs imports nothing outside the Node
+      # standard library and runs on global fetch. Keeping it dependency-free is what
+      # lets the live gate run even if install is broken.
 
-      # EXPECT_SHA is this run's commit when deploy succeeded, and master head on
-      # a schedule run (the six-hourly run asserts live sha equals master). Empty
-      # otherwise: the ternary below is the behaviour.
+      # EXPECT_SHA is this run's commit when deploy succeeded, and master head on a
+      # schedule run. Empty otherwise: the ternary below is the behaviour.
       - name: verify:live
         env:
           EXPECT_SHA: ${{ (needs.deploy.result == 'success' || github.event_name == 'schedule') && github.sha || '' }}
           VERIFY_POLL_ATTEMPTS: "40"
           PROBE_CLIENT_FILE: ${{ runner.temp }}/probe-client-id
-          # GATE 1c ASSERTS BACKUP FRESHNESS ON THE SCHEDULED RUN ONLY (residual
-          # 7). /health has reported backup.last_ok since 2026-09-07 and nothing
-          # read it. A push runs minutes after a deploy and says nothing about
-          # last night's backup, so asserting there would attach noise to the
-          # wrong event; the six-hourly schedule is the run whose whole purpose is
-          # time-to-detect, and it bounds this at six hours. Off, the gate reports
+          # GATE 1c ASSERTS BACKUP FRESHNESS ON THE SCHEDULED RUN ONLY (residual 7).
+          # /health has reported backup.last_ok since 2026-09-07 and nothing read it. A
+          # push runs minutes after a deploy and says nothing about last night's backup;
+          # the six-hourly schedule bounds this at six hours. Off, the gate reports
           # SKIPPED and says what it did not assert.
           ASSERT_BACKUP_FRESH: ${{ github.event_name == 'schedule' && '1' || '0' }}
-          # Gate 2b READS one long-lived canary record straight out of OAUTH_KV.
-          # It reads KV rather than asking the Worker because a missing client and
-          # a KV outage are the same error page through /authorize, and the whole
-          # value of the canary is telling those two apart. Without these the gate
-          # SKIPS and says so; it never passes quietly.
+          # Gate 2b READS one long-lived canary record straight out of OAUTH_KV. It reads
+          # KV rather than asking the Worker because a missing client and a KV outage are
+          # the same error page through /authorize. Without these the gate SKIPS and says
+          # so; it never passes quietly.
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: npm run verify:live
@@ -271,22 +241,19 @@ jobs:
           echo "::error::rolled back: was ${ROLLBACK_FROM} (this run's commit ${GITHUB_SHA}), now ${ROLLBACK_TO}. master still points at the bad commit; land a fix or revert it."
           echo "rollback_from=${ROLLBACK_FROM} rollback_to=${ROLLBACK_TO}" >> "$GITHUB_STEP_SUMMARY"
 
-      # Gate 2 registers a fresh client every run, and it must: reusing one would
-      # take the approved-client fast path that hid the 26-day outage, and the run
-      # would prove nothing. So the registration is cleaned up here instead, AFTER
-      # the gate has finished with its client.
+      # Gate 2 registers a fresh client every run, and it must: reusing one would take
+      # the approved-client fast path that hid the 26-day outage. The registration is
+      # cleaned up here instead, AFTER the gate has finished with its client.
       #
-      # It deletes ONE key: the id gate 2 recorded in PROBE_CLIENT_FILE. It does not
-      # list the namespace and does not match on client names, which is what it used
-      # to do (see the header of the script for why that was wrong).
+      # It deletes ONE key: the id gate 2 recorded in PROBE_CLIENT_FILE. It does not list
+      # the namespace and does not match on client names; see the script's header.
       #
       # Runs even when verify:live failed (always()), because a failed gate still
-      # registered a client and leaving it behind would make the leak worse on
-      # exactly the runs that get retried. It does not mask a failure: this step
-      # cannot turn the job green, and its own failure still fails the job.
+      # registered a client. It cannot turn the job green, and its own failure still
+      # fails the job.
       #
-      # No npm ci needed here either; the script uses global fetch against the KV
-      # REST API precisely so this job stays install-free.
+      # No npm ci needed here either; the script uses global fetch against the KV REST
+      # API so this job stays install-free.
       - name: Reap this run's probe client registration
         if: always()
         env:
