@@ -1,11 +1,6 @@
 # Capsid
 
-Capsid is a single-user, Cloudflare-native MCP server that serves a consolidated knowledge base from D1 and R2, and reaches your GitHub repositories directly. It speaks MCP over Streamable HTTP and exposes a small, purposeful tool set (30 tools):
-
-- **Documents:** list, read, write, delete, move, find, search (FTS5, with a plain-text fallback when a query is not valid FTS5 syntax), namespaces, backlinks (typed edges), brief (one-call session start), history and restore (read a retained version back, and write one back through a guarded path)
-- **Repo access:** list_repo_tree, read_repo_file (one path or a batch of up to 20), search_code, repo_refs (branches, tags and open PRs in one call), repo_history (commits, a comparison, or one commit), write_repo_file, create_branch, delete_branch, open_pr, delete_repo_file, manage_pr, ci_status (CI runs, and the failing step's log), ci_dispatch (start a workflow or rerun failed jobs)
-- **Maintenance:** lint (the consolidation loop), register_namespace (create), update_namespace (remap)
-- **Self-improvement:** improve_run (start or resume a run by hand), improve_status (the loop's mode, budget and per-namespace state). See Self-improvement loop below
+Capsid is a single-user, Cloudflare-native MCP server that serves a consolidated knowledge base from D1 and R2, and reaches your GitHub repositories directly. It speaks MCP over Streamable HTTP and exposes 30 tools in four groups: documents, repo access, maintenance, and self-improvement.
 
 The `namespaces` tool reports each namespace's count of unconsolidated episodic/source docs, so any session can see where a lint run is due.
 
@@ -46,15 +41,6 @@ A namespace can map to more than one repo, each with a label (for example a rebu
 
 - **Read** (open to admitted clients): `list_repo_tree`, `read_repo_file`, `search_code`, `repo_refs`, `repo_history`, `ci_status`
 - **Write** (operator-gated): `write_repo_file`, `create_branch`, `delete_branch`, `open_pr`, `delete_repo_file`, `manage_pr`, `ci_dispatch`. `write_repo_file` defaults to `mode: "pr"` (commit to a new branch and open a pull request); `mode: "direct"` commits straight to the default branch. `manage_pr` merges (squash by default) or closes a pull request.
-
-Every tool's description states what it refuses. The two destructive or spending ones are worth stating here as well:
-
-- `delete_branch` refuses the repo's default branch **always**, and `force: true` does not lift that. It also refuses a branch under the improve loop's branch prefix, and a branch with an open pull request; `force: true` lifts those two. A branch that does not exist is a refusal, not a silent no-op.
-- `ci_dispatch` refuses a workflow with no `workflow_dispatch` trigger, naming that as the reason. It polls for up to 30 seconds for the run it started and returns that run's id, or `run_id: null` with a note, because the dispatch endpoint answers `204` with no body and names nothing.
-
-`read_repo_file` takes either `path` for one file or `paths` for up to 20. In the batch form each file succeeds or fails independently, so one moved path returns its own error beside the others instead of failing the call, and each file is capped at 200KB with `truncated: true` when it is cut.
-
-`ci_status` narrows with `ref` (a branch or a head sha, distinguished by shape) or `run_id`. For a failed run, a write-grant key gets the **failing step's** log, up to 64KB from its end, with `log_region` naming which region was returned; a read-only key gets metadata and a note that the log was withheld. That replaced a 2000-character tail of the whole job, which on these repos reliably returned post-run `git config` cleanup rather than the failure.
 
 `search_code` is a server-side tree walk (recursive Git Trees listing, then bounded content scans), not GitHub's code search API, because that API returns empty results for private repositories under a GitHub App installation token. Use `path_prefix` to narrow large repos.
 
@@ -100,8 +86,6 @@ Login and repo access use two different GitHub credentials: a GitHub **OAuth App
 
 `delete`, `move`, `restore`, `lint` finalize, and any `write` that would overwrite an existing document, all ask for confirmation first. When the connected client supports [MCP elicitation](https://modelcontextprotocol.io/specification/draft/client/elicitation), the server sends an elicitation request and proceeds only on an explicit accept. Most Streamable HTTP clients run stateless and cannot answer server-initiated requests, so the fallback applies: the tool rejects with a clear message and you re-run it with `confirm: true`. Creating a brand new document never needs confirmation.
 
-`move` and `lint` finalize joined this list on 2026-08-17. Both rename documents (finalize renames many at once) and neither leaves a snapshot of the old path to recover from, only an audit row, so they are the destructive-class operations with the least undo, not the most.
-
 Deletes are never unrecoverable at the data layer: every delete (and every overwrite) snapshots the prior row into `document_versions` first, so recovery exists regardless of how the confirmation went.
 
 ## Backups
@@ -110,7 +94,7 @@ D1 Time Travel already provides 30-day point-in-time recovery, so backups here a
 
 A daily Cron Trigger (09:00 UTC) exports the whole database to the `MEDIA` R2 bucket:
 
-- `backups/json/<timestamp>/<table>.json` one JSON dump per table, nine per run (documents, namespaces, document_versions, audit_log, document_links, and the four improve-loop tables). Retention treats the run, not the object: a run is kept for 90 days, the 14 most recent runs are always kept whatever their age, and a run that ages out is deleted whole.
+- `backups/json/<timestamp>/<table>.json` one JSON dump per table, ten per run (`TABLES` in `src/backup.ts`: documents, namespaces, document_versions, audit_log, document_links, the four improve-loop tables, and improve_jti). Retention treats the run, not the object: a run is kept for 90 days, the 14 most recent runs are always kept whatever their age, and a run that ages out is deleted whole.
 - `backups/markdown/<namespace>/<path>` a plain-markdown mirror of every document body, verbatim, one file per document. This mirror tracks the current state (files for deleted documents are pruned), so the knowledge base stays readable and portable with no Capsid dependency.
 
 After each export the history tables are pruned in D1: `document_versions` rows older than 90 days and `audit_log` rows older than 180 days. Pruning runs after the export, so every pruned row exists in at least one retained JSON dump.
@@ -179,7 +163,7 @@ npx wrangler rollback [<version-id>]
    npx wrangler r2 bucket create capsid-improve-holdout   # only if you run the self-improvement loop
    ```
 
-3. Copy the config template and fill in your IDs from step 2. **`APP_KV` and `OAUTH_KV` must be two different KV namespaces.** They were one for a while here, on the reasoning that the OAuth library prefixes its keys, and that is exactly why it is worth stating: sharing one namespace puts the Worker's own cache entries and every OAuth client, grant and token in a single blast radius, so any sweep, reaper or bulk delete written against one set can reach the other. Nothing in the code enforces the split, so the config is the only place it exists:
+3. Copy the config template and fill in your IDs from step 2. **`APP_KV` and `OAUTH_KV` must be different namespace ids.**
 
    ```
    cp wrangler.jsonc.example wrangler.jsonc
@@ -249,16 +233,6 @@ npx wrangler rollback [<version-id>]
    Set transport to Streamable HTTP, URL to `https://capsid.<your-subdomain>.workers.dev/mcp`, open the Auth tab, and run Quick OAuth Flow.
 
 Note: MCP clients cache the tool list at connect time. After deploying new tools, reconnect the connector or start a new chat to see them.
-
-## Roadmap
-
-- Phase 1 (done): single operator token on `/ops/mcp`, bearer key checked against `OPERATOR_KEY_HASH`.
-- Phase 2 (done): GitHub OAuth via workers-oauth-provider on `/mcp`, locked to a single admin account.
-- Phase 3 (partial): multiple operator keys with a read-only tier, individually revocable by editing the secret. Still deferred: per-client issued tokens with names and per-key audit, and an autonomous, scheduled lint run once agents exist to drive it.
-- Phase 4 (done, 2026-07): multi-repo namespaces with a repo selector on every repo tool; update_namespace; delete_repo_file; manage_pr (merge/close); search_code reimplemented as a tree walk.
-- Phase 5 (done, 2026-07): typed document links (`document_links`) with a `backlinks` query; `brief` for one-call session start; `ci_status` for CI visibility via the GitHub App; truth lints documented as lint-loop steps (cross-doc contradiction, doc-vs-artifact binding, and doc-vs-live-Cloudflare infra binding via the Cloudflare MCP tools, since the Worker holds no Cloudflare API token).
-- Phase 6 (done, 2026-09): the self-improvement loop (`improve_run`, `improve_status`), off by default, scored through each repo's `improve-score.yml` with hidden holdout suites in a separate R2 bucket, keep/revert with human-gated pull requests, monthly budget caps and per-namespace pause keys; plus an off-account backup mirror (`capsid-backups`) and a weekly restore rehearsal (`restore-rehearsal.yml`).
-- Later: alignment with the 2026-07-28 MCP spec revision (readiness audited; waiting on the SDK release); adopting fiberplane/drift for doc-code drift on repos where docs and code are co-located (foxhound keeps its canon in Capsid, so it does not fit); per-client issued operator tokens.
 
 ## License
 
