@@ -376,3 +376,39 @@ describe("the improve_status jobs block", () => {
     }
   });
 });
+
+describe("the signature", () => {
+  it("a body edited after post is refused at claim, and the job is failed rather than left queued", async () => {
+    const posted = await post({ title: "tampered", body: "do the safe thing" });
+    const id = posted.job!.id;
+
+    // The row edited the way a raw D1 splice would, which is the whole threat model:
+    // a job body is executable input for a session holding local shell and repo
+    // credentials, and it arrives as a database row.
+    await env.DB.prepare("UPDATE jobs SET body = ?2 WHERE id = ?1")
+      .bind(id, posted.job!.body.replace("do the safe thing", "do the dangerous thing"))
+      .run();
+
+    const claimed = await claimJob(jobsEnv(), DRIVER, NOW, { id });
+    expect(claimed.ok).toBe(false);
+    expect(claimed.refusal).toMatch(/failed its signature check/);
+    expect(claimed.refusal).toMatch(/does not match its body/);
+
+    // FAILED, not left queued. Leaving it would hand the same broken row to the next
+    // driver, and every driver in turn.
+    const stored = await row(id);
+    expect(stored?.status).toBe("failed");
+    expect(String(stored?.result_summary)).toMatch(/does not match its body/);
+
+    // And the refusal is audited, so a tampered row is visible after the fact.
+    expect(await auditActions(id)).toContain("job-signature-refused");
+  });
+
+  it("the honest case still claims, so the guard is not refusing everything", async () => {
+    // The innocent direction. A guard that also fires on a job nobody touched gets
+    // deleted rather than fixed.
+    const posted = await post({ title: "untampered" });
+    const claimed = await claimJob(jobsEnv(), DRIVER, NOW, { id: posted.job!.id });
+    expect(claimed.ok, claimed.refusal).toBe(true);
+  });
+});

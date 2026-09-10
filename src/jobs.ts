@@ -8,7 +8,7 @@ import {
   type JobRow,
   type JobStatus,
 } from "./jobs-schema";
-import { signTaskBody } from "./improve-task";
+import { signTaskBody, verifySignedBody } from "./improve-task";
 
 // THE WORK QUEUE. The ruling seat posts a job from a chat; a driver session on a
 // machine claims it, does it, and reports back.
@@ -240,6 +240,35 @@ export async function claimJob(
       .bind(args.namespace)
       .first<JobRow>();
     if (!candidate) return refuse("claim", `no queued jobs in ${args.namespace}.`);
+  }
+
+  // THE SIGNATURE IS CHECKED BEFORE THE JOB IS HANDED OVER, not by the driver after
+  // it has one. A job body is executable input that arrives as a database row, and
+  // the driver is a session holding local shell and repo credentials.
+  //
+  // A body that does not verify was edited after `post` signed it, by a raw splice
+  // or by a write that reached the row some other way. That job is FAILED here
+  // rather than left queued: leaving it would hand the same broken row to the next
+  // driver, and every driver in turn, which is a queue that never drains.
+  //
+  // The actor check verifyTaskDoc adds for a run document deliberately does NOT
+  // apply. Only the loop writes a run doc, so its audit actor is the loop; a job is
+  // posted by a human seat, so its actor is that seat. What proves a job went
+  // through `post` is that this Worker's key signed it.
+  const verdict = await verifySignedBody(env.IMPROVE_SCORE_SECRET, candidate.body, "job body");
+  if (!verdict.ok) {
+    await env.DB.prepare(
+      `UPDATE jobs SET status = 'failed', result_summary = ?2, lease_expires = NULL, updated_at = ?3
+       WHERE id = ?1 AND status = 'queued' RETURNING id`
+    )
+      .bind(candidate.id, verdict.reason, now.toISOString())
+      .first<{ id: string }>();
+    const failed = { ...candidate, status: "failed" as const, result_summary: verdict.reason, updated_at: now.toISOString() };
+    await env.DB.batch([
+      ...(await mirrorStatements(env.DB, failed, "job-signature-refused", actor)),
+      auditStatement(env.DB, actor, "job-signature-refused", failed, { reason: verdict.reason }),
+    ]);
+    return refuse("claim", `${candidate.id} failed its signature check and has been marked failed: ${verdict.reason}`);
   }
 
   const expires = leaseUntil(now);
