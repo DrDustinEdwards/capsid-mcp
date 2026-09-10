@@ -1,19 +1,17 @@
 #!/usr/bin/env node
 // Deploy with provenance stamped in.
 //
-// Until now there was no link between a Cloudflare version id and a git sha, so
-// "the deployed worker is this commit" rested on a clean tree plus the belief
-// that src had not changed since. That claim was made repeatedly on 2026-08-09
-// and could never be checked; it is batch-two item 2.
+// There was no link between a Cloudflare version id and a git sha, so "the deployed
+// worker is this commit" rested on a clean tree plus the belief that src had not changed
+// since. That claim was made repeatedly on 2026-08-09 and could never be checked.
 //
-// The sha is passed as a deploy-time --var rather than written into
-// wrangler.jsonc (gitignored here, so it cannot carry committed values) or into
-// a generated source file (which would either dirty the tree on every deploy or
-// break a fresh clone's typecheck). --var attaches it to the deployment itself,
-// which is exactly the thing being identified.
+// The sha is passed as a deploy-time --var rather than written into wrangler.jsonc
+// (gitignored here, so it cannot carry committed values) or into a generated source file
+// (which would either dirty the tree on every deploy or break a fresh clone's
+// typecheck). --var attaches it to the deployment itself.
 //
-// dirty=true when the tree has uncommitted changes: the deployed bytes are then
-// NOT the named commit, and /health says so rather than implying otherwise.
+// dirty=true when the tree has uncommitted changes: the deployed bytes are then NOT the
+// named commit, and /health says so.
 
 import { execFileSync, spawnSync } from "node:child_process";
 
@@ -27,8 +25,8 @@ try {
   sha = git(["rev-parse", "HEAD"]);
   dirty = git(["status", "--porcelain"]).length > 0;
 } catch {
-  // Deploying from something that is not a git checkout is allowed, but it is
-  // recorded as unknown rather than guessed.
+  // Deploying from something that is not a git checkout is allowed, but it is recorded as
+  // unknown rather than guessed.
   console.warn("deploy: not a git checkout, provenance will report sha=unknown");
 }
 
