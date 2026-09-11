@@ -1,4 +1,7 @@
 import { bytesToHex } from "./encoding";
+import { SCOPE_FLAGS, type ScopeFlag } from "./agents-schema";
+import type { Agent } from "./agents";
+import { checkScope } from "./scope";
 
 // The work queue's vocabulary, in one place so the table, the tool and the driver
 // cannot disagree about it.
@@ -44,6 +47,9 @@ export interface JobRow {
   result_ref: string | null;
   result_summary: string | null;
   gate_required: number;
+  // The scopes this job's work needs of the driver that claims it, as JSON, or null
+  // for the jobs that need nothing unusual (migrations/0009).
+  required_scopes: string | null;
   // How many times this job has hit a gate, and how many times a human sent it back
   // in. Counted where they happen (migrations/0007_jobs_resume.sql says why neither
   // is derived from the other).
@@ -55,6 +61,62 @@ export interface JobRow {
 
 export function isJobStatus(value: unknown): value is JobStatus {
   return typeof value === "string" && (JOB_STATUSES as readonly string[]).includes(value);
+}
+
+// ---- what a job needs of the driver that claims it ---------------------------
+//
+// A job may say which scopes its work requires (migrations/0009), and the claim
+// refuses a driver that does not hold them. Expressed in the same vocabulary as an
+// agent's scopes and checked by the same function, so "what this job needs" and
+// "what this agent has" cannot drift into two comparisons.
+
+// FLAGS ONLY, and that is the whole vocabulary on purpose. The write grant and the
+// namespace are required of every claim already, so the only thing a job has left to
+// declare is blast radius: this work ends in a merge, or a direct commit, or a
+// workflow edit. A requirement a job could state and the claim could not act on would
+// be documentation pretending to be a check.
+export interface RequiredScopes {
+  flags: ScopeFlag[];
+}
+
+// FAILS OPEN, which is the opposite of parseScopes and deliberately so. A corrupt
+// AGENT row must grant nothing, because the cost of getting that wrong is a caller
+// doing what it should not. A corrupt JOB requirement must not invent a requirement
+// nobody wrote, because the cost of getting THAT wrong is a job stranded in the queue
+// behind a refusal no scope change can satisfy. The claim still checks the write
+// grant and the namespace either way, which is the floor.
+export function parseRequiredScopes(json: string | null | undefined): RequiredScopes {
+  const empty: RequiredScopes = { flags: [] };
+  if (!json) return empty;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(json);
+  } catch {
+    return empty;
+  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return empty;
+  const record = raw as Record<string, unknown>;
+  return {
+    flags: Array.isArray(record.flags)
+      ? (record.flags.filter((f): f is ScopeFlag => (SCOPE_FLAGS as readonly unknown[]).includes(f)) as ScopeFlag[])
+      : [],
+  };
+}
+
+export function serializeRequiredScopes(required: Partial<RequiredScopes>): string {
+  return JSON.stringify({ flags: required.flags ?? [] });
+}
+
+// THE CLAIM'S AUTHORIZATION, in one call to the one enforcement point. Returns a
+// refusal naming the missing scope, or null.
+//
+// The write grant and the namespace are checked for EVERY job, requirement or not: a
+// claim is a write, and a driver claiming work in a namespace it cannot reach would
+// only discover that at its first tool call. The job's own requirements are added on
+// top.
+export function missingForJob(agent: Agent, namespace: string, requiredScopes: string | null | undefined): string | null {
+  const required = parseRequiredScopes(requiredScopes);
+  return checkScope(agent, { tool: "jobs", namespace, grant: "write", flags: required.flags });
 }
 
 // job_<12 hex>, minted by the Worker. Not an AUTOINCREMENT integer: a job id is

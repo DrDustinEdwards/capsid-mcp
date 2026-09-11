@@ -1,0 +1,26 @@
+-- A JOB MAY SAY WHAT IT NEEDS, and the claim refuses a driver that does not have it.
+--
+-- WHAT WAS WRONG. The queue authorized a claim on one question: does this caller hold
+-- the write grant. Every driver did, because before migrations/0008 there was one
+-- headless credential in the portfolio and it could do everything. So a job whose work
+-- ends in a merge, a direct commit to a default branch, or a workflow edit was claimed
+-- by whoever asked first, and the first time anybody found out the driver could not
+-- finish it was four hours later when the lease expired, or worse, it COULD finish it
+-- and nobody had decided that it should.
+--
+-- Now that a driver carries scopes, the seat posting the work can say which ones the
+-- work needs, and the mismatch is caught at the claim rather than half way through.
+--
+-- WHY JSON RATHER THAN COLUMNS. It is the same shape as agents.scopes and it is
+-- checked by the same function (checkScope in src/scope.ts), so "what this job needs"
+-- and "what this agent has" are expressed in one vocabulary. A column per flag would
+-- be six columns that have to be added to again every time the flag list grows, and
+-- the comparison would still end up in that one function.
+--
+-- NULL MEANS NO REQUIREMENT, which is every job posted before this column existed and
+-- most jobs after it. A job that needs nothing unusual should not have to say so.
+--
+-- NOT IDEMPOTENT, like 0007 and for the same reason: wrangler runs each migration file
+-- exactly once, and SQLite has no ADD COLUMN IF NOT EXISTS to spell it with.
+
+ALTER TABLE jobs ADD COLUMN required_scopes TEXT;
