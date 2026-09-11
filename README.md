@@ -88,10 +88,33 @@ An optional nightly loop that proposes one scoped code change at a time to a sma
 
 ## Auth model
 
-Two parallel paths, both fully gated:
+Every caller resolves to an **agent**: a name, a set of scopes, and its own audit identity. There is one enforcement point, `checkScope` in `src/scope.ts`, and every tool call goes through it before its handler runs.
+
+An agent's scopes are five axes. `namespaces` and `repos` are a list or `*`. `tools` is an allow list or `*`. `grants` is read, or read and write. `flags` are the **blast radius**, each naming an action whose consequence leaves this Worker:
+
+| flag | what it gates |
+| --- | --- |
+| `can_merge` | merging a pull request, which can trigger a deploy on a repo that deploys on push |
+| `can_direct_write` | a `mode: "direct"` commit, which lands on a default branch with no review |
+| `can_dispatch` | dispatching a workflow, which spends CI minutes and runs code with that repo's secrets in scope |
+| `can_write_workflows` | writing under `.github/workflows/`, which is editing what measures the code |
+| `can_touch_protected` | tests, CI, lint and compiler config, lockfiles, manifests, the agent steering layer, migrations |
+| `money_paths` | a path naming a billing or payment surface |
+
+A new agent is born with **read on its named namespaces and no flags**; widen it deliberately. Scopes are stored as JSON and the parse **fails closed**: a null, truncated or wrong-shaped scopes column resolves to no namespaces, no tools, no grants and no flags, because a permissive parse of a corrupt row looks exactly like a working one until the day it matters. Mint, list, revoke and re-scope with the `agents` tool, which is **admin only**: a minted agent that could mint another could widen itself, and every scope below it would be decoration.
+
+Keys are never stored. `agents` returns a minted key once; the table holds its sha256. Revoking sets `revoked_at` rather than deleting, so the audit rows an agent wrote still resolve to what it was allowed to do, and its key stops resolving immediately.
+
+Three kinds of caller resolve, and the order is load-bearing:
+
+1. **A minted agent**, matched on the sha256 of its bearer token, carrying exactly its row's scopes. Checked first, so a key that is somehow both an agent and an operator entry gets the narrower authority.
+2. **A legacy operator key**, unchanged and still holding everything it holds today, until its hash is removed from `OPERATOR_KEY_HASH` by hand.
+3. **The OAuth admin session**, which is the synthetic agent `admin` with every scope.
+
+Both gated paths:
 
 1. **OAuth (`/mcp`)** for human clients. The client discovers the server via the `.well-known` endpoints, registers itself dynamically, and is sent through `/authorize`. After a one-time approval screen, the browser goes to GitHub. On return, the GitHub user is checked against `ADMIN_GITHUB_LOGIN`: set it to your GitHub username, or to your immutable numeric GitHub user id (find it at `https://api.github.com/users/<login>`). Any other GitHub account gets a 403. The admin check runs again on every `/mcp` request as defense in depth. An admitted admin holds a full write grant.
-2. **Operator keys (`/ops/mcp`)** for agents and cron. Same server, gated by sha256-hashed bearer keys. `OPERATOR_KEY_HASH` holds one or more comma-separated hashes: a plain entry is a full (write) key, and an entry prefixed `ro:` is a read-only key that can use the read tools but is denied write, delete, move, register_namespace, update_namespace, repo writes, PR management, and lint finalize. Revoke a key by removing its hash; the others keep working. The OAuth library never sees this route, so the two paths cannot interfere.
+2. **Agent and operator keys (`/ops/mcp`)** for agents and cron. Same server, gated by sha256-hashed bearer keys. An agent key resolves to its row. Failing that, `OPERATOR_KEY_HASH` holds one or more comma-separated hashes: a plain entry is a full (write) key, and an entry prefixed `ro:` is a read-only key that can use the read tools but is denied write, delete, move, register_namespace, update_namespace, repo writes, PR management, and lint finalize. Revoke a key by removing its hash; the others keep working. The OAuth library never sees this route, so the two paths cannot interfere.
 
 Login and repo access use two different GitHub credentials: a GitHub **OAuth App** for login (OAuth Apps cannot mint installation tokens) and a separate GitHub **App** for repo access. Keep both.
 
@@ -253,11 +276,12 @@ Note: MCP clients cache the tool list at connect time. After deploying new tools
 
 ## Roadmap
 
-Three arcs, in order:
+**Agents as users** shipped on 2026-09-11: see **Auth model** above. The credentials exist and the enforcement point is live; what remains is operational, namely minting one agent per project and per machine and then removing the operator hash, which `docs/bootstrap.md` walks through.
 
-1. **Agents as users.** Per-client scoped credentials, so an agent is a first-class caller with its own grant and its own audit identity rather than one of a handful of shared operator keys.
-2. **The console.** A read-only surface for the things that currently need a tool call to see: what the queue is holding, which jobs are blocked and on what command, and what the loop did last night.
-3. **Skill records.** Capturing what an agent learned doing the work, in a form the next session retrieves, so the store holds capability and not only decisions.
+Two arcs left, in order:
+
+1. **The console.** A read-only surface for the things that currently need a tool call to see: what the queue is holding, which jobs are blocked and on what command, and what the loop did last night.
+2. **Skill records.** Capturing what an agent learned doing the work, in a form the next session retrieves, so the store holds capability and not only decisions.
 
 ## License
 
