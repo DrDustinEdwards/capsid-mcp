@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { hintsFor } from "../tool-annotations";
 import { z } from "zod";
 import type { Env } from "../env";
+import type { Agent } from "../agents";
 import { parseReposList, REPO_SHAPE, requireSinglePrimary } from "../github";
 import { sha256Hex } from "../auth";
 import { documentUpsert, guardedCommit, isMissingRowAbort, requireBodyUnchanged, requireExists } from "../store-guards";
@@ -167,6 +168,10 @@ export interface ToolCtx {
   grant: ToolGrant;
   mayWrite: boolean;
   actor: string;
+  // THE CALLER, resolved once per request (src/agents.ts). `grant`, `mayWrite` and
+  // `actor` are all projections of it, kept as their own fields so the tool modules
+  // read unchanged; the scope checks that need more than a grant read this.
+  agent: Agent;
   lastActor: (ns: string, path: string) => Promise<string | null>;
 }
 

@@ -7,6 +7,7 @@ import {
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Env } from "./env";
+import { legacyAgent, type Agent } from "./agents";
 import { b64urlDecode, b64urlEncode } from "./encoding";
 import { MAX_ROWS } from "./limits";
 import { registerDocTools, type ToolCtx, type ToolGrant } from "./tools/docs";
@@ -38,8 +39,15 @@ export function concurrentEditWarning(updatedAt: string | null | undefined, now:
   );
 }
 
-export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServer {
+// THE CALLER IS AN AGENT (src/agents.ts). The legacy shape, a bare grant plus an
+// actor string, is still accepted and means exactly what it always did: an
+// unrestricted caller at that grant. That is not a convenience for the tests, it is
+// the OPERATOR_KEY_HASH fallback itself, expressed once so there is no second code
+// path where scopes do not apply.
+export function buildServer(env: Env, caller: Agent | ToolGrant, actor = ""): McpServer {
+  const agent = typeof caller === "string" ? legacyAgent(caller, actor) : caller;
   // One definition of "may this caller write", so no tool can invent its own.
+  const grant: ToolGrant = agent.scopes.grants.includes("write") ? "write" : "read";
   const mayWrite = grant === "write";
   const server = new McpServer(SERVER_INFO);
   const db = env.DB;
@@ -57,7 +65,7 @@ export function buildServer(env: Env, grant: ToolGrant, actor: string): McpServe
     return row?.actor ?? null;
   };
 
-  const ctx: ToolCtx = { env, db, grant, mayWrite, actor, lastActor };
+  const ctx: ToolCtx = { env, db, grant, mayWrite, actor: agent.actor, agent, lastActor };
 
   registerDocTools(server, ctx);
   registerLintTools(server, ctx);

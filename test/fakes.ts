@@ -215,6 +215,10 @@ export interface FakeD1Options {
   // (SELECT name FROM d1_migrations ORDER BY id DESC LIMIT 1) has something to
   // answer. Absent by default; a health test seeds them.
   migrations?: string[];
+  // The scoped credentials (migrations/0008). Absent by default, so every
+  // pre-existing test resolves through the OPERATOR_KEY_HASH fallback exactly as it
+  // did before the table existed.
+  agents?: Array<Record<string, unknown>>;
 }
 
 export interface FakeD1Rows {
@@ -228,6 +232,7 @@ export interface FakeD1Rows {
   improve_skills: Array<Record<string, unknown>>;
   improve_jti: Array<Record<string, unknown>>;
   audit_log: Array<{ namespace: string; path: string; actor: string | null }>;
+  agents: Array<Record<string, unknown>>;
 }
 
 export interface FakeD1 {
@@ -316,6 +321,7 @@ export function fakeD1(opts: FakeD1Options = {}): FakeD1 {
     improve_skills: (opts.improveSkills ?? []).map((k) => ({ ...IMPROVE_SKILL_DEFAULTS, ...k })),
     improve_jti: [],
     audit_log: opts.auditLog ?? [],
+    agents: opts.agents ?? [],
   };
   const recorded: Recorded[] = [];
   // READS are logged SEPARATELY from writes. `recorded` means "what this handler
@@ -350,6 +356,23 @@ export function fakeD1(opts: FakeD1Options = {}): FakeD1 {
       // alone would let a caller walk every snapshot in the store.
       const [id, namespace, path] = params as [number, string, string];
       return rows.versions.find((v) => v.id === id && v.namespace === namespace && v.path === path) ?? null;
+    }
+    // THE AGENTS TABLE (migrations/0008). The resolver's lookup is an indexed
+    // equality on key_hash plus `revoked_at IS NULL`, and a revoked row has to answer
+    // null here or the fake would grant what the database refuses.
+    if (/FROM agents/i.test(flat)) {
+      const live = /revoked_at IS NULL/i.test(flat);
+      const byHash = /key_hash = \?1/i.test(flat);
+      const byId = /WHERE id = \?1/i.test(flat);
+      const byName = /name = \?1/i.test(flat);
+      const match = rows.agents.find((a) => {
+        if (live && a.revoked_at != null) return false;
+        if (byHash) return a.key_hash === params[0];
+        if (byId) return a.id === params[0];
+        if (byName) return a.name === params[0];
+        return true;
+      });
+      return match ? project(flat, { ...match }) : null;
     }
     if (/SELECT COUNT\(\*\) AS n/i.test(flat)) return { n: 0 };
     // /health's D1 liveness probe: a bare SELECT 1, no table. The `... FROM
@@ -407,6 +430,7 @@ export function fakeD1(opts: FakeD1Options = {}): FakeD1 {
       if (table === "document_versions") return rows.versions;
       if (table === "namespaces") return rows.namespaces;
       if (table === "document_links") return rows.links;
+      if (table === "agents") return rows.agents;
       return [];
     }
     if (/FROM document_links/i.test(flat)) {
@@ -512,6 +536,10 @@ export function fakeD1(opts: FakeD1Options = {}): FakeD1 {
       // literal one is silently ignored and the fake over-answers.
       const literalLimit = flat.match(/LIMIT (\d+)/i);
       return out.slice(0, literalLimit ? Number(literalLimit[1]) : limit).map((r) => project(flat, r as unknown as Record<string, unknown>));
+    }
+    if (/FROM agents/i.test(flat)) {
+      const live = /revoked_at IS NULL/i.test(flat);
+      return rows.agents.filter((a) => !live || a.revoked_at == null).map((a) => project(flat, { ...a }));
     }
     if (/FROM document_versions WHERE namespace/i.test(flat)) {
       const [namespace, path] = params as [string, string];

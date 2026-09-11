@@ -1,7 +1,8 @@
 import type { AuthRequest } from "@cloudflare/workers-oauth-provider";
 import { createMcpHandler } from "agents/mcp";
 import { APPROVAL_MAX_AGE_SECONDS, approvalTag } from "./approval";
-import { hmacHex, isAdminUser, operatorIdentity, sha256Hex, timingSafeEqual } from "./auth";
+import { hmacHex, isAdminUser, sha256Hex, timingSafeEqual } from "./auth";
+import { resolveAgent } from "./agents";
 import { runBackup } from "./backup";
 import { b64urlDecode, b64urlEncode } from "./encoding";
 import { REPORT_PATH, REPORT_PREFIX } from "./headers";
@@ -325,27 +326,28 @@ async function handleCallback(request: Request, env: Env): Promise<Response> {
 }
 
 async function handleOperatorMcp(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-  // The grant is handed to buildServer as-is: "write" keys get the full tool set,
-  // "ro:" keys get "read" and the per-tool write gate is a live boundary for them.
-  const { grant, fingerprint } = await operatorIdentity(request, env);
-  if (!grant) {
-    return new Response("unauthorized: valid operator key required", {
+  // THE BEARER IS RESOLVED TO A CALLER ONCE, here, and that caller is what every tool
+  // in this request is checked against (src/agents.ts, src/scope.ts). A minted agent
+  // carries the scopes its row says; a key that predates the agents table resolves to
+  // the unrestricted caller it has always been, until it is revoked by hand.
+  const resolved = await resolveAgent(request, env);
+  if (!resolved) {
+    return new Response("unauthorized: valid operator key or agent key required", {
       status: 401,
       headers: { "WWW-Authenticate": 'Bearer realm="capsid-operator"' },
     });
   }
-  // Which key, not just that a key was valid: several keys are in use (an agent key,
-  // the cron key, a laptop key). The fingerprint is a 12-char prefix of the key's
-  // sha256; the full digest is the stored verifier and stays out of the log.
-  return createMcpHandler(buildServer(env, grant, `opkey:${fingerprint}`), { route: "/ops/mcp" })(
-    request,
-    env,
-    ctx
-  );
+  // last_seen is what makes an unused credential noticeable, and it is not part of
+  // authorizing this request: it rides on waitUntil so a slow or failing write cannot
+  // turn into a slow or failing tool call.
+  ctx.waitUntil(resolved.touch());
+  return createMcpHandler(buildServer(env, resolved.agent), { route: "/ops/mcp" })(request, env, ctx);
 }
 
 async function handleBackup(request: Request, env: Env): Promise<Response> {
-  if ((await operatorIdentity(request, env)).grant !== "write") {
+  // The write grant, whether it comes from an agent row or from OPERATOR_KEY_HASH.
+  const caller = await resolveAgent(request, env);
+  if (!caller?.agent.scopes.grants.includes("write")) {
     return new Response("unauthorized: write-grant operator key required", {
       status: 401,
       headers: { "WWW-Authenticate": 'Bearer realm="capsid-operator"' },
