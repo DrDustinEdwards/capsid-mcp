@@ -60,6 +60,11 @@ const DESTRUCTIVE = [
   /\bcompleteJob\(/,
   /\bfailJob\(/,
   /\bblockJob\(/,
+  // The credential control plane's two overwriting entry points, named for the same
+  // reason: revoke ends a credential and update_scopes changes what it may do, and
+  // both statements live in src/agents-admin.ts.
+  /\brevokeAgent\(/,
+  /\bupdateAgentScopes\(/,
 ];
 
 const matches = (body: string, res: RegExp[]) => res.some((re) => re.test(body));

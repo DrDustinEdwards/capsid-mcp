@@ -357,6 +357,20 @@ export function fakeD1(opts: FakeD1Options = {}): FakeD1 {
       const [id, namespace, path] = params as [number, string, string];
       return rows.versions.find((v) => v.id === id && v.namespace === namespace && v.path === path) ?? null;
     }
+    // The agents control plane's two keyed UPDATEs, which are WRITES issued through
+    // first() because they carry RETURNING. Applied to the rows, so a revoke is
+    // visible to the next read the way it would be in the database; the definitive
+    // proof that the CAS is a CAS lives in test-integration against real SQLite,
+    // because that is a property of the engine and a fake would agree with anything.
+    if (/^UPDATE agents SET/i.test(flat)) {
+      const id = params[params.length - 1] === undefined ? params[0] : params[0];
+      const row = rows.agents.find((a) => a.id === id && (!/revoked_at IS NULL/i.test(flat) || a.revoked_at == null));
+      if (!row) return null;
+      if (/SET revoked_at/i.test(flat)) row.revoked_at = "2026-09-11 02:00:00";
+      if (/SET scopes/i.test(flat)) row.scopes = params[1];
+      if (/SET last_seen/i.test(flat)) row.last_seen = "2026-09-11 02:00:00";
+      return { id: row.id };
+    }
     // THE AGENTS TABLE (migrations/0008). The resolver's lookup is an indexed
     // equality on key_hash plus `revoked_at IS NULL`, and a revoked row has to answer
     // null here or the fake would grant what the database refuses.

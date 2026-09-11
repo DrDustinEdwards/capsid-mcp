@@ -81,6 +81,11 @@ export const TOOL_GRANTS: Record<string, ToolRequirement> = {
 
   // list reads; every other action changes the queue.
   jobs: "action",
+
+  // The credential control plane. Write at the registrar, and admin-only inside the
+  // handler: the registrar can say whether a caller may write, and only the handler
+  // can say whether a caller may widen another caller.
+  agents: "write",
 };
 
 // FAIL CLOSED. A tool with no entry requires the write grant, so a tool added

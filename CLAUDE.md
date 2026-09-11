@@ -39,7 +39,7 @@ End: write NOTHING by default. The end-of-session episodic was withdrawn portfol
 
 ## Hard rules, this repo only
 
-1. **Keep the worker lean.** Few tools, no dead code, no speculative abstractions. The surface is 31 tools and stays small (`src/counts.ts` pins it, `test/counts.test.ts` asserts it against the registrations); each recent addition is a ruled exception recorded in `capsid/decisions.md`: history and restore (2026-08-13), improve_run and improve_status (2026-09-04), repo_refs, repo_history, delete_branch and ci_dispatch (2026-09-06), and jobs (2026-09-10).
+1. **Keep the worker lean.** Few tools, no dead code, no speculative abstractions. The surface is 32 tools and stays small (`src/counts.ts` pins it, `test/counts.test.ts` asserts it against the registrations); each recent addition is a ruled exception recorded in `capsid/decisions.md`: history and restore (2026-08-13), improve_run and improve_status (2026-09-04), repo_refs, repo_history, delete_branch and ci_dispatch (2026-09-06), jobs (2026-09-10), and agents (2026-09-11).
 2. **Never commit wrangler.jsonc, .dev.vars, or .env.** The operator key exists only as a sha256 hash in a Worker secret. This is a public MIT repo.
 3. **No real vault content in any seed or fixture.** Sample data is obviously fake (example.com, lorem bodies, namespace "sample").
 4. **The lint loop never calls an LLM from the Worker.** The driving client does all reasoning with ordinary read and write tools. Gather is read-only; finalize archives, never deletes.

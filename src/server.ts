@@ -16,6 +16,7 @@ import { registerLintTools } from "./tools/lint";
 import { registerRepoTools } from "./tools/repo";
 import { registerImproveTools } from "./tools/improve";
 import { registerJobTools } from "./tools/jobs";
+import { registerAgentTools } from "./tools/agents";
 
 export type { ToolGrant };
 
@@ -90,6 +91,7 @@ export function buildServer(env: Env, caller: Agent | ToolGrant, actor = ""): Mc
   registerRepoTools(server, ctx);
   registerImproveTools(server, ctx);
   registerJobTools(server, ctx);
+  registerAgentTools(server, ctx);
 
   // Template metadata spreads onto every listed resource, so it is stated ONCE and
   // applied by both the read registration and the list handler below.
