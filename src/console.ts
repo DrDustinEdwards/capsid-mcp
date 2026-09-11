@@ -305,6 +305,11 @@ function modeForms(data: ConsoleData, csrf: string): string {
   return `<div class="acts">${modes.map((m) => form(csrf, "mode", { value: m }, `Set mode: ${m}`)).join("")}</div>`;
 }
 
+// A RATE AS A PERCENTAGE, or a dash when there is no denominator to divide by.
+function pct(value: number | null): string {
+  return value === null ? "-" : `${Math.round(value * 100)}%`;
+}
+
 function agentRow(agent: AgentReputation, csrf: string): string {
   const scope = agent.namespaces === "*" ? "every namespace" : agent.namespaces.join(", ");
   const flags = agent.flags.length ? agent.flags.join(", ") : "none";
@@ -315,6 +320,19 @@ function agentRow(agent: AgentReputation, csrf: string): string {
   const state = agent.revoked_at
     ? `<span class="bad">revoked ${escapeHtml(agent.revoked_at)}</span>`
     : escapeHtml(agent.last_seen ?? "never connected");
+  // THE VERIFIED COLUMN, and it is deliberately not the same numbers as the one
+  // beside it. "PRs opened / merged" counts what this credential DID through this
+  // Worker, from audit_log. These three come from job_outcomes and only from the
+  // fields the Worker checked against GitHub itself, which is why a driver can show
+  // pull requests in one column and a dash in this one: it opened them without
+  // naming them as evidence on a job.
+  //
+  // A DASH IS NOT A ZERO. A rate with no denominator is null and reads as "-",
+  // because 0% would sort an agent that has done nothing below one that has done
+  // something imperfectly.
+  const verified = `${pct(agent.record.pr_merge_rate)} / ${pct(agent.record.ci_green_rate)} / ${
+    agent.record.median_duration_minutes === null ? "-" : `${agent.record.median_duration_minutes}m`
+  }`;
   return `<tr${agent.revoked_at ? ' class="revoked"' : ""}>
 <td><code>${escapeHtml(agent.name)}</code></td>
 <td>${escapeHtml(agent.kind)}</td>
@@ -323,6 +341,7 @@ function agentRow(agent: AgentReputation, csrf: string): string {
 <td>${state}</td>
 <td class="num">${agent.jobs_completed} / ${agent.jobs_failed} / ${agent.jobs_blocked}</td>
 <td class="num">${agent.prs_opened} / ${agent.prs_merged}</td>
+<td class="num">${verified}</td>
 ${attempts || '<td class="num muted">n/a</td>'}
 <td>${agent.revoked_at ? "" : form(csrf, "revoke_agent", { name: agent.name }, "Revoke")}</td>
 </tr>`;
@@ -330,11 +349,12 @@ ${attempts || '<td class="num muted">n/a</td>'}
 
 function agentsPanel(data: ConsoleData, csrf: string): string {
   if (!data.agents.length) return `<p class="empty">No agents have been minted.</p>`;
-  return `<p class="sub">Counts, not scores. Every number is a row this store wrote.</p>
+  return `<p class="sub">Counts and rates, not scores. Every number is a row this store wrote; the verified column is only what this Worker checked against GitHub itself, and a dash means there was nothing to divide by.</p>
 <div class="scroll"><table>
 <thead><tr>
 <th>agent</th><th>kind</th><th>namespaces</th><th>flags held</th><th>last seen</th>
-<th>jobs done / failed / blocked</th><th>PRs opened / merged</th><th>attempts</th><th></th>
+<th>jobs done / failed / blocked</th><th>PRs opened / merged</th>
+<th>verified: merge rate / CI green / median</th><th>attempts</th><th></th>
 </tr></thead>
 <tbody>${data.agents.map((a) => agentRow(a, csrf)).join("")}</tbody>
 </table></div>`;

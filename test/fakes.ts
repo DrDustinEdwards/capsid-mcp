@@ -22,6 +22,7 @@
 
 // THE IMPROVE TABLES live in their own dialect module, delegated to below. Still
 // ONE fakeD1: this is a second SQL dialect inside the one fake, not a second fake.
+import { recordFor, type AgentRecord } from "../src/agent-record.ts";
 import {
   IMPROVE_ATTEMPT_DEFAULTS,
   IMPROVE_RUN_DEFAULTS,
@@ -695,4 +696,14 @@ export async function withFetch(
 // against the whole MCP server module.
 export function fakeEnv(parts: Record<string, unknown>): never {
   return parts as never;
+}
+
+// ---- the agent record -------------------------------------------------------
+
+// A FIXTURE BUILT BY THE REAL FUNCTION. improve_status now carries a record per
+// credential, so every AgentSummary fixture needs one, and hand-writing the object
+// would mean a field added to AgentRecord silently missing from every fixture. Built
+// from empty rows instead, so the zero record is whatever the code says it is.
+export function agentRecord(overrides: Partial<AgentRecord> = {}): AgentRecord {
+  return { ...recordFor("agent:fixture", { outcomes: [], jobs: [], runs: [] }, null), ...overrides };
 }

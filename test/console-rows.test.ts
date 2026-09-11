@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { renderConsole, type ConsoleData } from "../src/console.ts";
 import type { NamespaceStatus } from "../src/improve-run.ts";
 import type { AgentReputation } from "../src/console-reputation.ts";
+import { agentRecord } from "./fakes.ts";
 
 // GROUP 2: THE NAMESPACE ROWS.
 //
@@ -174,6 +175,7 @@ test("the row names the driver agent's last_seen, matched from the agent invento
           flags: [],
           last_seen: "2026-09-11 14:12:01",
           revoked_at: null,
+          record: agentRecord(),
           jobs_completed: 4,
           jobs_failed: 0,
           jobs_blocked: 1,
@@ -190,6 +192,7 @@ test("the row names the driver agent's last_seen, matched from the agent invento
           flags: [],
           last_seen: "2026-09-01 03:00:00",
           revoked_at: null,
+          record: agentRecord(),
           jobs_completed: 0,
           jobs_failed: 0,
           jobs_blocked: 0,

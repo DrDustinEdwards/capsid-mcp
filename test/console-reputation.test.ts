@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { renderConsole } from "../src/console.ts";
 import { reputationFrom, type ReputationRows } from "../src/console-reputation.ts";
 import type { AgentSummary } from "../src/improve-run.ts";
+import { agentRecord } from "./fakes.ts";
 
 // GROUP 3: THE REPUTATION PANEL.
 //
@@ -25,6 +26,7 @@ function agent(overrides: Partial<AgentSummary> = {}): AgentSummary {
     flags: [],
     last_seen: "2026-09-11 14:12:01",
     revoked_at: null,
+    record: agentRecord(),
     ...overrides,
   };
 }
@@ -186,9 +188,12 @@ test("the panel renders every agent, revoked ones included, and never a key", ()
   // existed" look the same, which is the reason listAgents keeps them too.
   assert.match(html, /revoked 2026-09-01 10:00:00/);
   assert.match(html, /can_merge/);
-  // "Counts, not scores" is stated on the page, so a reader does not mistake the
+  // "Counts and rates, not scores" is stated on the page, so a reader does not mistake the
   // numbers for a rating.
-  assert.match(html, /Counts, not scores/);
+  assert.match(html, /Counts and rates, not scores/);
+  // And the verified column says what it is: only what this Worker checked itself.
+  // Without that line the two pull-request columns read as the same measurement.
+  assert.match(html, /verified column is only what this Worker checked/);
   // The stored verifier and the fingerprint have no business here.
   assert.doesNotMatch(html, /key_hash|fingerprint/i);
 });

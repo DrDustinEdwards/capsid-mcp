@@ -9,6 +9,11 @@ import { fail, ok, type ToolCtx } from "./docs";
 
 const MAX_JOB_ID = 64;
 
+// HOW MANY PULL REQUESTS ONE JOB MAY NAME AS EVIDENCE. Each one costs a GitHub read
+// inside `complete`, so the bound is what stops a single call fanning out into an
+// unbounded number of them. Ten is more than any job this queue has run produced.
+const MAX_EVIDENCE_PRS = 10;
+
 export function registerJobTools(server: McpServer, ctx: ToolCtx): void {
   const { env, db, agent } = ctx;
 
@@ -26,7 +31,7 @@ export function registerJobTools(server: McpServer, ctx: ToolCtx): void {
     {
       annotations: hintsFor("jobs"),
       description:
-        `The work queue: post work from a chat, claim it from a machine, report back. The jobs table is the source of truth for status; every job also mirrors to <namespace>/jobs/<id>.md so brief and search see it, and that document is rewritten in the same batch as every transition. action "post" (write) queues a job: namespace, title, body (the full prompt the driver executes), optional priority (higher runs first) and gate_required when the work is known to need a human confirmation. The body is SIGNED with the same key and envelope as the improve loop's task documents, and the driver refuses a job whose body does not verify, so an edited row cannot steer a session holding local shell and repo credentials. One open job per (namespace, title): posting a duplicate while one is queued or claimed is refused. action "list" (read) filters by namespace and status. action "claim" (write) takes the highest-priority queued job in a namespace, or a named id, and sets a ${JOB_LEASE_SECONDS / 3600}-hour lease; it refuses if the caller already holds a claim anywhere, and exactly one caller wins a contested job because the claim is a keyed UPDATE with RETURNING. action "heartbeat" (write) extends the lease. action "complete" (write) needs result_summary and takes an optional result_ref (a document key or a PR URL). action "fail" (write) needs a reason. action "block" (write) is for a job that hit a gate and needs the human: it takes a reason and the exact command to run, and blocked jobs are what improve_status surfaces. action "resume" (write) is the way back: BLOCKED IS A PAUSE, NOT AN ENDING. Once the human has run the command, resume moves the blocked job back to claimed for the caller with a fresh lease, takes a required reason recording what was approved, and re-verifies the body's signature, because a blocked job sits in the table for as long as a human takes and resume hands it to a session with shell and repo credentials. Any write-grant caller may resume, deliberately: the seat that approves is routinely not the session that blocked. A job may be blocked and resumed any number of times, and improve_status reports both counts per blocked job. heartbeat, complete, fail and block only fire for the claimed job THIS caller holds, so a lease the tick already expired cannot be finished out from under its new owner. An expired lease returns the job to queued on the five-minute tick. Every action is audit-logged with the caller's github: login or opkey: fingerprint.`,
+        `The work queue: post work from a chat, claim it from a machine, report back. The jobs table is the source of truth for status; every job also mirrors to <namespace>/jobs/<id>.md so brief and search see it, and that document is rewritten in the same batch as every transition. action "post" (write) queues a job: namespace, title, body (the full prompt the driver executes), optional priority (higher runs first) and gate_required when the work is known to need a human confirmation. The body is SIGNED with the same key and envelope as the improve loop's task documents, and the driver refuses a job whose body does not verify, so an edited row cannot steer a session holding local shell and repo credentials. One open job per (namespace, title): posting a duplicate while one is queued or claimed is refused. post also takes an optional min_record ({prs_merged: n}), the TRACK RECORD the work needs of its driver: the claim refuses an agent whose record is below the bar and leaves the job for one that clears it, measured against the same agent_record this Worker serves. action "list" (read) filters by namespace and status. action "claim" (write) takes the highest-priority queued job in a namespace, or a named id, and sets a ${JOB_LEASE_SECONDS / 3600}-hour lease; it refuses if the caller already holds a claim anywhere, and exactly one caller wins a contested job because the claim is a keyed UPDATE with RETURNING. action "heartbeat" (write) extends the lease. action "complete" (write) needs result_summary and takes an optional result_ref (a document key or a PR URL) and an optional evidence object (prs, commits, files_changed, tests_added). Completing or failing a job writes ONE row to job_outcomes, and the Worker verifies what it can rather than storing what it was told: every pull request named in evidence is read from GitHub, so the merge count, the commit count and the file count stored are GitHub's, and the last one's head commit is checked for a CI conclusion. A field nobody reported is stored as NULL, never as 0. The response carries the row that was written and a note for every check that could not run. action "fail" (write) needs a reason. action "block" (write) is for a job that hit a gate and needs the human: it takes a reason and the exact command to run, and blocked jobs are what improve_status surfaces. action "resume" (write) is the way back: BLOCKED IS A PAUSE, NOT AN ENDING. Once the human has run the command, resume moves the blocked job back to claimed for the caller with a fresh lease, takes a required reason recording what was approved, and re-verifies the body's signature, because a blocked job sits in the table for as long as a human takes and resume hands it to a session with shell and repo credentials. Any write-grant caller may resume, deliberately: the seat that approves is routinely not the session that blocked. A job may be blocked and resumed any number of times, and improve_status reports both counts per blocked job. heartbeat, complete, fail and block only fire for the claimed job THIS caller holds, so a lease the tick already expired cannot be finished out from under its new owner. An expired lease returns the job to queued on the five-minute tick. Every action is audit-logged with the caller's github: login or opkey: fingerprint.`,
       inputSchema: {
         action: z.enum(JOB_ACTIONS).describe("post | list | claim | heartbeat | complete | fail | block | resume."),
         namespace: nsName.optional().describe('For post, the namespace the work belongs to. For list and claim, the namespace to filter or pick from.'),
@@ -40,12 +45,29 @@ export function registerJobTools(server: McpServer, ctx: ToolCtx): void {
           .describe(
             `For post: the blast-radius flags this job's work needs of the driver that claims it (${SCOPE_FLAGS.join(", ")}). The claim refuses an agent that does not hold them and leaves the job queued for one that does. Omit it for work that needs nothing unusual, which is most work.`
           ),
+        min_record: z
+          .object({ prs_merged: z.number().int().nonnegative() })
+          .optional()
+          .describe(
+            "For post: the TRACK RECORD this job's work needs of the driver that claims it, as a minimum count of merged pull requests on that agent's record. The claim refuses an agent below the bar and leaves the job queued for one that clears it, checked against the same agent_record improve_status and the console show. Omit it for work that does not care, which is most work; a bar of 0 is no bar."
+          ),
         status: bounded(32).optional().describe(`For list: one of ${JOB_STATUSES.join(" | ")}.`),
         id: bounded(MAX_JOB_ID).optional().describe('The job id, for claim (optional, to take a specific one), heartbeat, complete, fail and block.'),
         result_summary: bounded(MAX_TITLE).optional().describe('For complete: what happened, in a sentence the seat can read without opening the diff.'),
         result_ref: resultRef.optional().describe('For complete: where the work landed, a document key or a PR URL.'),
         reason: bounded(MAX_TITLE).optional().describe('For fail and block: why. For resume: what the human approved, which is what the audit row records.'),
         command: bounded(MAX_TITLE).optional().describe('For block: the exact command the human must run. It goes into the summary the console shows.'),
+        evidence: z
+          .object({
+            prs: z.array(resultRef).max(MAX_EVIDENCE_PRS).optional().describe("Pull request URLs this job produced."),
+            commits: z.number().int().nonnegative().optional(),
+            files_changed: z.number().int().nonnegative().optional(),
+            tests_added: z.number().int().nonnegative().optional(),
+          })
+          .optional()
+          .describe(
+            "For complete: what the work produced. Every field is optional and an omitted one is recorded as NULL, never as 0, because 'nobody counted' and 'the count was zero' are different facts. Naming pull requests is what unlocks verification: the Worker reads each one from GitHub and stores ITS merge state, commit count and file count rather than yours, and checks the last one's head commit for a CI conclusion. tests_added is never verifiable here and is stored as your claim."
+          ),
       },
     },
     async (args) => {
@@ -75,6 +97,7 @@ export function registerJobTools(server: McpServer, ctx: ToolCtx): void {
                 priority: args.priority,
                 gate_required: args.gate_required,
                 required_scopes: args.required_flags ? { flags: args.required_flags } : undefined,
+                min_record: args.min_record,
               })
             );
           }
@@ -90,6 +113,7 @@ export function registerJobTools(server: McpServer, ctx: ToolCtx): void {
               await completeJob(env, agent, now, args.id, {
                 result_summary: args.result_summary ?? "",
                 result_ref: args.result_ref,
+                evidence: args.evidence,
               })
             );
           }
