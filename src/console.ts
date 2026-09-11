@@ -2,7 +2,13 @@ import type { Env } from "./env";
 import { healthReport, type HealthReport } from "./health";
 import { escapeHtml } from "./html";
 import { improveStatus, type NamespaceStatus, type StatusReport } from "./improve-run";
-import { readConsoleSession, startConsoleLogin, type ConsoleUser } from "./console-auth";
+import {
+  CONSOLE_CSRF_COOKIE,
+  CONSOLE_SESSION_TTL_SECONDS,
+  readConsoleSession,
+  startConsoleLogin,
+  type ConsoleUser,
+} from "./console-auth";
 import { loadReputation, type AgentReputation } from "./console-reputation";
 
 // THE CONSOLE: one page that answers "what is the state of every namespace" without
@@ -63,9 +69,9 @@ export async function consoleData(env: Env, viewer: string, now: Date): Promise<
 const BEARER_REFUSAL =
   "forbidden: /console admits the GitHub admin session only. An operator key or an agent key authenticates to /ops/mcp, not to this page; the same state is served by the improve_status and jobs tools there. Open /console in a browser to sign in as the administrator.";
 
-type ConsoleGate = { ok: true; user: ConsoleUser } | { ok: false; response: Response };
+export type ConsoleGate = { ok: true; user: ConsoleUser } | { ok: false; response: Response };
 
-async function consoleGate(request: Request, env: Env, now: Date, returnTo: string): Promise<ConsoleGate> {
+export async function consoleGate(request: Request, env: Env, now: Date, returnTo: string): Promise<ConsoleGate> {
   if (request.headers.get("Authorization")) {
     return {
       ok: false,
@@ -81,13 +87,18 @@ export async function handleConsole(request: Request, env: Env, now: Date = new 
   const gate = await consoleGate(request, env, now, CONSOLE_PATH);
   if (!gate.ok) return gate.response;
   const data = await consoleData(env, gate.user.login, now);
-  return new Response(renderConsole(data), {
+  // A FRESH TOKEN PER RENDER, set as a cookie and embedded in every form on the page.
+  // Double submit: the action handler compares the two with a constant-time compare,
+  // and a cross-site POST can carry neither.
+  const csrf = crypto.randomUUID();
+  return new Response(renderConsole(data, csrf), {
     status: 200,
     headers: {
       "Content-Type": "text/html;charset=utf-8",
       "Content-Security-Policy": CONSOLE_CSP,
       "Referrer-Policy": "no-referrer",
       "X-Frame-Options": "DENY",
+      "Set-Cookie": `${CONSOLE_CSRF_COOKIE}=${csrf}; HttpOnly; Secure; SameSite=Lax; Path=/console; Max-Age=${CONSOLE_SESSION_TTL_SECONDS}`,
     },
   });
 }
@@ -127,6 +138,10 @@ h4 { font-size: 0.8rem; margin: 1rem 0 0.5rem; text-transform: uppercase; letter
 .blocked-list { list-style: none; padding: 0; margin: 0; }
 .blocked { border-left: 3px solid var(--warn); padding: 0.25rem 0 0.25rem 0.75rem; margin-bottom: 0.75rem; }
 .blocked strong { display: block; }
+.acts { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin-top: 0.5rem; }
+.act { display: flex; gap: 0.35rem; align-items: center; margin: 0; }
+button { font: inherit; font-size: 0.8rem; padding: 0.3rem 0.7rem; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); cursor: pointer; }
+input[type="text"] { font: inherit; font-size: 0.8rem; padding: 0.28rem 0.5rem; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); min-width: 12rem; }
 .scroll { overflow-x: auto; }
 table { border-collapse: collapse; width: 100%; font-size: 0.85rem; background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
 th, td { text-align: left; padding: 0.45rem 0.6rem; border-bottom: 1px solid var(--line); white-space: nowrap; }
@@ -174,7 +189,7 @@ function driverFor(data: ConsoleData, namespace: string) {
   return data.agents.find((a) => a.name === `${namespace}-driver`) ?? null;
 }
 
-function blockedJob(job: NamespaceStatus["jobs"]["blocked_jobs"][number]): string {
+function blockedJob(job: NamespaceStatus["jobs"]["blocked_jobs"][number], csrf: string): string {
   const times = job.blocked_times === 1 ? "blocked once" : `blocked ${job.blocked_times} times`;
   const resumed = job.resumed > 0 ? `, resumed ${job.resumed}` : "";
   // The summary is rendered in a <pre> because block() writes the command into it on
@@ -187,10 +202,14 @@ function blockedJob(job: NamespaceStatus["jobs"]["blocked_jobs"][number]): strin
 <strong>${escapeHtml(job.title)}</strong>
 <span class="muted"><code>${escapeHtml(job.id)}</code> ${escapeHtml(times)}${escapeHtml(resumed)}</span>
 ${waiting}
+<div class="acts">
+${form(csrf, "resume_job", { id: job.id }, "Resume", reasonField("what you approved"))}
+${form(csrf, "fail_job", { id: job.id }, "Mark failed", reasonField("why it cannot be done"))}
+</div>
 </li>`;
 }
 
-function namespaceRow(data: ConsoleData, ns: NamespaceStatus): string {
+function namespaceRow(data: ConsoleData, ns: NamespaceStatus, csrf: string): string {
   const driver = driverFor(data, ns.namespace);
   const run = ns.last_run;
   const facts: string[] = [];
@@ -233,18 +252,50 @@ function namespaceRow(data: ConsoleData, ns: NamespaceStatus): string {
     ? `<p class="bad"><strong>Anchor problem:</strong> ${escapeHtml(ns.anchor_problem)}</p>`
     : "";
   const blocked = ns.jobs.blocked_jobs.length
-    ? `<h4>Blocked jobs, and what each waits on</h4><ul class="blocked-list">${ns.jobs.blocked_jobs.map(blockedJob).join("")}</ul>`
+    ? `<h4>Blocked jobs, and what each waits on</h4><ul class="blocked-list">${ns.jobs.blocked_jobs.map((j) => blockedJob(j, csrf)).join("")}</ul>`
     : "";
 
   return `<section class="ns">
 <h3>${escapeHtml(ns.namespace)}</h3>
 ${paused}${anchorProblem}
 <ul class="facts">${facts.join("")}</ul>
+<div class="acts">
+${
+    ns.paused
+      ? form(csrf, "unpause", { namespace: ns.namespace }, "Unpause")
+      : form(csrf, "pause", { namespace: ns.namespace }, "Pause", reasonField("why"))
+  }
+</div>
 ${blocked}
 </section>`;
 }
 
-function agentRow(agent: AgentReputation): string {
+// EVERY FORM CARRIES THE SAME TWO HIDDEN FIELDS: the action and the CSRF token. The
+// confirm is NOT among them, deliberately. Posting without it renders the
+// confirmation page, which is what makes the confirm a decision rather than a field
+// the browser fills in on the reader's behalf.
+function form(csrf: string, action: string, fields: Record<string, string>, label: string, extra = ""): string {
+  const hidden = Object.entries(fields)
+    .map(([k, v]) => `<input type="hidden" name="${escapeHtml(k)}" value="${escapeHtml(v)}">`)
+    .join("");
+  return `<form method="post" action="${CONSOLE_PATH}" class="act">
+<input type="hidden" name="action" value="${escapeHtml(action)}">
+<input type="hidden" name="csrf" value="${escapeHtml(csrf)}">
+${hidden}${extra}
+<button type="submit">${escapeHtml(label)}</button>
+</form>`;
+}
+
+function reasonField(placeholder: string): string {
+  return `<input type="text" name="reason" placeholder="${escapeHtml(placeholder)}" maxlength="1000">`;
+}
+
+function modeForms(data: ConsoleData, csrf: string): string {
+  const modes = ["off", "subscription", "api"].filter((m) => m !== data.improve.mode);
+  return `<div class="acts">${modes.map((m) => form(csrf, "mode", { value: m }, `Set mode: ${m}`)).join("")}</div>`;
+}
+
+function agentRow(agent: AgentReputation, csrf: string): string {
   const scope = agent.namespaces === "*" ? "every namespace" : agent.namespaces.join(", ");
   const flags = agent.flags.length ? agent.flags.join(", ") : "none";
   const attempts =
@@ -263,23 +314,24 @@ function agentRow(agent: AgentReputation): string {
 <td class="num">${agent.jobs_completed} / ${agent.jobs_failed} / ${agent.jobs_blocked}</td>
 <td class="num">${agent.prs_opened} / ${agent.prs_merged}</td>
 ${attempts || '<td class="num muted">n/a</td>'}
+<td>${agent.revoked_at ? "" : form(csrf, "revoke_agent", { name: agent.name }, "Revoke")}</td>
 </tr>`;
 }
 
-function agentsPanel(data: ConsoleData): string {
+function agentsPanel(data: ConsoleData, csrf: string): string {
   if (!data.agents.length) return `<p class="empty">No agents have been minted.</p>`;
   return `<p class="sub">Counts, not scores. Every number is a row this store wrote.</p>
 <div class="scroll"><table>
 <thead><tr>
 <th>agent</th><th>kind</th><th>namespaces</th><th>flags held</th><th>last seen</th>
-<th>jobs done / failed / blocked</th><th>PRs opened / merged</th><th>attempts</th>
+<th>jobs done / failed / blocked</th><th>PRs opened / merged</th><th>attempts</th><th></th>
 </tr></thead>
-<tbody>${data.agents.map(agentRow).join("")}</tbody>
+<tbody>${data.agents.map((a) => agentRow(a, csrf)).join("")}</tbody>
 </table></div>`;
 }
 
-export function renderConsole(data: ConsoleData): string {
-  const rows = data.improve.namespaces.map((ns) => namespaceRow(data, ns));
+export function renderConsole(data: ConsoleData, csrf = ""): string {
+  const rows = data.improve.namespaces.map((ns) => namespaceRow(data, ns, csrf));
   const namespaces = rows.length
     ? rows.join("")
     : `<p class="empty">No namespaces on the improve roster.</p>`;
@@ -296,10 +348,11 @@ export function renderConsole(data: ConsoleData): string {
 <h1>Capsid console</h1>
 <p class="sub">Signed in as ${escapeHtml(data.viewer)}. Generated ${escapeHtml(data.generated)}.</p>
 <ul class="facts">${headerFacts(data)}</ul>
+${modeForms(data, csrf)}
 <h2>Namespaces</h2>
 ${namespaces}
 <h2>Agents</h2>
-${agentsPanel(data)}
+${agentsPanel(data, csrf)}
 </main>
 </body>
 </html>`;

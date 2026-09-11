@@ -24,7 +24,10 @@ import type { Env } from "./env";
 
 const CONSOLE_SESSION_COOKIE = "capsid_console";
 const CONSOLE_STATE_COOKIE = "capsid_console_state";
-const CONSOLE_SESSION_TTL_SECONDS = 12 * 60 * 60;
+// Read by the action handler and written by the page render, so it lives with the
+// other cookie names rather than in whichever module happened to need it first.
+export const CONSOLE_CSRF_COOKIE = "capsid_console_csrf";
+export const CONSOLE_SESSION_TTL_SECONDS = 12 * 60 * 60;
 const CONSOLE_STATE_TTL_SECONDS = 600;
 const CONSOLE_STATE_KV_PREFIX = "capsid:console-state:";
 

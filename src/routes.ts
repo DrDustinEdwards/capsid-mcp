@@ -34,6 +34,7 @@ import {
   handleConsole,
   handleConsoleJson,
 } from "./console";
+import { handleConsoleAction } from "./console-actions";
 import { handleConsoleCallback } from "./console-auth";
 
 const GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize";
@@ -659,6 +660,7 @@ export const defaultHandler = {
     if (url.pathname === "/authorize" && request.method === "POST") return handleAuthorizePost(request, env);
     if (url.pathname === "/callback") return handleCallback(request, env);
     if (url.pathname === CONSOLE_PATH && request.method === "GET") return handleConsole(request, env);
+    if (url.pathname === CONSOLE_PATH && request.method === "POST") return handleConsoleAction(request, env);
     if (url.pathname === CONSOLE_JSON_PATH && request.method === "GET") return handleConsoleJson(request, env);
     if (url.pathname === CONSOLE_CALLBACK_PATH) return handleConsoleCallback(request, env, new Date());
 
