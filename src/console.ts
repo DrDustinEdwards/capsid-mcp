@@ -3,6 +3,7 @@ import { healthReport, type HealthReport } from "./health";
 import { escapeHtml } from "./html";
 import { improveStatus, type NamespaceStatus, type StatusReport } from "./improve-run";
 import { readConsoleSession, startConsoleLogin, type ConsoleUser } from "./console-auth";
+import { loadReputation, type AgentReputation } from "./console-reputation";
 
 // THE CONSOLE: one page that answers "what is the state of every namespace" without
 // asking a chat.
@@ -35,14 +36,20 @@ export interface ConsoleData {
   viewer: string;
   health: HealthReport;
   improve: StatusReport;
+  agents: AgentReputation[];
 }
 
 export async function consoleData(env: Env, viewer: string, now: Date): Promise<ConsoleData> {
+  const improve = await improveStatus(env);
   return {
     generated: now.toISOString(),
     viewer,
     health: await healthReport(env),
-    improve: await improveStatus(env),
+    improve,
+    // The inventory improve_status already resolved, with what each credential did
+    // counted against it. Passed in rather than re-read, so the panel cannot list an
+    // agent the rest of the page does not.
+    agents: await loadReputation(env.DB, improve.agents),
   };
 }
 
@@ -120,6 +127,13 @@ h4 { font-size: 0.8rem; margin: 1rem 0 0.5rem; text-transform: uppercase; letter
 .blocked-list { list-style: none; padding: 0; margin: 0; }
 .blocked { border-left: 3px solid var(--warn); padding: 0.25rem 0 0.25rem 0.75rem; margin-bottom: 0.75rem; }
 .blocked strong { display: block; }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 0.85rem; background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
+th, td { text-align: left; padding: 0.45rem 0.6rem; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); font-weight: 600; }
+tbody tr:last-child td { border-bottom: 0; }
+.num { font-variant-numeric: tabular-nums; }
+.revoked td { opacity: 0.55; }
 pre { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 0.6rem; overflow-x: auto; white-space: pre-wrap; font-size: 0.8rem; margin: 0.5rem 0 0; }
 `;
 
@@ -157,7 +171,7 @@ function headerFacts(data: ConsoleData): string {
 // last_seen a person reads off this row is how they decide whether a namespace has
 // a driver that still connects.
 function driverFor(data: ConsoleData, namespace: string) {
-  return data.improve.agents.find((a) => a.name === `${namespace}-driver`) ?? null;
+  return data.agents.find((a) => a.name === `${namespace}-driver`) ?? null;
 }
 
 function blockedJob(job: NamespaceStatus["jobs"]["blocked_jobs"][number]): string {
@@ -230,6 +244,40 @@ ${blocked}
 </section>`;
 }
 
+function agentRow(agent: AgentReputation): string {
+  const scope = agent.namespaces === "*" ? "every namespace" : agent.namespaces.join(", ");
+  const flags = agent.flags.length ? agent.flags.join(", ") : "none";
+  const attempts =
+    agent.attempts_kept === null
+      ? ""
+      : `<td class="num">${agent.attempts_kept} kept / ${agent.attempts_reverted} reverted</td>`;
+  const state = agent.revoked_at
+    ? `<span class="bad">revoked ${escapeHtml(agent.revoked_at)}</span>`
+    : escapeHtml(agent.last_seen ?? "never connected");
+  return `<tr${agent.revoked_at ? ' class="revoked"' : ""}>
+<td><code>${escapeHtml(agent.name)}</code></td>
+<td>${escapeHtml(agent.kind)}</td>
+<td>${escapeHtml(scope)}</td>
+<td>${escapeHtml(flags)}</td>
+<td>${state}</td>
+<td class="num">${agent.jobs_completed} / ${agent.jobs_failed} / ${agent.jobs_blocked}</td>
+<td class="num">${agent.prs_opened} / ${agent.prs_merged}</td>
+${attempts || '<td class="num muted">n/a</td>'}
+</tr>`;
+}
+
+function agentsPanel(data: ConsoleData): string {
+  if (!data.agents.length) return `<p class="empty">No agents have been minted.</p>`;
+  return `<p class="sub">Counts, not scores. Every number is a row this store wrote.</p>
+<div class="scroll"><table>
+<thead><tr>
+<th>agent</th><th>kind</th><th>namespaces</th><th>flags held</th><th>last seen</th>
+<th>jobs done / failed / blocked</th><th>PRs opened / merged</th><th>attempts</th>
+</tr></thead>
+<tbody>${data.agents.map(agentRow).join("")}</tbody>
+</table></div>`;
+}
+
 export function renderConsole(data: ConsoleData): string {
   const rows = data.improve.namespaces.map((ns) => namespaceRow(data, ns));
   const namespaces = rows.length
@@ -250,6 +298,8 @@ export function renderConsole(data: ConsoleData): string {
 <ul class="facts">${headerFacts(data)}</ul>
 <h2>Namespaces</h2>
 ${namespaces}
+<h2>Agents</h2>
+${agentsPanel(data)}
 </main>
 </body>
 </html>`;

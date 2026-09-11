@@ -123,6 +123,7 @@ test("the shell renders with ZERO namespaces rather than throwing on an empty ro
       agents: [],
       namespaces: [],
     },
+    agents: [],
   });
   assert.match(html, /No namespaces on the improve roster/);
   assert.match(html, /0009_jobs_required_scopes\.sql/);

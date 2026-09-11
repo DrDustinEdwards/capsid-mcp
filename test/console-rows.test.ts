@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { renderConsole, type ConsoleData } from "../src/console.ts";
 import type { NamespaceStatus } from "../src/improve-run.ts";
+import type { AgentReputation } from "../src/console-reputation.ts";
 
 // GROUP 2: THE NAMESPACE ROWS.
 //
@@ -55,7 +56,7 @@ function namespaceStatus(overrides: Partial<NamespaceStatus> = {}): NamespaceSta
   };
 }
 
-function data(namespaces: NamespaceStatus[], agents: ConsoleData["improve"]["agents"] = []): ConsoleData {
+function data(namespaces: NamespaceStatus[], agents: AgentReputation[] = []): ConsoleData {
   return {
     generated: "2026-09-11T14:00:00.000Z",
     viewer: "DrDustinEdwards",
@@ -75,6 +76,7 @@ function data(namespaces: NamespaceStatus[], agents: ConsoleData["improve"]["age
       agents,
       namespaces,
     },
+    agents,
   };
 }
 
@@ -170,6 +172,13 @@ test("the row names the driver agent's last_seen, matched from the agent invento
           flags: [],
           last_seen: "2026-09-11 14:12:01",
           revoked_at: null,
+          jobs_completed: 4,
+          jobs_failed: 0,
+          jobs_blocked: 1,
+          prs_opened: 2,
+          prs_merged: 0,
+          attempts_kept: 6,
+          attempts_reverted: 14,
         },
         {
           name: "foxing-driver",
@@ -179,14 +188,25 @@ test("the row names the driver agent's last_seen, matched from the agent invento
           flags: [],
           last_seen: "2026-09-01 03:00:00",
           revoked_at: null,
+          jobs_completed: 0,
+          jobs_failed: 0,
+          jobs_blocked: 0,
+          prs_opened: 0,
+          prs_merged: 0,
+          attempts_kept: 1,
+          attempts_reverted: 3,
         },
       ]
     )
   );
-  assert.match(html, /driver last seen/i);
-  assert.match(html, /2026-09-11 14:12:01/);
+  // Scoped to the namespace SECTION, not the whole page: the agents panel lists every
+  // credential and legitimately prints both timestamps, so asserting over the whole
+  // document would pass for the wrong reason once that panel exists.
+  const row = html.slice(html.indexOf('<section class="ns">'), html.indexOf("</section>"));
+  assert.match(row, /driver last seen/i);
+  assert.match(row, /2026-09-11 14:12:01/);
   // The OTHER namespace's driver must not be borrowed for this row.
-  assert.doesNotMatch(html, /2026-09-01 03:00:00/, "a different namespace's driver last_seen leaked into the row");
+  assert.doesNotMatch(row, /2026-09-01 03:00:00/, "a different namespace's driver last_seen leaked into the row");
 });
 
 test("a namespace whose driver has never connected says so instead of showing a blank", () => {
