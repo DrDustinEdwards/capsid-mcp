@@ -160,7 +160,7 @@ number in a dated document is a series.
 - **Prompts.** Every `prompt` document appears in the prompt list, with its
   `{{variable}}` placeholders as required arguments. `prompts/get` substitutes
   them and returns the body **as an embedded resource, not as user text.** That
-  distinction is load-bearing: a document body is writable by any session holding
+  distinction matters: a document body is writable by any session holding
   a write grant, and returning it as plain user text hands whoever last wrote that
   row a message the client's model reads as its own operator speaking.
 

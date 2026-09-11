@@ -341,7 +341,7 @@ improve_run(action: "pause", namespace: "all", reason: "why")
 ```
 
 `off` is also what an unset key, an unrecognised value or an unreadable store
-mean. That default is load-bearing: without it, an unreadable configuration store
+mean. That default matters: without it, an unreadable configuration store
 starts writing to every repository on the roster.
 
 ### After the first night
