@@ -71,6 +71,12 @@ export const TABLES = [
   // record of who asked for what and what came back, and the mirrored document
   // carries only the body.
   "jobs",
+  // The scoped credentials (migrations/0008). Nothing prunes it: a revoked agent
+  // keeps its row so the audit trail it wrote still resolves to what it was allowed
+  // to do. What the dump carries is the sha256 VERIFIER, never a key, exactly as
+  // OPERATOR_KEY_HASH carries one; losing this table would orphan every minted
+  // credential in the portfolio with no way to tell which was which.
+  "agents",
   // The replay cache (migrations/0004). Pruned below rather than retained: a jti
   // is only meaningful inside the 30-minute signature window.
   "improve_jti",
