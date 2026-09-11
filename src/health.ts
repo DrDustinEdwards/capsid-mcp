@@ -28,7 +28,21 @@ async function backupFreshness(
   return result;
 }
 
-export async function handleHealth(env: Env): Promise<Response> {
+export interface HealthReport {
+  status: "ok" | "degraded";
+  sha: string;
+  dirty: boolean;
+  builtAt: string | null;
+  schema_version: string | null;
+  store: { d1: string; fts: string };
+  backup: { last_ok: string | null; age_hours: number | null; warning?: string };
+}
+
+// THE PROBE AS DATA. /health serializes this and the console header renders it, so
+// the sha, the schema version and the backup age a person reads on the console are
+// the same three values the live gate asserts. A second query path for them would be
+// a second set of numbers to disagree.
+export async function healthReport(env: Env): Promise<HealthReport> {
   const provenance = {
     sha: env.BUILD_SHA ?? "unknown",
     dirty: env.BUILD_DIRTY === "true",
@@ -59,8 +73,10 @@ export async function handleHealth(env: Env): Promise<Response> {
   const backup = await backupFreshness(env);
 
   const healthy = d1 === "ok" && fts === "ok";
-  return Response.json(
-    { status: healthy ? "ok" : "degraded", ...provenance, schema_version, store: { d1, fts }, backup },
-    { status: healthy ? 200 : 503 }
-  );
+  return { status: healthy ? "ok" : "degraded", ...provenance, schema_version, store: { d1, fts }, backup };
+}
+
+export async function handleHealth(env: Env): Promise<Response> {
+  const report = await healthReport(env);
+  return Response.json(report, { status: report.status === "ok" ? 200 : 503 });
 }

@@ -17,6 +17,20 @@ export async function hmacHex(secret: string, payload: string): Promise<string> 
   return bytesToHex(sig);
 }
 
+// Cookie lookup, once. The consent flow and the console session both read cookies
+// off a Request, and a hand-rolled second parser is where a trailing-space or a
+// name-prefix bug lands.
+export function getCookie(request: Request, name: string): string | null {
+  const header = request.headers.get("Cookie");
+  if (!header) return null;
+  for (const part of header.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq === -1) continue;
+    if (part.slice(0, eq).trim() === name) return part.slice(eq + 1).trim();
+  }
+  return null;
+}
+
 // Constant-time compare of equal-length strings. The length check leaks length only.
 export function timingSafeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;

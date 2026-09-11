@@ -1,7 +1,7 @@
 import type { AuthRequest } from "@cloudflare/workers-oauth-provider";
 import { createMcpHandler } from "agents/mcp";
 import { APPROVAL_MAX_AGE_SECONDS, approvalTag } from "./approval";
-import { hmacHex, isAdminUser, sha256Hex, timingSafeEqual } from "./auth";
+import { getCookie, hmacHex, isAdminUser, sha256Hex, timingSafeEqual } from "./auth";
 import { resolveAgent } from "./agents";
 import { runBackup } from "./backup";
 import { b64urlDecode, b64urlEncode } from "./encoding";
@@ -26,6 +26,15 @@ import {
   verifySignedReport,
 } from "./improve-scorer";
 import { handleHealth } from "./health";
+import { escapeHtml } from "./html";
+import {
+  CONSOLE_CALLBACK_PATH,
+  CONSOLE_JSON_PATH,
+  CONSOLE_PATH,
+  handleConsole,
+  handleConsoleJson,
+} from "./console";
+import { handleConsoleCallback } from "./console-auth";
 
 const GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize";
 const GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token";
@@ -39,17 +48,6 @@ const STATE_KV_PREFIX = "capsid:oauth-state:";
 
 function textResponse(message: string, status: number): Response {
   return new Response(message, { status, headers: { "Content-Type": "text/plain;charset=utf-8" } });
-}
-
-function getCookie(request: Request, name: string): string | null {
-  const header = request.headers.get("Cookie");
-  if (!header) return null;
-  for (const part of header.split(";")) {
-    const eq = part.indexOf("=");
-    if (eq === -1) continue;
-    if (part.slice(0, eq).trim() === name) return part.slice(eq + 1).trim();
-  }
-  return null;
 }
 
 // The approval cookie carries entries from src/approval.ts: a client id bound to a
@@ -78,15 +76,6 @@ async function approvalCookie(tags: string[], secret: string): Promise<string> {
   const payload = b64urlEncode(JSON.stringify(tags));
   const sig = await hmacHex(secret, payload);
   return `${APPROVAL_COOKIE}=${sig}.${payload}; HttpOnly; Secure; SameSite=Lax; Path=/authorize; Max-Age=${APPROVAL_MAX_AGE_SECONDS}`;
-}
-
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
 }
 
 function renderApprovalDialog(oauthReq: AuthRequest, clientName: string, csrf: string, registeredUris: string[] | undefined): Response {
@@ -669,6 +658,10 @@ export const defaultHandler = {
     if (url.pathname === "/authorize" && request.method === "GET") return handleAuthorizeGet(request, env);
     if (url.pathname === "/authorize" && request.method === "POST") return handleAuthorizePost(request, env);
     if (url.pathname === "/callback") return handleCallback(request, env);
+    if (url.pathname === CONSOLE_PATH && request.method === "GET") return handleConsole(request, env);
+    if (url.pathname === CONSOLE_JSON_PATH && request.method === "GET") return handleConsoleJson(request, env);
+    if (url.pathname === CONSOLE_CALLBACK_PATH) return handleConsoleCallback(request, env, new Date());
+
     return new Response("not found", { status: 404 });
   },
 };
