@@ -37,6 +37,15 @@ const HOT_TABLES = [
 // be argued for in this file rather than slipped past a regex.
 const WHOLE_TABLE_BY_DESIGN = [
   { file: "backup.ts", sql: /^SELECT \* FROM /i, why: "the nightly dump reads every row of a table on purpose" },
+  {
+    file: "console-activity.ts",
+    sql: /^SELECT at, actor, action, namespace, path FROM audit_log WHERE 1 = 1 ORDER BY id DESC LIMIT/i,
+    why:
+      "the console's UNFILTERED activity read. With no WHERE and ORDER BY id DESC LIMIT 50, SQLite walks the rowid " +
+      "b-tree backwards and stops at 50 rows: the plan carries NO TEMP B-TREE, so nothing is sorted, and it reads " +
+      "LIMIT rows rather than the table. No index improves on reading the last 50 rowids. The FILTERED variants of " +
+      "this same statement are not exempt and are checked by name below, because those are the ones that could scan.",
+  },
 ];
 
 function arity(sql: string): number {
@@ -134,6 +143,73 @@ describe("query plans", () => {
       expect(statement.sql, `${statement.sql} does not filter on the column its index covers`).toMatch(
         /WHERE (at|snapshot_at) < datetime/i
       );
+    }
+  });
+
+  // THE HOLE THE WALKER LEAVES, CLOSED BY HAND (PR #20).
+  //
+  // scripts/sql-statements.mjs substitutes an optional `${clause}` with `WHERE 1 = 1`,
+  // on the stated assumption that "an optional filter can only narrow the scan the plan
+  // reports". THAT ASSUMPTION IS FALSE, and this is where it was measured: the console's
+  // activity read planned clean as a tautology and, with `WHERE namespace = ?`, found its
+  // rows through audit_log_doc and then SORTED ALL OF THEM to take the newest 50, because
+  // that index is (namespace, path, id DESC) and an unconstrained `path` puts its id
+  // ordering out of reach.
+  //
+  // A substituted statement is therefore checked for the shape it plans as, and the
+  // variants it stands in for are checked here, by name. Same reasoning as the 0005 test
+  // below: a plan that says SEARCH and then TEMP B-TREE FOR ORDER BY has lost the point of
+  // the index.
+  const ACTIVITY_VARIANTS: Array<[string, string, number, string]> = [
+    [
+      "by namespace",
+      "SELECT at, actor, action, namespace, path FROM audit_log WHERE namespace = ?1 ORDER BY id DESC LIMIT ?2",
+      2,
+      "audit_log_ns_recent",
+    ],
+    [
+      "by actor",
+      "SELECT at, actor, action, namespace, path FROM audit_log WHERE actor = ?1 ORDER BY id DESC LIMIT ?2",
+      2,
+      "audit_log_actor_recent",
+    ],
+    [
+      "by both",
+      "SELECT at, actor, action, namespace, path FROM audit_log WHERE namespace = ?1 AND actor = ?2 ORDER BY id DESC LIMIT ?3",
+      3,
+      "audit_log_ns_recent",
+    ],
+  ];
+
+  it("PLANT: every FILTERED activity read uses an index and sorts nothing", async () => {
+    for (const [label, sql, n, index] of ACTIVITY_VARIANTS) {
+      const result = await env.DB.prepare(`EXPLAIN QUERY PLAN ${sql}`)
+        .bind(...new Array(n).fill("x"))
+        .all<{ detail: string }>();
+      const plan = result.results.map((r) => r.detail).join(" | ");
+      expect(plan, `activity ${label} does not use ${index}`).toContain(index);
+      expect(plan, `activity ${label} sorts its rows to honour the LIMIT`).not.toContain("TEMP B-TREE");
+    }
+  });
+
+  it("PLANT: the reputation aggregations group in index order, not through a temp b-tree", async () => {
+    for (const sql of [
+      "SELECT actor, COUNT(*) AS n FROM audit_log WHERE action = 'open_pr' GROUP BY actor",
+      `SELECT actor, COUNT(*) AS n FROM audit_log WHERE action = 'manage_pr' AND params LIKE '%"merged":true%' GROUP BY actor`,
+    ]) {
+      const result = await env.DB.prepare(`EXPLAIN QUERY PLAN ${sql}`).all<{ detail: string }>();
+      const plan = result.results.map((r) => r.detail).join(" | ");
+      expect(plan, `${sql.slice(0, 60)} does not use audit_log_action_actor`).toContain("audit_log_action_actor");
+      expect(plan, `${sql.slice(0, 60)} builds a temp b-tree to group`).not.toContain("TEMP B-TREE");
+    }
+  });
+
+  it("the indexes 0010 declares all exist in the real schema", async () => {
+    const expected = ["audit_log_action_actor", "audit_log_actor_recent", "audit_log_ns_recent"];
+    const rows = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all<{ name: string }>();
+    const present = rows.results.map((r) => r.name);
+    for (const name of expected) {
+      expect(present, `${name} is declared in migrations/0010 and absent from the applied schema`).toContain(name);
     }
   });
 
