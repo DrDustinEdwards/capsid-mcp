@@ -10,3 +10,6 @@ wrangler.jsonc
 # can read, which defeats the entire measurement. Ignored so an accident is not
 # one `git add -A` away.
 .improve-holdout/
+
+# Project MCP config: carries a driver bearer token
+.mcp.json
