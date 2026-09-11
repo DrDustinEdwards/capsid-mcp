@@ -43,11 +43,12 @@ function handlerConstant(name: string): string {
 const BACKUP_CRON = handlerConstant("BACKUP_CRON");
 const IMPROVE_OPEN_CRON = handlerConstant("IMPROVE_OPEN_CRON");
 const IMPROVE_TICK_CRON = handlerConstant("IMPROVE_TICK_CRON");
+const SKILLS_REFRESH_CRON = handlerConstant("SKILLS_REFRESH_CRON");
 const IMPROVE_OPEN_HOUR_CT = Number(
   /export const IMPROVE_OPEN_HOUR_CT = (\d+);/.exec(sourceFile("index.ts"))?.[1]
 );
 
-const HANDLED = [BACKUP_CRON, IMPROVE_OPEN_CRON, IMPROVE_TICK_CRON];
+const HANDLED = [BACKUP_CRON, IMPROVE_OPEN_CRON, IMPROVE_TICK_CRON, SKILLS_REFRESH_CRON];
 
 test("every cron the handler dispatches on is declared in the config", () => {
   const declared = declaredCrons();
@@ -61,8 +62,8 @@ test("every cron the config fires is handled", () => {
   assert.deepEqual(unhandled, [], `wrangler.jsonc.example fires crons nothing handles: ${unhandled.join(", ")}`);
 });
 
-test("the three are distinct, so the dispatch cannot be ambiguous", () => {
-  assert.equal(new Set(HANDLED).size, 3);
+test("the four are distinct, so the dispatch cannot be ambiguous", () => {
+  assert.equal(new Set(HANDLED).size, 4);
 });
 
 test("the handler dispatches on controller.cron, not on the clock", () => {
@@ -71,17 +72,17 @@ test("the handler dispatches on controller.cron, not on the clock", () => {
   // cron would run the wrong body, or all three bodies.
   const index = sourceFile("index.ts");
   assert.match(index, /const cron = controller\.cron;/);
-  for (const name of ["BACKUP_CRON", "IMPROVE_OPEN_CRON", "IMPROVE_TICK_CRON"]) {
+  for (const name of ["BACKUP_CRON", "IMPROVE_OPEN_CRON", "IMPROVE_TICK_CRON", "SKILLS_REFRESH_CRON"]) {
     assert.match(index, new RegExp(`if \\(cron === ${name}\\)`), `${name} is declared but nothing dispatches on it`);
   }
 });
 
 test("each branch is guarded on its own, so one throwing does not stop the others", () => {
   const index = sourceFile("index.ts");
-  // Three separate ctx.waitUntil chains, each with its own catch. A shared try
+  // Four separate ctx.waitUntil chains, each with its own catch. A shared try
   // would let a failing improve tick cancel the backup.
-  assert.equal(index.split("ctx.waitUntil(").length - 1, 3);
-  assert.ok(index.split(".catch((err)").length - 1 >= 3, "a cron branch has no catch of its own");
+  assert.equal(index.split("ctx.waitUntil(").length - 1, 4);
+  assert.ok(index.split(".catch((err)").length - 1 >= 4, "a cron branch has no catch of its own");
 });
 
 // ---- the DST gate -----------------------------------------------------------

@@ -10,12 +10,17 @@ import type { Env, Props } from "./env";
 import { buildServer } from "./server";
 import { chicagoHour } from "./improve-schema";
 import { openRuns, tickRuns } from "./improve-run";
+import { runSkillsRefresh } from "./skills-refresh";
 
 // Spelled once. wrangler.jsonc declares them; test/improve-cron.test.ts derives
 // one list from the other and fails in both directions.
 export const BACKUP_CRON = "0 9 * * *";
 export const IMPROVE_OPEN_CRON = "0 8,9 * * *";
 export const IMPROVE_TICK_CRON = "*/5 * * * *";
+// Fires daily; readSchedule decides whether today is the configured day. The
+// expression cannot be read from KV, so a daily fire plus a KV day is what makes
+// the weekly schedule reconfigurable without a redeploy.
+export const SKILLS_REFRESH_CRON = "30 9 * * *";
 
 // 03:00 America/Chicago, per the arc.
 export const IMPROVE_OPEN_HOUR_CT = 3;
@@ -100,8 +105,8 @@ export default {
     const response = await provider.fetch(request, env, ctx);
     return withSecurityHeaders(withCacheDefault(response, pathname));
   },
-  // Dispatch on controller.cron, not the clock: 09:00 UTC matches all three
-  // expressions and Cloudflare delivers once per expression. Open cron is two
+  // Dispatch on controller.cron, not the clock: 09:00 UTC matches three of the
+  // four expressions and Cloudflare delivers once per expression. Open cron is two
   // UTC hours because 03:00 America/Chicago is 08:00 or 09:00 depending on DST;
   // chicagoHour() picks the real 03:00. Each branch is its own try so a throwing
   // tick cannot stop the backup.
@@ -160,6 +165,27 @@ ${err.stack}` : String(err)}`);
           })
           .catch((err) => {
             console.error(`IMPROVE_TICK_THREW ${err instanceof Error ? `${err.message}
+${err.stack}` : String(err)}`);
+            throw err;
+          })
+      );
+    }
+
+    if (cron === SKILLS_REFRESH_CRON) {
+      ctx.waitUntil(
+        runSkillsRefresh(env, new Date())
+          .then((outcome) => {
+            if (!outcome.ran) {
+              console.log(`SKILLS_REFRESH_SKIPPED ${outcome.skipped}`);
+              return;
+            }
+            console.log(
+              `SKILLS_REFRESH checked=${outcome.checked} changed=${outcome.changed.join(",") || "none"} posted=${outcome.posted.join(",") || "none"}`
+            );
+            for (const r of outcome.refused) console.error(`SKILLS_REFRESH_REFUSED ${r.slug}: ${r.reason}`);
+          })
+          .catch((err) => {
+            console.error(`SKILLS_REFRESH_THREW ${err instanceof Error ? `${err.message}
 ${err.stack}` : String(err)}`);
             throw err;
           })
