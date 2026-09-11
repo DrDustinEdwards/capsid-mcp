@@ -8,6 +8,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Env } from "./env";
 import { legacyAgent, type Agent } from "./agents";
+import { checkScope, guardRegistrations } from "./scope";
 import { b64urlDecode, b64urlEncode } from "./encoding";
 import { MAX_ROWS } from "./limits";
 import { registerDocTools, type ToolCtx, type ToolGrant } from "./tools/docs";
@@ -65,7 +66,24 @@ export function buildServer(env: Env, caller: Agent | ToolGrant, actor = ""): Mc
     return row?.actor ?? null;
   };
 
-  const ctx: ToolCtx = { env, db, grant, mayWrite, actor: agent.actor, agent, lastActor };
+  const ctx: ToolCtx = {
+    env,
+    db,
+    grant,
+    mayWrite,
+    actor: agent.actor,
+    agent,
+    // The handler half of the one enforcement point. The registrar below covers what
+    // is knowable before a handler runs; this is what an "action" tool and every repo
+    // mutation call at the point where the action, the mode and the path are known.
+    scope: (need) => checkScope(agent, need),
+    lastActor,
+  };
+
+  // BEFORE ANY REGISTRATION. Every server.registerTool call below this line is
+  // wrapped, whether or not its author thought about scopes, which is the property
+  // the per-tool gate it replaces could not have.
+  guardRegistrations(server, agent);
 
   registerDocTools(server, ctx);
   registerLintTools(server, ctx);

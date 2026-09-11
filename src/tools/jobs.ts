@@ -4,12 +4,12 @@ import { z } from "zod";
 import { bounded, docPath, MAX_BODY, MAX_TITLE, nsName } from "../limits";
 import { JOB_ACTIONS, JOB_LEASE_SECONDS, JOB_STATUSES, isJobStatus } from "../jobs-schema";
 import { blockJob, claimJob, completeJob, failJob, heartbeatJob, listJobs, postJob, resumeJob } from "../jobs";
-import { DENIED, fail, ok, type ToolCtx } from "./docs";
+import { fail, ok, type ToolCtx } from "./docs";
 
 const MAX_JOB_ID = 64;
 
 export function registerJobTools(server: McpServer, ctx: ToolCtx): void {
-  const { env, db, mayWrite, actor } = ctx;
+  const { env, db, actor } = ctx;
 
   // THE WORK QUEUE'S ONE TOOL, a ruled exception to hard rule 1 taking the surface
   // from 30 to 31 (capsid/decisions.md, 2026-09-10). Seven actions on one tool
@@ -50,8 +50,11 @@ export function registerJobTools(server: McpServer, ctx: ToolCtx): void {
           }
           return ok(await listJobs(env, { namespace: args.namespace, status: args.status }));
         }
-        // Everything else changes the queue.
-        if (!mayWrite) return fail(DENIED);
+        // EVERYTHING ELSE CHANGES THE QUEUE, so the grant is checked here rather than
+        // at the registrar: `jobs` is one tool with a read action and seven write
+        // ones, and the registrar cannot know which this call is.
+        const refusal = ctx.scope({ tool: "jobs", grant: "write", namespace: args.namespace });
+        if (refusal) return fail(refusal);
         switch (args.action) {
           case "post": {
             if (!args.namespace || !args.title || !args.body) {

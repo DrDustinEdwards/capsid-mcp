@@ -59,7 +59,9 @@ test("A READ-ONLY KEY CANNOT REACH improve_run, and writes nothing while refusin
     const result = (await client.callTool({ name: "improve_run", arguments: { namespace: "capsid" } })) as ToolResult;
     await close();
     assert.equal(result.isError, true, "a read-only key reached improve_run");
-    assert.match(result.content[0].text, /write-grant operator key/);
+    // The refusal names the missing scope (src/scope.ts). It used to name the
+    // "write-grant operator key" because that was the only thing a caller could be.
+    assert.match(result.content[0].text, /requires the write grant/);
     // The refusal has to come BEFORE any statement, not after the work is done.
     assert.deepEqual(d1.recorded, [], "improve_run wrote statements while refusing a read-only key");
     assert.deepEqual(kv.puts, [], "improve_run wrote to KV while refusing a read-only key");

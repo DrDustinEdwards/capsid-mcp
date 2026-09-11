@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { hintsFor, TOOL_HINTS } from "../src/tool-annotations.ts";
+import { requiredGrant } from "../src/scope.ts";
 import { AUTHORITATIVE } from "../src/counts.ts";
 import { allSourceText, toolBlocks } from "./source-files.ts";
 
@@ -18,10 +19,21 @@ const CAPSID = AUTHORITATIVE.capsid;
 // because "0 tools disagreed" and "0 tools were read" are indistinguishable
 // otherwise (capsid/conventions.md: pair every content check with a count check).
 
-// A handler is write-gated iff it reaches the operator write grant. Two spellings,
-// both matched by shape: the inline refusal, and the shared repo-write wrapper that
-// begins with the same refusal.
-const WRITE_GATE = [/if \(!mayWrite\) return fail\(DENIED\)/, /\bguardedWrite\(/];
+// A tool is WRITE-GATED iff src/scope.ts says a call needs the write grant.
+//
+// This used to be read out of the handler text, matching the inline `if (!mayWrite)`
+// refusal or the shared repo-write wrapper. The gate moved to one enforcement point
+// (the registrar, plus an explicit check in the two action-scoped tools), so the
+// handler no longer carries a spelling to match and the requirement is read from the
+// artifact that decides it.
+//
+// It is still DERIVED rather than declared, which is the whole point of this file:
+// TOOL_GRANTS is what the registrar enforces at runtime, so a tool whose requirement
+// changes there changes its hint here, and test/invariants.test.ts separately proves
+// TOOL_GRANTS itself against the handlers (every mutating tool is write-gated, and
+// nothing marked read contains mutating SQL). The two files together close the loop
+// that reading one artifact against itself would leave open.
+const isWriteGated = (tool: string) => requiredGrant(tool) !== "read";
 
 // A write-gated handler is DESTRUCTIVE iff it can overwrite or remove state that
 // already exists. Matched by what the handler does, never by its name, so the next
@@ -79,7 +91,7 @@ test("PLANT: every tool is annotated at its registration, from the table and not
 });
 
 test("PLANT: readOnlyHint is exactly the negation of the write gate", () => {
-  const writeGated = toolBlocks().filter((b) => matches(b.body, WRITE_GATE));
+  const writeGated = toolBlocks().filter((b) => isWriteGated(b.name));
   // Vacuity guard. The read half is what is stable: fifteen read tools, and every
   // tool added since has been write-gated, so the gated count is the surface minus
   // fifteen and moves with counts.ts rather than by hand.
@@ -92,7 +104,7 @@ test("PLANT: readOnlyHint is exactly the negation of the write gate", () => {
 
   const wrong: string[] = [];
   for (const block of toolBlocks()) {
-    const gated = matches(block.body, WRITE_GATE);
+    const gated = isWriteGated(block.name);
     const hint = hintsFor(block.name);
     if (hint.readOnlyHint === gated) {
       wrong.push(`${block.name}: write-gated=${gated} but readOnlyHint=${hint.readOnlyHint}`);
@@ -105,14 +117,14 @@ test("PLANT: every write-gated tool declares readOnlyHint false", () => {
   // The same property said the way the audit asked for it, so a reader looking for
   // that sentence finds an assertion rather than an inference.
   const lying = toolBlocks()
-    .filter((b) => matches(b.body, WRITE_GATE))
+    .filter((b) => isWriteGated(b.name))
     .filter((b) => hintsFor(b.name).readOnlyHint !== false)
     .map((b) => b.name);
   assert.deepEqual(lying, [], `these write-gated tools claim to be read-only: ${lying.join(", ")}`);
 });
 
 test("PLANT: every mutating tool declares destructiveHint true", () => {
-  const mutating = toolBlocks().filter((b) => matches(b.body, WRITE_GATE) && matches(b.body, DESTRUCTIVE));
+  const mutating = toolBlocks().filter((b) => isWriteGated(b.name) && matches(b.body, DESTRUCTIVE));
   assert.ok(mutating.length >= 10, `the destructive scan found only ${mutating.length} mutating tools; it is broken`);
   const understated = mutating.filter((b) => hintsFor(b.name).destructiveHint !== true).map((b) => b.name);
   assert.deepEqual(understated, [], `these tools can overwrite or remove and do not say so: ${understated.join(", ")}`);

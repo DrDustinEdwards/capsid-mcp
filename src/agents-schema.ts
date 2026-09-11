@@ -136,6 +136,13 @@ export function allowsScope(list: ScopeList, value: string): boolean {
   return list === "*" ? true : list.includes(value);
 }
 
+// How a scope list reads in a refusal. A refusal that says "not in scope" without
+// saying what the scope IS costs the reader a round trip.
+export function describeScope(list: ScopeList): string {
+  if (list === "*") return "*";
+  return list.length === 0 ? "(none)" : list.join(", ");
+}
+
 // agent_<12 hex>. See the migration for why it is not a sequence.
 export function mintAgentId(): string {
   return `agent_${bytesToHex(crypto.getRandomValues(new Uint8Array(6)))}`;
