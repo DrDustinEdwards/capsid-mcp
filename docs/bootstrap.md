@@ -227,6 +227,39 @@ changes and leaves the rest. Revoke with `agents(action: "revoke", name: ...)`: 
 row stays, so the audit rows that agent wrote still resolve to what it was allowed
 to do, and its key stops working immediately.
 
+### The migration path, one credential at a time
+
+`OPERATOR_KEY_HASH` keeps working and keeps every authority it has today. It stops
+working when its hash is removed from the secret, and not before, so nothing has to
+be cut over in one sitting. The order that works:
+
+1. Mint the six agents below, as the admin. Each returns its key once; write each
+   into `~/.capsid/agent-<name>.key` on the machine that will use it.
+2. Point one driver at its key and let it work a job. `improve_status` shows
+   `last_seen` moving, which is how you know the agent is the credential in use and
+   not the operator key underneath it.
+3. When every machine has an agent and `last_seen` proves it, remove the operator
+   hash: `npx wrangler secret put OPERATOR_KEY_HASH` with the remaining entries.
+
+The six, as calls:
+
+```
+agents(action: "mint", name: "capsid-driver",        kind: "driver", namespaces: ["capsid"],        grants: ["read", "write"])
+agents(action: "mint", name: "dustinedwards-driver", kind: "driver", namespaces: ["dustinedwards"], grants: ["read", "write"])
+agents(action: "mint", name: "foxhound-driver",      kind: "driver", namespaces: ["foxhound"],      grants: ["read", "write"])
+agents(action: "mint", name: "foxing-driver",        kind: "driver", namespaces: ["foxing"],        grants: ["read", "write"])
+agents(action: "mint", name: "germomics-driver",     kind: "driver", namespaces: ["germomics"],     grants: ["read", "write"])
+agents(action: "mint", name: "seat",                 kind: "seat",   namespaces: ["*"],             grants: ["read", "write"], flags: { can_merge: true })
+```
+
+Five drivers, one per namespace, each with write on its own namespace and **no
+flags**: no merge, no direct write, no workflow write. One seat across every
+namespace that may merge, and may not commit directly to a default branch.
+
+Nothing else is granted. `can_dispatch`, `can_touch_protected` and `money_paths`
+stay off for all six until something concrete needs one, at which point
+`update_scopes` grants it and the audit row records who widened what, and from what.
+
 ### Jobs can say what they need
 
 `jobs(action: "post", ..., required_flags: ["can_merge"])` records the blast radius
