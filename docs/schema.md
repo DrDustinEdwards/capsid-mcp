@@ -164,6 +164,63 @@ number in a dated document is a series.
   a write grant, and returning it as plain user text hands whoever last wrote that
   row a message the client's model reads as its own operator speaking.
 
+## Jobs as evidence
+
+A finished job writes one row to `job_outcomes` (`migrations/0011_job_outcomes.sql`),
+so the queue produces the same kind of evidence the improve loop does. Before it,
+the only record of how a job went was `result_summary`: prose, written by the party
+being measured, which is the one kind of evidence that cannot be checked.
+
+One row per job, keyed by `job_id`, written by `complete` and by `fail` alike. A
+record of successes only is not a record.
+
+| column | what it is |
+| --- | --- |
+| `agent`, `namespace` | who did the work and where, copied from `jobs.claimed_by` at the moment the job ended rather than joined, since a later lease expiry clears that column |
+| `prs_opened`, `prs_merged` | GitHub's answer whenever the driver named any pull request |
+| `commits`, `files_changed` | the pull requests' own counts when there are any, the driver's otherwise |
+| `tests_added` | the driver's claim, never verifiable here: "a test was added" is a judgement about a diff, not a property of it |
+| `ci_green` | `1`, `0`, or `NULL` for not checked. A run still going is `NULL`, because "CI has not answered" is not "CI failed" |
+| `blocked_count`, `resumed_count` | how many gates the job hit and how many times a human sent it back, the two numbers the Worker knows first-hand |
+| `duration_minutes` | claimed to recorded. The FINAL working stretch: `resume` takes a fresh lease, so time spent blocked waiting on a human is excluded |
+| `result_kind` | `pr`, `doc` or `none`, derived from `result_ref` rather than declared |
+| `verified` | a JSON object of booleans saying which of the above this Worker checked itself |
+
+**The Worker never stores a count it could check and did not.** The driver reports;
+this Worker holds a GitHub App token and can ask. Where a check ran the stored
+number is GitHub's and the field is marked verified; where it could not run the
+driver's number is stored and the field is not. A table that mixed the two would be
+worse than no table, because it would look like measurement.
+
+**Partial verification is not verification.** If any named pull request cannot be
+read, every count on that row stays the driver's and every flag stays false: a
+merged count over the subset that happened to resolve is a smaller number presented
+as a total, which is how a count lies without anybody writing a wrong number.
+
+**`NULL` is not zero.** A field nobody reported is `NULL`; a field somebody counted
+and found empty is `0`. An average over a column that spelled both the same way
+would be an average over a lie.
+
+### agent_record
+
+`src/agent-record.ts` aggregates those rows into one record per credential, served
+in `improve_status`'s `agents` and rendered on the console: jobs done, failed and
+blocked, gates hit, resumes, pull requests opened and merged, a merge rate, a CI
+green rate with `ci_checked` as its stated denominator, a median duration, and for
+drivers the loop's kept and reverted counts.
+
+Three rules it will not bend. **Counts and rates, never a composite score**: a
+score needs a weighting, a weighting is an opinion, and the moment one number
+stands for all of them somebody gates on it. **Only a verified field feeds a rate**,
+since a rate built partly from what a credential reported about itself is a
+credential grading its own work. **A rate with no denominator is `null`**, because
+reporting `0%` for an agent that has opened no pull requests puts it below one that
+opened ten and merged one.
+
+`jobs.post` can require a record with `min_record` (`{prs_merged: n}`), checked at
+the claim against this same function, so the bar a claim is measured against is the
+number a human can read on the page.
+
 ## Why documents carry provenance
 
 Reads return `last_actor`: the actor from the most recent audit entry for that
@@ -208,7 +265,23 @@ that builds it.
       "prs_opened": 2,
       "prs_merged": 0,
       "attempts_kept": 6,
-      "attempts_reverted": 14
+      "attempts_reverted": 14,
+      "record": {
+        "actor": "agent:capsid-driver",
+        "jobs_done": 4,
+        "jobs_failed": 0,
+        "jobs_blocked": 1,
+        "gates_hit": 2,
+        "resumed": 2,
+        "prs_opened": 4,
+        "prs_merged": 3,
+        "pr_merge_rate": 0.75,
+        "ci_checked": 3,
+        "ci_green_rate": 1,
+        "median_duration_minutes": 41,
+        "attempts_kept": 6,
+        "attempts_reverted": 14
+      }
     }
   ],
   "activity": [
@@ -226,6 +299,15 @@ kind except `driver`, because an attempt belongs to a namespace's runs and
 crediting a seat with them would be attributing one credential's work to another.
 `activity_filter` echoes what the query string asked for, so a reader can tell a
 filtered view from the whole log.
+
+`record` is the agent record, and it is not the same measurement as the counts
+beside it. The flat `prs_opened` and `prs_merged` count what this credential did
+through this Worker, from `audit_log`. The record's counts come from
+`job_outcomes`, and its RATES come only from the fields the Worker checked against
+GitHub itself, which is why a driver can show pull requests in one and a `null`
+rate in the other: it opened them without naming them as evidence on a job. A rate
+with no denominator is `null` rather than `0`, because `0%` would sort a credential
+that has done nothing below one that has done something imperfectly.
 
 No key, no stored verifier and no CSRF token appears here. The token is minted per
 page render and belongs in a cookie and a form, not in a document any reader of
