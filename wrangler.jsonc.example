@@ -45,7 +45,10 @@
   //                  and 09:00 in CST. chicagoHour() picks the real one, so the
   //                  run opens once a night year round.
   //   "*/5 * * * *"  the improve tick, advancing any run that is not finished.
-  "triggers": { "crons": ["0 9 * * *", "0 8,9 * * *", "*/5 * * * *"] },
+  //   "30 9 * * *"   the weekly skills refresh. Fires DAILY and readSchedule in
+  //                  src/skills-refresh.ts decides whether today is the
+  //                  configured day, so the day is a KV edit not a redeploy.
+  "triggers": { "crons": ["0 9 * * *", "0 8,9 * * *", "*/5 * * * *", "30 9 * * *"] },
   // Non-secret vars. The GitHub App client id is public; the App private key is set
   // with `wrangler secret put` and never committed. The installation id is not
   // configured at all: it is resolved per owner and repo at run time.
