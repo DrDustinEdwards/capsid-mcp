@@ -10,6 +10,7 @@ import { documentUpsert, guardedCommit, isMissingRowAbort, requireBodyUnchanged,
 import { normalizeDashes } from "../normalize";
 import { parseLinks } from "../links";
 import { validateDocStatus, validateDocType } from "../doc-meta";
+import { driverMintInstruction } from "../agents-schema";
 import { bounded, BRIEF_BUDGET, HISTORY_ROWS, MAX_BODY, MAX_DOC_STATUS, MAX_DOC_TYPE, MAX_GLOB, MAX_LINKS_JSON, MAX_QUERY, MAX_REPO_SELECTOR, MAX_REPOS_JSON, MAX_ROWS, MAX_SHA, MAX_TAGS, MAX_TITLE, nsName, SEARCH_ROWS, docPath } from "../limits";
 import { assembleBody } from "../write-modes";
 import { improveWriteRefusal } from "../improve-scores";
@@ -1186,7 +1187,13 @@ export function registerDocTools(server: McpServer, ctx: ToolCtx): void {
           .prepare("INSERT INTO audit_log (actor, action, namespace, path, params) VALUES (?1, 'register_namespace', ?2, NULL, ?3)")
           .bind(actor, ns, reposJson),
       ]);
-      return ok({ namespace: ns, repos: list, action: "registered" });
+      return ok({
+        namespace: ns,
+        repos: list,
+        action: "registered",
+        driver_agent: null,
+        next: driverMintInstruction(ns),
+      });
     }
   );
 
