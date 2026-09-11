@@ -241,6 +241,27 @@ be cut over in one sitting. The order that works:
 3. When every machine has an agent and `last_seen` proves it, remove the operator
    hash: `npx wrangler secret put OPERATOR_KEY_HASH` with the remaining entries.
 
+There is a script for it, and it is the path that keeps a key out of a terminal:
+`scripts/mint-agents.mjs` sends each mint and writes the key straight into
+`~/.capsid/agent-<name>.key` at mode 0600, reporting a 12-hex fingerprint and never
+the key itself. It refuses to overwrite an existing file, because a second mint
+leaves a live credential in the table with nothing on disk able to present it.
+
+```
+CAPSID_OPERATOR_KEY=<write-grant key> node scripts/mint-agents.mjs                       # dry run, all six
+CAPSID_OPERATOR_KEY=<write-grant key> node scripts/mint-agents.mjs --apply
+CAPSID_OPERATOR_KEY=<write-grant key> node scripts/mint-agents.mjs --namespace foxing --apply
+```
+
+`--namespace` mints one project without touching the rest, which is what you want
+once the first six are live: a project joins the roster later, or one key is lost
+and needs replacing, and re-minting the set is not available to you then. An
+unknown namespace is refused and the refusal lists the known ones, because
+"minted 0 agents" and "minted the one you meant" are the same output to anybody
+not counting. `test/mint-agents.test.ts` derives the driver list from
+`src/improve-schema.ts`, so a sixth roster project fails the suite rather than
+quietly having no driver agent and no key file.
+
 The six, as calls:
 
 ```
