@@ -79,3 +79,36 @@ export const docPath = z.string().superRefine((value, ctx) => {
 export const bounded = (max: number) => z.string().max(max);
 
 export const nsName = bounded(MAX_NAMESPACE);
+
+// A job's result_ref is "where the work landed", and that is two different kinds
+// of thing: a document key inside the store, or a pull request URL outside it.
+// It was wired to docPath, which refuses every URL on the '//' after the scheme,
+// so the field was unusable for one of the two shapes its own description
+// advertises. Two jobs recorded their PR link in result_summary prose instead.
+//
+// The URL half is deliberately narrow. This value is rendered into the job's
+// mirror document as a link a human may click, so the scheme is pinned to https
+// (the old grammar accepted "javascript:alert(1)" as a path) and embedded
+// credentials are refused, being a phishing shape rather than a reference.
+export function resultRefProblem(value: string): string | null {
+  if (value.length === 0) return "result ref must not be empty";
+  if (value.length > MAX_PATH) return `result ref is longer than ${MAX_PATH} characters`;
+  if (hasControlChar(value)) return "result ref must not contain control characters (including newlines and tabs)";
+  if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(value)) return pathProblem(value);
+
+  if (!value.startsWith("https://")) return "a result ref URL must use https";
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return "result ref is not a valid URL";
+  }
+  if (url.username || url.password) return "a result ref URL must not carry credentials";
+  if (!url.hostname) return "a result ref URL must name a host";
+  return null;
+}
+
+export const resultRef = bounded(MAX_PATH).superRefine((value, ctx) => {
+  const problem = resultRefProblem(value);
+  if (problem) ctx.addIssue({ code: "custom", message: problem });
+});

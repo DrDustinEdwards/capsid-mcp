@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { hintsFor } from "../tool-annotations";
 import { z } from "zod";
-import { bounded, docPath, MAX_BODY, MAX_TITLE, nsName } from "../limits";
+import { bounded, MAX_BODY, MAX_TITLE, nsName, resultRef } from "../limits";
 import { JOB_ACTIONS, JOB_LEASE_SECONDS, JOB_STATUSES, isJobStatus } from "../jobs-schema";
 import { SCOPE_FLAGS } from "../agents-schema";
 import { blockJob, claimJob, completeJob, failJob, heartbeatJob, listJobs, postJob, resumeJob } from "../jobs";
@@ -43,7 +43,7 @@ export function registerJobTools(server: McpServer, ctx: ToolCtx): void {
         status: bounded(32).optional().describe(`For list: one of ${JOB_STATUSES.join(" | ")}.`),
         id: bounded(MAX_JOB_ID).optional().describe('The job id, for claim (optional, to take a specific one), heartbeat, complete, fail and block.'),
         result_summary: bounded(MAX_TITLE).optional().describe('For complete: what happened, in a sentence the seat can read without opening the diff.'),
-        result_ref: docPath.optional().describe('For complete: where the work landed, a document key or a PR URL.'),
+        result_ref: resultRef.optional().describe('For complete: where the work landed, a document key or a PR URL.'),
         reason: bounded(MAX_TITLE).optional().describe('For fail and block: why. For resume: what the human approved, which is what the audit row records.'),
         command: bounded(MAX_TITLE).optional().describe('For block: the exact command the human must run. It goes into the summary the console shows.'),
       },

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { docPath, MAX_PATH, pathProblem } from "../src/limits.ts";
+import { docPath, MAX_PATH, pathProblem, resultRef, resultRefProblem } from "../src/limits.ts";
 import {
   CI_DISPATCH_POLL_INTERVAL_MS,
   CI_DISPATCH_POLL_MS,
@@ -165,4 +165,52 @@ test("the ci_dispatch poll fits inside its own timeout with room for several pol
   // At least a few polls must fit, or the timeout is one attempt wearing a loop's
   // clothing. Ten here, which is also the subrequest cost to keep in mind.
   assert.ok(CI_DISPATCH_POLL_MS / CI_DISPATCH_POLL_INTERVAL_MS >= 5, "too few polls fit in the timeout");
+});
+
+// ---- result_ref: a document key OR a PR URL -----------------------------------
+//
+// The jobs tool's own description has advertised "a document key or a PR URL"
+// since the queue shipped, and the field was wired to `docPath`, which refuses
+// every URL on the '//' after the scheme. Two jobs recorded the defect in their
+// result_summary rather than in a result_ref, which is the measurement: the field
+// was unusable for exactly the value it names. Fixed 2026-09-11.
+
+test("result_ref takes the shapes the queue actually reports", () => {
+  for (const ref of [
+    "https://github.com/DrDustinEdwards/capsid-mcp/pull/13",
+    "https://github.com/DrDustinEdwards/capsid-mcp/pull/13#issuecomment-1",
+    "capsid/jobs/job_7d6aebd1e183.md",
+    "capsid-mcp/fe48a068efafca372fe1787e07810e4425549ab9",
+    "DrDustinEdwards/capsid-mcp/pull/13",
+  ]) {
+    assert.equal(resultRefProblem(ref), null, `${ref} was rejected`);
+  }
+});
+
+test("result_ref refuses a non-https scheme, credentials and the path grammar's escapes", () => {
+  const cases: Array<[string, RegExp]> = [
+    ["", /must not be empty/],
+    // The scheme that makes a rendered link executable. The mirror document puts
+    // this value in front of a human who may click it.
+    ["javascript:alert(1)", /must not contain '\.\.'|https/],
+    ["http://github.com/a/b/pull/1", /https/],
+    // Credentials in a URL are a phishing shape, not a reference.
+    ["https://user:pass@github.com/a/b/pull/1", /credentials/],
+    ["https://", /not a valid URL|host/],
+    ["../secrets.md", /must not contain '\.\.'/],
+    ["a\nb.md", /control characters/],
+    [`https://github.com/${"x".repeat(MAX_PATH)}`, /longer than/],
+  ];
+  for (const ref of cases) {
+    const problem = resultRefProblem(ref[0]);
+    assert.ok(problem, `${JSON.stringify(ref[0])} was accepted`);
+    assert.match(problem, ref[1]);
+  }
+});
+
+test("the result_ref zod schema carries the same grammar, with the reason", () => {
+  assert.equal(resultRef.safeParse("https://github.com/DrDustinEdwards/capsid-mcp/pull/13").success, true);
+  const bad = resultRef.safeParse("http://github.com/a/b/pull/1");
+  assert.equal(bad.success, false);
+  assert.match(bad.error?.issues[0]?.message ?? "", /https/);
 });
