@@ -161,3 +161,33 @@ export function mintAgentKey(): string {
 export function agentActor(name: string): string {
   return `agent:${name}`;
 }
+
+// THE DRIVER BOOTSTRAP INSTRUCTION, IN ONE PLACE.
+//
+// register_namespace does NOT mint the new namespace's driver agent, and the
+// reason is a scope boundary rather than an omission. register_namespace runs on
+// a plain write grant (src/scope.ts), which every driver agent holds, while
+// minting is admin only (src/tools/agents.ts) precisely so that an agent cannot
+// widen itself. A register path that minted and returned a key would hand any
+// driver a fresh write credential for a namespace of its choosing, and every
+// scope below it would become decoration.
+//
+// So it returns the COMMAND instead. No credential crosses the tool boundary, the
+// admin runs one line, and the key goes from the mint response to a 0600 file
+// without passing through a chat or a terminal. test/register-namespace-mint.test.ts
+// asserts this string is parseable by the script it names.
+export function driverAgentName(namespace: string): string {
+  return `${namespace}-driver`;
+}
+
+export function driverKeyPath(namespace: string): string {
+  return `~/.capsid/agent-${driverAgentName(namespace)}.key`;
+}
+
+export function driverMintInstruction(namespace: string): string {
+  return (
+    `Mint its driver agent as the admin: node scripts/mint-agents.mjs --namespace ${namespace} --apply. ` +
+    `The key is returned once and lands in ${driverKeyPath(namespace)} at mode 0600. ` +
+    `register_namespace does not mint it: minting is admin only, and this tool takes a plain write grant.`
+  );
+}
