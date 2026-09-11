@@ -123,6 +123,8 @@ test("the shell renders with ZERO namespaces rather than throwing on an empty ro
       agents: [],
       namespaces: [],
     },
+    activity: [],
+    activity_filter: { namespace: null, actor: null },
     agents: [],
   });
   assert.match(html, /No namespaces on the improve roster/);

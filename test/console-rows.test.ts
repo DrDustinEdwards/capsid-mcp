@@ -76,6 +76,8 @@ function data(namespaces: NamespaceStatus[], agents: AgentReputation[] = []): Co
       agents,
       namespaces,
     },
+    activity: [],
+    activity_filter: { namespace: null, actor: null },
     agents,
   };
 }

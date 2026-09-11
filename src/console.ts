@@ -10,6 +10,7 @@ import {
   type ConsoleUser,
 } from "./console-auth";
 import { loadReputation, type AgentReputation } from "./console-reputation";
+import { activityFilterFrom, loadActivity, ACTIVITY_LIMIT, type ActivityFilter, type ActivityRow } from "./console-activity";
 
 // THE CONSOLE: one page that answers "what is the state of every namespace" without
 // asking a chat.
@@ -43,9 +44,16 @@ export interface ConsoleData {
   health: HealthReport;
   improve: StatusReport;
   agents: AgentReputation[];
+  activity: ActivityRow[];
+  activity_filter: ActivityFilter;
 }
 
-export async function consoleData(env: Env, viewer: string, now: Date): Promise<ConsoleData> {
+export async function consoleData(
+  env: Env,
+  viewer: string,
+  now: Date,
+  filter: ActivityFilter = { namespace: null, actor: null }
+): Promise<ConsoleData> {
   const improve = await improveStatus(env);
   return {
     generated: now.toISOString(),
@@ -56,6 +64,8 @@ export async function consoleData(env: Env, viewer: string, now: Date): Promise<
     // counted against it. Passed in rather than re-read, so the panel cannot list an
     // agent the rest of the page does not.
     agents: await loadReputation(env.DB, improve.agents),
+    activity: await loadActivity(env.DB, filter),
+    activity_filter: filter,
   };
 }
 
@@ -86,7 +96,7 @@ export async function consoleGate(request: Request, env: Env, now: Date, returnT
 export async function handleConsole(request: Request, env: Env, now: Date = new Date()): Promise<Response> {
   const gate = await consoleGate(request, env, now, CONSOLE_PATH);
   if (!gate.ok) return gate.response;
-  const data = await consoleData(env, gate.user.login, now);
+  const data = await consoleData(env, gate.user.login, now, activityFilterFrom(new URL(request.url)));
   // A FRESH TOKEN PER RENDER, set as a cookie and embedded in every form on the page.
   // Double submit: the action handler compares the two with a constant-time compare,
   // and a cross-site POST can carry neither.
@@ -106,7 +116,7 @@ export async function handleConsole(request: Request, env: Env, now: Date = new 
 export async function handleConsoleJson(request: Request, env: Env, now: Date = new Date()): Promise<Response> {
   const gate = await consoleGate(request, env, now, CONSOLE_JSON_PATH);
   if (!gate.ok) return gate.response;
-  return Response.json(await consoleData(env, gate.user.login, now));
+  return Response.json(await consoleData(env, gate.user.login, now, activityFilterFrom(new URL(request.url))));
 }
 
 // ---- rendering ---------------------------------------------------------------
@@ -330,6 +340,36 @@ function agentsPanel(data: ConsoleData, csrf: string): string {
 </table></div>`;
 }
 
+function activityPanel(data: ConsoleData): string {
+  const f = data.activity_filter;
+  // A GET form, so a filtered view is a URL somebody can keep. No CSRF on it, because
+  // it reads and changes nothing; the action forms are the ones that mutate.
+  const filterForm = `<form method="get" action="${CONSOLE_PATH}" class="act">
+<input type="text" name="namespace" placeholder="namespace" value="${escapeHtml(f.namespace ?? "")}" maxlength="64">
+<input type="text" name="actor" placeholder="actor" value="${escapeHtml(f.actor ?? "")}" maxlength="128">
+<button type="submit">Filter</button>
+</form>`;
+  if (!data.activity.length) {
+    return `<div class="acts">${filterForm}</div><p class="empty">No audit rows match.</p>`;
+  }
+  const rows = data.activity
+    .map(
+      (row) => `<tr>
+<td>${escapeHtml(row.at)}</td>
+<td><code>${escapeHtml(row.actor ?? "")}</code></td>
+<td>${escapeHtml(row.action ?? "")}</td>
+<td>${escapeHtml(row.namespace ?? "")}</td>
+<td><code>${escapeHtml(row.path ?? "")}</code></td>
+</tr>`
+    )
+    .join("");
+  return `<div class="acts">${filterForm}</div>
+<div class="scroll"><table>
+<thead><tr><th>at</th><th>actor</th><th>action</th><th>namespace</th><th>path or job</th></tr></thead>
+<tbody>${rows}</tbody>
+</table></div>`;
+}
+
 export function renderConsole(data: ConsoleData, csrf = ""): string {
   const rows = data.improve.namespaces.map((ns) => namespaceRow(data, ns, csrf));
   const namespaces = rows.length
@@ -353,6 +393,9 @@ ${modeForms(data, csrf)}
 ${namespaces}
 <h2>Agents</h2>
 ${agentsPanel(data, csrf)}
+<h2>Recent activity</h2>
+<p class="sub">The last ${ACTIVITY_LIMIT} audit rows, newest first.</p>
+${activityPanel(data)}
 </main>
 </body>
 </html>`;
