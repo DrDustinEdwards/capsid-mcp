@@ -116,12 +116,27 @@ An optional nightly loop that proposes one scoped change at a time to a small ro
 
 `improve_status` reports the mode, the budget, the protected-path patterns, the agent inventory and each namespace's state, including queued and blocked jobs. `improve_run` starts or resumes a run by hand.
 
+## Console
+
+One page at `/console` that answers "what is the state of every namespace" without asking a chat. It renders what `improve_status` and `jobs` already compute, so the page and the tools cannot disagree.
+
+- **Who gets in.** The GitHub admin session, and nothing else. The console rides the same GitHub OAuth app and the same single-admin check as the MCP flow, and turns the result into a signed cookie that lasts twelve hours. An operator key or an agent key gets a 403 that says so: those authenticate to `/ops/mcp`, and answering them with a login redirect would send a machine to GitHub.
+- **What it shows.** A header with the deployed sha, the schema version, the backup age, the month's spend against its caps and the improve mode. Then one row per namespace: the pause reason if any, whether the anchor block is pinned, the last run's attempts, kept and reverted, the four job counts, the truth report's integrity percentage, and the driver agent's last_seen. **A blocked job prints the exact command it is waiting on**, because a count of blocked jobs tells nobody what to run.
+- **The agents panel** lists every credential with its kind, namespaces, flags held, last_seen and revoked state, beside what it did: jobs done, failed and blocked, pull requests opened and merged, and for a driver, its namespaces' attempts kept and reverted. Counts, not scores. A score needs a weighting and a weighting is an opinion.
+- **Recent activity** is the last 50 audit rows, filterable by namespace and by actor.
+- **Six controls**, each a POST with a CSRF token and a confirmation step that states what is about to happen before anything changes: pause, unpause, set the mode, resume a blocked job with the approval reason, mark a job failed, revoke an agent. Every one goes through the same function the MCP tool calls and writes its own audit row naming the person who clicked.
+- **It never merges and it never mints.** Merging can start a CI deploy in two of these repos, so that stays with `manage_pr` behind a caller holding `can_merge`; minting hands out a key, so that stays with the `agents` tool. Neither is in the console's action list, and a test asserts their absence.
+- **`GET /console.json`** serves the same object the page renders, so a dashboard or a chat reads the state without scraping.
+
+The page is self-contained: no scripts, no external fonts, one inline stylesheet, and a CSP that denies everything by default. Light and dark come from `prefers-color-scheme`.
+
 ## Endpoints
 
 - `POST /mcp` MCP over Streamable HTTP, requires an OAuth access token (admin only)
 - `POST /ops/mcp` MCP over Streamable HTTP for agents and cron, requires an agent or operator key as `Authorization: Bearer <key>`
 - `POST /ops/backup` runs a backup on demand, requires a write-grant key, returns a JSON summary
 - `GET /authorize`, `POST /authorize`, `GET /callback` GitHub OAuth flow
+- `GET /console`, `POST /console`, `GET /console.json`, `GET /console/callback` the admin console, its actions and its JSON twin. Admin session only; a bearer token is refused with 403
 - `POST /token`, `POST /register` token exchange and dynamic client registration (served by the library)
 - `GET /.well-known/oauth-authorization-server` and `GET /.well-known/oauth-protected-resource` discovery metadata (served by the library)
 - `GET /health` no auth. Reports deploy provenance (git sha, whether the tree was dirty, build time) and probes the store: `SELECT 1` against D1 plus an FTS5 MATCH pinned to one known document. Either probe failing returns 503 with `status: "degraded"` and a `store` object naming which one, because a Worker whose bindings resolved to nothing starts normally and would otherwise answer `ok` while every read tool errors
@@ -169,7 +184,7 @@ Three paths, in the order to try them. Path 2 has been executed end to end again
 
    There are twelve real tables: `documents`, `namespaces`, `document_versions`, `audit_log`, `document_links`, the four improve-loop tables `improve_scores`, `improve_attempts`, `improve_runs` and `improve_skills` (`migrations/0003_improve.sql`), `jobs`, the work queue (`migrations/0006_jobs.sql`), `agents`, the scoped credentials (`migrations/0008_agents.sql`), and `improve_jti`, the signed-request replay cache (`migrations/0004_improve_jti.sql`). `TABLES` in `src/backup.ts` is authoritative, derived-checked against `migrations/` by `test/backup.test.ts`. Never export `documents_fts` or its `documents_fts_*` shadow tables: FTS5 derives them from `documents`, and they are what makes a whole-database export fail.
 
-   Create the new database and apply every migration in order: `0001_init.sql`, `0002_document_links.sql`, `0003_improve.sql`, `0004_improve_jti.sql`, `0005_query_plan_indexes.sql`, `0006_jobs.sql`, `0007_jobs_resume.sql`, `0008_agents.sql`, `0009_jobs_required_scopes.sql`. Stopping early leaves later tables missing for the import to land in, and a column the code reads absent from a table that does exist. Then execute the exports with `documents` first: importing it fires the FTS sync triggers, so `documents_fts` rebuilds itself. The rest have no triggers and no foreign keys, so their order does not matter. Verify with count queries against both databases and one MATCH query on the new one, then point `wrangler.jsonc` at the new `database_id` and deploy.
+   Create the new database and apply every migration in order: `0001_init.sql`, `0002_document_links.sql`, `0003_improve.sql`, `0004_improve_jti.sql`, `0005_query_plan_indexes.sql`, `0006_jobs.sql`, `0007_jobs_resume.sql`, `0008_agents.sql`, `0009_jobs_required_scopes.sql`, `0010_console_indexes.sql`. Stopping early leaves later tables missing for the import to land in, and a column the code reads absent from a table that does exist. Then execute the exports with `documents` first: importing it fires the FTS sync triggers, so `documents_fts` rebuilds itself. The rest have no triggers and no foreign keys, so their order does not matter. Verify with count queries against both databases and one MATCH query on the new one, then point `wrangler.jsonc` at the new `database_id` and deploy.
 
 3. **The R2 JSON dump**, beyond the 30-day Time Travel window. Wrangler cannot list R2 objects, so take the exact keys from the Cloudflare dashboard or the `json_keys` field of a `/ops/backup` response, then fetch each: `wrangler r2 object get capsid-media/backups/json/<timestamp>/<table>.json --file <table>.json`. Convert each object's `rows` to INSERT statements and follow path 2 from the create step, `documents` first. The same dumps are mirrored off-account in `capsid-backups`, so this path works if the Cloudflare account is gone. The `backups/markdown/` mirror is the last-resort human-readable copy: bodies only, no metadata.
 

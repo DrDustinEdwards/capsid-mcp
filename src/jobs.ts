@@ -430,6 +430,49 @@ export async function failJob(env: Env, agent: Agent, now: Date, id: string, rea
 // BLOCKED CARRIES THE EXACT COMMAND. A job that hit a gate is not a failure, it is
 // work waiting on a human, and the thing the human needs is the command to run, not
 // a description of the situation. The console shows these.
+// THE SEAT STEPPING IN, on a job it does not hold.
+//
+// Every other transition keys on `claimed_by = <caller>`, which is what stops two
+// drivers treading on each other. That rule leaves no way to close a job whose driver
+// is gone: the machine was turned off, the session died, the work was superseded from
+// a chat. The lease expiry returns a claimed job to the queue, and a job stuck in a
+// state nobody will finish then sits there being counted.
+//
+// ADMIN ONLY, and that is the same reasoning resume already carries: "the seat that
+// approves is routinely not the session that blocked". `agent.admin` is true for the
+// OAuth admin session and a legacy write key and is false for every minted agent, so
+// a driver cannot fail another driver's job, which is the thing this must not become.
+//
+// It refuses a job that is already finished rather than rewriting one, and it says so
+// rather than reporting a no-op as success. Keyed UPDATE with RETURNING, and the
+// mirror and the audit row ride in the same batch as every other transition.
+export async function adminFailJob(env: Env, agent: Agent, now: Date, id: string, reason: string): Promise<JobResult> {
+  if (!agent.admin) {
+    return refuse(
+      "admin-fail",
+      `${agent.actor} may only fail a job it holds. Failing somebody else's job is the administrator's call, and a minted agent is deliberately not the administrator.`
+    );
+  }
+  if (!reason?.trim()) return refuse("admin-fail", "fail needs a reason. A failed job with no reason is one nobody can retry or rule on.");
+  const won = await env.DB.prepare(
+    `UPDATE jobs SET status = 'failed', result_summary = ?3, lease_expires = NULL, updated_at = ?2
+     WHERE id = ?1 AND status IN ('queued', 'claimed', 'blocked') RETURNING id`
+  )
+    .bind(id, now.toISOString(), reason)
+    .first<{ id: string }>();
+  if (!won) {
+    const current = await readJob(env.DB, id);
+    if (!current) return refuse("admin-fail", `no job ${id}.`);
+    return refuse("admin-fail", `${id} is already ${current.status}; there is nothing to fail.`);
+  }
+  const job = (await readJob(env.DB, id)) as JobRow;
+  await env.DB.batch([
+    ...(await mirrorStatements(env.DB, job, "job-admin-fail", agent.actor)),
+    auditStatement(env.DB, agent.actor, "job-admin-fail", job, { status: job.status, reason, held_by: job.claimed_by }),
+  ]);
+  return { ok: true, action: "admin-fail", job };
+}
+
 export async function blockJob(
   env: Env,
   agent: Agent,
