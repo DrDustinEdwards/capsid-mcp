@@ -1,6 +1,6 @@
 # Capsid
 
-Capsid is a single-user, Cloudflare-native MCP server that serves a consolidated knowledge base from D1 and R2, and reaches your GitHub repositories directly. It speaks MCP over Streamable HTTP and exposes 30 tools in four groups: documents, repo access, maintenance, and self-improvement.
+Capsid is a control plane for AI agents working across a portfolio of repositories. It gives them structured memory that records who wrote what and when, scoped permissions and an audit trail over every write, a signed work queue for handing a task from a chat to a machine, and a self-improvement loop whose proposed changes are scored against hidden tests. It is a single-user Cloudflare Worker, speaks MCP over Streamable HTTP, and exposes 31 tools in five groups: documents, repo access, maintenance, the work queue, and self-improvement.
 
 The `namespaces` tool reports each namespace's count of unconsolidated episodic/source docs, so any session can see where a lint run is due.
 
@@ -51,17 +51,30 @@ The `lint` tool runs the wiki maintenance loop. The Worker never calls an LLM; t
 - `lint(namespace, mode: "gather")` returns a read-only packet: the namespace `core.md`, the compiled `concept` and `decision` docs, every un-archived `episodic` and `source` doc, and the schema and conventions. The driving LLM synthesizes an updated `core.md` and any new concept docs from this.
 - `lint(namespace, mode: "finalize", consumed: [paths])` archives the consumed raw entries under an `archive/` path prefix and writes one audit row. It only moves and never deletes, so nothing is lost, and `gather` excludes `archive/`, so the loop is idempotent.
 
+## Work queue
+
+The handoff between a chat that has no shell and a session that has no conversation. A job is a title plus a body, and the body is the full prompt a driver executes. The `jobs` tool carries the whole lifecycle: `post` queues work, `claim` takes it, `heartbeat` holds it, and `complete`, `fail` or `block` end it.
+
+- **Bodies are signed.** `post` signs the body with the same key and envelope as the improve loop's task documents, and `claim` verifies it before handing the job over. A body edited after it was signed is marked failed rather than left queued, because leaving it would hand the same broken row to every driver in turn. A job is executable input arriving as a database row, and the driver is a session holding local shell and repo credentials.
+- **Leases, not locks.** A claim runs four hours; a five-minute tick returns an expired one to the queue, so a driver that dies costs one lease rather than a job nobody can pick up. One claim per caller across every namespace: a driver holding two has abandoned one.
+- **Blocked is a pause, not an ending.** A job that reaches a push, a deploy, a secret, a live migration or a merge stops and is `block`ed with the exact command a human must run. Those jobs surface in `improve_status` with that command, and with how many gates the job has hit and how many times it has come back. Once the human has run it, `resume` returns the job to its holder with a fresh lease, recording in the audit row what was approved, and re-verifying the signature: a blocked job waits in the table for as long as a human takes.
+- **The table is the source of truth for status.** Every job also mirrors to `<namespace>/jobs/<id>.md`, rewritten in the same batch as each transition, so `brief` and `search` see the queue without calling the tool. Every transition is a keyed `UPDATE ... RETURNING`, so exactly one caller wins a contested job.
+
+The driver is the `/improve work` command in Claude Code: it resumes a cleared gate, claims one job, does it in that namespace's clone under the repo's own rules, and reports back.
+
 ## Self-improvement loop
 
 An optional nightly loop that proposes one scoped code change at a time to a small roster of repos, has each repo's own CI score it, and keeps only what improved a repo without regressing it. It is **off by default**, and every machine-authored change arrives as a pull request that a human merges: nothing auto-merges.
 
 - **Modes.** `subscription` has the Worker write a task document for a session to run and then stop, so it calls no model itself; `api` calls the model directly. `off` is the default, and any unreadable or unexpected setting falls back to it.
 - **Cadence.** A nightly opener (a Cron Trigger at 03:00 America/Chicago) starts a run for each eligible namespace, and a five-minute tick advances any run in flight.
-- **Scoring.** Each roster repo carries an `improve-score.yml` workflow that runs that repo's own build, tests and lint plus a hidden holdout suite kept in the separate `HOLDOUT` R2 bucket, and reports a signed score back to the Worker.
-- **Keep or revert.** A change that regresses a pinned anchor metric, or fails to improve the weighted score, is reverted; a change that improves it opens a PR.
-- **Budget and pause.** Monthly caps on estimated model spend and CI minutes stop the loop when exceeded. A per-namespace pause key holds that namespace until a human clears it, and a paused namespace never resumes on its own.
+- **Scoring, in two jobs, and the second never puts attempt code on the runner.** `build` checks out the attempt branch and runs that repo's own build, tests, lint and bundle measurement with no credential in its environment. `score` checks out the default branch only and runs the hidden holdout suite inside a network-less, read-only container with the attempt mounted read-only, reading results from the container's stdout pipe. The score job is byte-identical across all five roster repos; only the build job differs. `scripts/sync-scorer.mjs` is what re-copies it, and its dry run is what verifies the copies still match.
+- **No long-lived scoring credential.** The holdout suites live in a separate `HOLDOUT` R2 bucket, bound apart so attempt code cannot reach it. The score job asks the Worker for a one-hour, object-read-only credential scoped to that namespace's prefix, minted per run and signed with the same per-namespace key as the score report. Nothing stores a standing R2 key.
+- **Keep or revert.** A change that regresses a pinned anchor metric, or fails to improve the weighted score, is reverted; a change that improves it opens a PR. Anchors are checksummed and pinned, and a mismatch refuses every run for that namespace until a human re-pins.
+- **Protected paths.** Tests, CI configuration, lockfiles, manifests, compiler and lint config, migrations and the loop's own files are off limits to an attempt, enforced by a deterministic path guard rather than by asking. They are what measure the work, and a system that can edit its own measurements has none.
+- **Budget, pause and one driver.** Monthly caps on estimated model spend and CI minutes stop the loop when exceeded. A per-namespace pause key holds that namespace until a human clears it, and a paused namespace never resumes on its own. In subscription mode a KV driver lease, six-hour TTL, keeps two sessions off the same namespace.
 
-`improve_status` reports the mode, the budget and each namespace's state; `improve_run` starts or resumes a run by hand.
+`improve_status` reports the mode, the budget, the protected-path patterns and each namespace's state, including its queued and blocked jobs; `improve_run` starts or resumes a run by hand.
 
 ## Endpoints
 
@@ -87,6 +100,10 @@ Login and repo access use two different GitHub credentials: a GitHub **OAuth App
 `delete`, `move`, `restore`, `lint` finalize, and any `write` that would overwrite an existing document, all ask for confirmation first. When the connected client supports [MCP elicitation](https://modelcontextprotocol.io/specification/draft/client/elicitation), the server sends an elicitation request and proceeds only on an explicit accept. Most Streamable HTTP clients run stateless and cannot answer server-initiated requests, so the fallback applies: the tool rejects with a clear message and you re-run it with `confirm: true`. Creating a brand new document never needs confirmation.
 
 Deletes are never unrecoverable at the data layer: every delete (and every overwrite) snapshots the prior row into `document_versions` first, so recovery exists regardless of how the confirmation went.
+
+## Security
+
+The surface has been through several independent audits, and the hardening they produced is in the code rather than in a list of intentions: path traversal closed on every document path, OAuth consent bound to the exact redirect it was granted for, the scorer isolated so attempt code never runs beside a credential, protected paths enforced by a deterministic guard, an Origin allowlist on the browser-facing routes, and a replay cache keyed by a database primary key rather than a read-then-write. Each fix ships with a test that was observed failing against the code it replaced. The audits themselves, with their findings and verdicts, live in Capsid rather than in this repository.
 
 ## Backups
 
@@ -233,6 +250,14 @@ npx wrangler rollback [<version-id>]
    Set transport to Streamable HTTP, URL to `https://capsid.<your-subdomain>.workers.dev/mcp`, open the Auth tab, and run Quick OAuth Flow.
 
 Note: MCP clients cache the tool list at connect time. After deploying new tools, reconnect the connector or start a new chat to see them.
+
+## Roadmap
+
+Three arcs, in order:
+
+1. **Agents as users.** Per-client scoped credentials, so an agent is a first-class caller with its own grant and its own audit identity rather than one of a handful of shared operator keys.
+2. **The console.** A read-only surface for the things that currently need a tool call to see: what the queue is holding, which jobs are blocked and on what command, and what the loop did last night.
+3. **Skill records.** Capturing what an agent learned doing the work, in a form the next session retrieves, so the store holds capability and not only decisions.
 
 ## License
 
