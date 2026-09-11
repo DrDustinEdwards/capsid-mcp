@@ -46,7 +46,7 @@ Scopes are five axes. `namespaces` and `repos` are a list or `*`. `tools` is an 
 | `can_touch_protected` | tests, CI, lint and compiler config, lockfiles, manifests, the agent steering layer, migrations |
 | `money_paths` | a path naming a billing or payment surface |
 
-A new agent gets read on its named namespaces and no flags. Widen it deliberately. Scopes are stored as JSON and the parse fails closed: a null, truncated or wrong-shaped column resolves to no namespaces, no tools, no grants and no flags.
+A new agent gets read on its named namespaces and no flags. Scopes are stored as JSON and the parse fails closed: a null, truncated or wrong-shaped column resolves to no namespaces, no tools, no grants and no flags.
 
 The `agents` tool is **admin only**, because an agent that could mint another could widen itself. `mint` returns a key once and stores only its sha256. `list` is the inventory, revoked rows included. `revoke` sets `revoked_at` rather than deleting, so rows an agent wrote still resolve to what it was allowed to do, while its key stops resolving immediately. `update_scopes` replaces named axes and leaves the rest.
 
@@ -57,6 +57,8 @@ Three kinds of caller resolve, in this order:
 1. **A minted agent**, matched on the sha256 of its bearer token. Checked first, so a key that is both an agent and an operator entry gets the narrower authority.
 2. **A legacy operator key**, until its hash is removed from `OPERATOR_KEY_HASH` by hand.
 3. **The OAuth admin session**, the synthetic agent `admin` with every scope.
+
+The operator hash has been removed from the roster machines. Every Claude Code session now runs as its folder's driver agent, and the admin OAuth session is the only wider credential.
 
 Two gated endpoints:
 
@@ -89,7 +91,7 @@ The `lint` tool runs the wiki maintenance loop. The Worker never calls an LLM; t
 
 ## Work queue
 
-The queue hands a task from a chat that has no shell to a session that has no conversation. A job is a title plus a body, and the body is the full prompt a driver executes. `jobs` carries the lifecycle: `post`, `claim`, `heartbeat`, then `complete`, `fail`, `block` or `resume`.
+The queue hands a task from a chat that has no shell to a session that has no conversation. A job is a title plus a body, and the body is the full prompt a driver executes. `jobs` carries the lifecycle: `post`, `claim`, `heartbeat`, then `complete`, `fail`, `block` or `resume`. The seat merges; drivers never hold `can_merge`.
 
 - **Bodies are signed**, with the same key and envelope as the loop's task documents. `claim` verifies the body first, and one edited after signing is marked failed rather than left queued. A job is executable input arriving as a database row, and the driver is a session holding local shell and repo credentials.
 - **Leases, not locks.** A claim runs four hours; a five-minute tick returns an expired one to the queue. One claim per caller across every namespace.
@@ -114,7 +116,7 @@ An optional nightly loop that proposes one scoped change at a time to a small ro
 - **Scoring runs in two jobs, and the second never puts attempt code on the runner.** `build` checks out the attempt branch and runs that repo's build, tests, lint and bundle measurement with no credential in its environment. `score` checks out the default branch only and runs the hidden holdout suite in a network-less, read-only container with the attempt mounted read-only, reading results from its stdout pipe. `score` is byte-identical across all five roster repos; only `build` differs. `scripts/sync-scorer.mjs` re-copies it and its dry run verifies the copies match.
 - **No long-lived scoring credential.** The score job asks the Worker for a one-hour, object-read-only credential scoped to that namespace's `HOLDOUT` prefix, minted per run and signed with the same per-namespace key as the score report.
 - **Keep or revert.** A change that regresses a pinned anchor metric, or fails to improve the weighted score, is reverted; one that improves it opens a pull request. Anchors are checksummed and pinned, and a mismatch refuses every run for that namespace until a human re-pins.
-- **Protected paths.** Tests, CI configuration, lockfiles, manifests, compiler and lint config, migrations, the agent steering layer and the loop's own files are off limits to an attempt, enforced by a deterministic path guard. They measure the work, and a system that can edit its own measurements has none.
+- **Protected paths.** Tests, CI configuration, lockfiles, manifests, compiler and lint config, migrations, the agent steering layer and the loop's own files are off limits to an attempt, enforced by a deterministic path guard. These files define the score; an attempt may not change what scores it.
 - **Budget, pause and one driver.** Monthly caps on estimated model spend and CI minutes stop the loop when exceeded. A per-namespace pause key holds that namespace until a human clears it. In subscription mode a KV driver lease (six-hour TTL) keeps two sessions off one namespace.
 
 `improve_status` reports the mode, the budget, the protected-path patterns, the agent inventory and each namespace's state, including queued and blocked jobs. `improve_run` starts or resumes a run by hand.
@@ -124,8 +126,8 @@ An optional nightly loop that proposes one scoped change at a time to a small ro
 One page at `/console` that answers "what is the state of every namespace" without asking a chat. It renders what `improve_status` and `jobs` already compute, so the page and the tools cannot disagree.
 
 - **Who gets in.** The GitHub admin session, and nothing else. The console rides the same GitHub OAuth app and the same single-admin check as the MCP flow, and turns the result into a signed cookie that lasts twelve hours. An operator key or an agent key gets a 403 that says so: those authenticate to `/ops/mcp`, and answering them with a login redirect would send a machine to GitHub.
-- **What it shows.** A header with the deployed sha, the schema version, the backup age, the month's spend against its caps and the improve mode. Then one row per namespace: the pause reason if any, whether the anchor block is pinned, the last run's attempts, kept and reverted, the four job counts, the truth report's integrity percentage, and the driver agent's last_seen. **A blocked job prints the exact command it is waiting on**, because a count of blocked jobs tells nobody what to run.
-- **The agents panel** lists every credential with its kind, namespaces, flags held, last_seen and revoked state, beside what it did: jobs done, failed and blocked, pull requests opened and merged, and for a driver, its namespaces' attempts kept and reverted. Counts, not scores. A score needs a weighting and a weighting is an opinion.
+- **What it shows.** A header with the deployed sha, the schema version, the backup age, the month's spend against its caps and the improve mode. Then one row per namespace: the pause reason if any, whether the anchor block is pinned, the last run's attempts, kept and reverted, the four job counts, the truth report's integrity percentage, and the driver agent's last_seen. **A blocked job prints the exact command it is waiting on**, so the reader knows what to run.
+- **The agents panel** lists every credential with its kind, namespaces, flags held, last_seen and revoked state, beside what it did: jobs done, failed and blocked, pull requests opened and merged, and for a driver, its namespaces' attempts kept and reverted. Counts and rates only. No composite score.
 - **Recent activity** is the last 50 audit rows, filterable by namespace and by actor.
 - **Six controls**, each a POST with a CSRF token and a confirmation step that states what is about to happen before anything changes: pause, unpause, set the mode, resume a blocked job with the approval reason, mark a job failed, revoke an agent. Every one goes through the same function the MCP tool calls and writes its own audit row naming the person who clicked.
 - **It never merges and it never mints.** Merging can start a CI deploy in two of these repos, so that stays with `manage_pr` behind a caller holding `can_merge`; minting hands out a key, so that stays with the `agents` tool. Neither is in the console's action list, and a test asserts their absence.
@@ -140,6 +142,10 @@ The page is self-contained: no scripts, no external fonts, one inline stylesheet
 - `POST /ops/backup` runs a backup on demand, requires a write-grant key, returns a JSON summary
 - `GET /authorize`, `POST /authorize`, `GET /callback` GitHub OAuth flow
 - `GET /console`, `POST /console`, `GET /console.json`, `GET /console/callback` the admin console, its actions and its JSON twin. Admin session only; a bearer token is refused with 403
+- `POST /csp-report` no auth. Content-Security-Policy and COOP violation reports, per-IP rate limited
+- `POST /improve/score` the signed score report a roster repo's CI posts back
+- `POST /improve/holdout-credential` mints the one-hour, object-read-only credential the score job reads the holdout suite with
+- `POST /backup/credential` mints the credential the off-account backup writes with
 - `POST /token`, `POST /register` token exchange and dynamic client registration (served by the library)
 - `GET /.well-known/oauth-authorization-server` and `GET /.well-known/oauth-protected-resource` discovery metadata (served by the library)
 - `GET /health` no auth. Reports deploy provenance (git sha, whether the tree was dirty, build time) and probes the store: `SELECT 1` against D1 plus an FTS5 MATCH pinned to one known document. Either probe failing returns 503 with `status: "degraded"` and a `store` object naming which one, because a Worker whose bindings resolved to nothing starts normally and would otherwise answer `ok` while every read tool errors
@@ -254,7 +260,7 @@ With no id it reverts to the immediately previous deployment; pass a version id 
 6. Create a GitHub **OAuth App** (for login) at https://github.com/settings/developers:
 
    - Homepage URL: `https://capsid.<your-subdomain>.workers.dev`
-   - Authorization callback URL: `https://capsid.<your-subdomain>.workers.dev/callback`
+   - Authorization callback URLs, both of them, spelled exactly: `https://capsid.<your-subdomain>.workers.dev/callback` for the MCP flow and `https://capsid.<your-subdomain>.workers.dev/console/callback` for the console. Wildcard matching should be off: each redirect is granted for the exact URI it was issued against.
 
    Then set the secrets:
 
@@ -265,7 +271,7 @@ With no id it reverts to the immediately previous deployment; pass a version id 
    npx wrangler secret put ADMIN_GITHUB_LOGIN      # your GitHub username, or your numeric GitHub user id
    ```
 
-7. For repo access, create a GitHub **App**, separate from the OAuth App. Permissions: Repository contents read and write, Pull requests read and write, Metadata read. Install it on the repositories you want reachable. Note its Client ID, generate a private key (`.pem`), then:
+7. For repo access, create a GitHub **App**, separate from the OAuth App. Permissions: Repository contents read and write, Pull requests read and write, Metadata read, Actions read and write, Workflows read and write. The last two are what let the Worker dispatch a workflow and write under `.github/workflows/`; both are gated behind agent flags (`can_dispatch` and `can_write_workflows`), so the App holding the permission does not mean a caller can use it. Install it on the repositories you want reachable. Note its Client ID, generate a private key (`.pem`), then:
 
    ```
    # put the App client id in wrangler.jsonc vars as GITHUB_APP_CLIENT_ID
@@ -302,13 +308,13 @@ MCP clients cache the tool list at connect time. After deploying new tools, reco
 
 ## Roadmap
 
-**Agents as users** shipped on 2026-09-11: see Auth model. The credentials exist and the enforcement point is live. What remains is operational: mint one agent per project and per machine, then remove the operator hash. `docs/bootstrap.md` walks through it.
+Four things shipped on 2026-09-11. **Agents as users**: the credentials and the one enforcement point are live, and what remains there is operational, mint one agent per project and per machine then remove the operator hash (`docs/bootstrap.md`). **The console** (PR #20): the admin surface for what the queue holds, which jobs are blocked and on what command, and what the loop did last night. **The model-refresh skill**: a weekly cron in the claude-skills repo that rewrites the model-facing lines in this repo's skills and commands to match a named model's prompting guide, calibration only, never a gate or a ruling or task content. **Jobs as evidence** (PR #21): a verified outcome row per finished job, and agent records as counts and rates.
 
-Three items left:
+Three items left, in order:
 
-1. **The console.** A read-only surface for what currently needs a tool call to see: what the queue holds, which jobs are blocked and on what command, and what the loop did last night.
+1. **Autonomy.** Auto-merge by signed policy, pre-approved gate classes, and a nightly scheduled driver.
 2. **Skill records.** Capturing what an agent learned doing the work, in a form the next session retrieves.
-3. **The model-refresh skill**, in progress. It rewrites the model-facing lines in this repo's skills and commands to match a named model's prompting guide. It changes calibration only: never a gate, a ruling, or task content.
+3. **The experiment scheduler**, once the loop has real nights behind it.
 
 ## License
 
