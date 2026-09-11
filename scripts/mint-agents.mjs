@@ -16,6 +16,14 @@
 // and re-running the whole set is not an option once the others are live. An
 // existing key file is SKIPPED rather than overwritten, so the full run stays safe
 // to repeat, but that skip is a floor and not a plan.
+//
+// --namespace TAKES ANY NAMESPACE REGISTERED IN CAPSID, not just a roster one.
+// AGENTS below is derived from the improve roster, which is the five projects the
+// loop proposes changes to; that is a smaller set than the namespaces that exist.
+// A namespace can own a repo and a job queue without ever joining the roster, and
+// `claude-skills` is the first that does. For one of those the script asks the
+// `namespaces` tool whether it is registered and synthesizes a driver of exactly
+// the shape above. Registration is the authority, so a typo still refuses.
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
@@ -38,18 +46,39 @@ export const keyDir = () => join(homedir(), ".capsid");
 export const keyPath = (name) => join(keyDir(), `agent-${name}.key`);
 export const fingerprint = (key) => createHash("sha256").update(key).digest("hex").slice(0, 12);
 
+// A driver for a namespace that has no entry in AGENTS. Same shape as the five
+// above, spelled once so a synthesized driver cannot drift from a listed one:
+// read and write on its own namespace, and NO FLAGS, because a driver opens pull
+// requests and a human merges them.
+export function driverFor(namespace) {
+  return { name: `${namespace}-driver`, kind: "driver", namespaces: [namespace], grants: ["read", "write"] };
+}
+
 // Selection is its own function so the test can drive it without a network or a
 // home directory. An unknown namespace is REFUSED rather than silently matching
 // nothing: "minted 0 agents" and "minted the one you meant" look identical in a
 // terminal, and the second is what the caller believes happened.
-export function selectAgents(namespace) {
+//
+// THE ROSTER IS NOT THE LIST OF NAMESPACES, and conflating the two is what this
+// signature exists to stop. AGENTS is derived from the improve roster, which is
+// the five projects the loop proposes changes to. A namespace can be registered
+// in Capsid, hold documents, own a repo and need a driver to work its job queue
+// without ever joining that roster: `claude-skills` is the first and will not be
+// the last. So a namespace not in AGENTS is minted a driver on the strength of
+// being REGISTERED, and `registered` is passed in rather than fetched here so
+// this stays pure.
+//
+// Passing no `registered` keeps the old behaviour exactly: only AGENTS matches.
+// That is the safe direction. An empty or missing list can never widen what mints,
+// so a failed lookup refuses instead of inventing a namespace.
+export function selectAgents(namespace, registered) {
   if (namespace === undefined) return AGENTS;
   const picked = AGENTS.filter((a) => a.namespaces.includes(namespace));
-  if (picked.length === 0) {
-    const known = [...new Set(AGENTS.flatMap((a) => a.namespaces))].join(", ");
-    throw new Error(`no agent is scoped to '${namespace}'. Known: ${known}.`);
-  }
-  return picked;
+  if (picked.length > 0) return picked;
+  if (registered?.includes(namespace)) return [driverFor(namespace)];
+  const known = [...new Set(AGENTS.flatMap((a) => a.namespaces))].join(", ");
+  const also = registered?.length ? ` Registered in Capsid: ${[...registered].sort().join(", ")}.` : "";
+  throw new Error(`no agent is scoped to '${namespace}'. Known: ${known}.${also}`);
 }
 
 export function parseArgs(argv) {
@@ -57,6 +86,24 @@ export function parseArgs(argv) {
   const i = argv.indexOf("--namespace");
   if (i !== -1 && !argv[i + 1]) throw new Error("--namespace needs a value, for example --namespace foxing.");
   return { apply, namespace: i === -1 ? undefined : argv[i + 1] };
+}
+
+// The `namespaces` tool answers with a bare array of rows keyed on `namespace`.
+// Parsed in its own function so the test drives the real response shape rather
+// than a shape this script hopes for.
+export function parseNamespaces(text) {
+  let rows;
+  try {
+    rows = JSON.parse(text);
+  } catch {
+    throw new Error(`the namespaces tool did not answer with JSON. Raw: ${text.slice(0, 300)}`);
+  }
+  if (!Array.isArray(rows)) throw new Error(`the namespaces tool answered with ${typeof rows}, not an array.`);
+  const names = rows.map((r) => r?.namespace).filter((n) => typeof n === "string" && n.length > 0);
+  // Vacuity guard. An empty list here would make every --namespace refuse, which
+  // reads as "not registered" when it actually means "the shape changed".
+  if (names.length === 0) throw new Error("the namespaces tool returned no namespaces; its response shape changed.");
+  return names;
 }
 
 let id = 0;
@@ -82,6 +129,7 @@ async function rpc(origin, key, method, params) {
 }
 
 async function main() {
+  let initialized = false;
   const { apply, namespace } = parseArgs(process.argv.slice(2));
   const origin = process.env.CAPSID_ORIGIN ?? ORIGIN_DEFAULT;
   const key = process.env.CAPSID_OPERATOR_KEY;
@@ -90,7 +138,24 @@ async function main() {
     process.exit(2);
   }
 
-  const wanted = selectAgents(namespace);
+  // Resolve before branching on --apply, so a dry run against a non-roster
+  // namespace tells you whether it would mint rather than finding out later.
+  // The network is only touched when AGENTS cannot answer, so a roster dry run
+  // stays offline exactly as it was.
+  let wanted;
+  if (namespace !== undefined && !AGENTS.some((a) => a.namespaces.includes(namespace))) {
+    await rpc(origin, key, "initialize", {
+      protocolVersion: "2025-06-18",
+      capabilities: {},
+      clientInfo: { name: "mint-agents", version: "1" },
+    });
+    initialized = true;
+    const result = await rpc(origin, key, "tools/call", { name: "namespaces", arguments: {} });
+    const text = result?.content?.map((c) => c.text ?? "").join("") ?? "";
+    wanted = selectAgents(namespace, parseNamespaces(text));
+  } else {
+    wanted = selectAgents(namespace);
+  }
 
   if (!apply) {
     console.log(`dry run. Would mint ${wanted.length} agent(s) and write keys into ${keyDir()}:`);
@@ -103,11 +168,13 @@ async function main() {
     return;
   }
 
-  await rpc(origin, key, "initialize", {
-    protocolVersion: "2025-06-18",
-    capabilities: {},
-    clientInfo: { name: "mint-agents", version: "1" },
-  });
+  if (!initialized) {
+    await rpc(origin, key, "initialize", {
+      protocolVersion: "2025-06-18",
+      capabilities: {},
+      clientInfo: { name: "mint-agents", version: "1" },
+    });
+  }
 
   mkdirSync(keyDir(), { recursive: true, mode: 0o700 });
 
