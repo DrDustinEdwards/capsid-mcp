@@ -1,7 +1,7 @@
 import type { Env } from "./env";
 import { healthReport, type HealthReport } from "./health";
 import { escapeHtml } from "./html";
-import { improveStatus, type StatusReport } from "./improve-run";
+import { improveStatus, type NamespaceStatus, type StatusReport } from "./improve-run";
 import { readConsoleSession, startConsoleLogin, type ConsoleUser } from "./console-auth";
 
 // THE CONSOLE: one page that answers "what is the state of every namespace" without
@@ -115,6 +115,12 @@ h2 { font-size: 1rem; margin: 2rem 0 0.75rem; text-transform: uppercase; letter-
 .good { color: var(--good); }
 code { font-family: ui-monospace, monospace; font-size: 0.85em; word-break: break-all; }
 .empty { color: var(--muted); font-style: italic; }
+.muted { color: var(--muted); }
+h4 { font-size: 0.8rem; margin: 1rem 0 0.5rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+.blocked-list { list-style: none; padding: 0; margin: 0; }
+.blocked { border-left: 3px solid var(--warn); padding: 0.25rem 0 0.25rem 0.75rem; margin-bottom: 0.75rem; }
+.blocked strong { display: block; }
+pre { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 0.6rem; overflow-x: auto; white-space: pre-wrap; font-size: 0.8rem; margin: 0.5rem 0 0; }
 `;
 
 function fact(key: string, value: string, cls = ""): string {
@@ -145,8 +151,87 @@ function headerFacts(data: ConsoleData): string {
   ].join("");
 }
 
+// THE DRIVER FOR A NAMESPACE IS `<ns>-driver`, resolved out of the inventory
+// improve_status already returns rather than queried again. Matched on the exact
+// name: a prefix match would let foxing-driver answer for foxing-legacy, and the
+// last_seen a person reads off this row is how they decide whether a namespace has
+// a driver that still connects.
+function driverFor(data: ConsoleData, namespace: string) {
+  return data.improve.agents.find((a) => a.name === `${namespace}-driver`) ?? null;
+}
+
+function blockedJob(job: NamespaceStatus["jobs"]["blocked_jobs"][number]): string {
+  const times = job.blocked_times === 1 ? "blocked once" : `blocked ${job.blocked_times} times`;
+  const resumed = job.resumed > 0 ? `, resumed ${job.resumed}` : "";
+  // The summary is rendered in a <pre> because block() writes the command into it on
+  // its own indented line, and a command a human has to retype is a command that gets
+  // retyped wrong. Escaped, like everything else that came out of the database.
+  const waiting = job.waiting_on
+    ? `<pre>${escapeHtml(job.waiting_on)}</pre>`
+    : `<p class="empty">This job recorded no command. Read the job document for what it was doing.</p>`;
+  return `<li class="blocked">
+<strong>${escapeHtml(job.title)}</strong>
+<span class="muted"><code>${escapeHtml(job.id)}</code> ${escapeHtml(times)}${escapeHtml(resumed)}</span>
+${waiting}
+</li>`;
+}
+
+function namespaceRow(data: ConsoleData, ns: NamespaceStatus): string {
+  const driver = driverFor(data, ns.namespace);
+  const run = ns.last_run;
+  const facts: string[] = [];
+
+  facts.push(
+    ns.anchor_pinned
+      ? fact("anchor", "anchor pinned", "good")
+      : fact("anchor", `anchor NOT pinned${ns.anchor_problem ? "" : " (no problem reported)"}`, "bad")
+  );
+  facts.push(
+    run
+      ? fact("last run", `${run.attempts} attempts, ${run.kept} kept, ${run.reverts} reverted (${run.status})`)
+      : fact("last run", "never run", "warn")
+  );
+  facts.push(ns.best ? fact("best", `${ns.best.score} at ${ns.best.sha}`) : fact("best", "no scored commit yet"));
+  facts.push(
+    ns.latest_report && ns.latest_report.integrity !== null
+      ? fact("integrity", `${ns.latest_report.integrity}%`)
+      : // A namespace with no report is NOT an integrity of zero, and rendering it as a
+        // number would make "never measured" and "measured badly" look the same.
+        fact("integrity", "no truth report", "warn")
+  );
+  facts.push(
+    fact(
+      "jobs",
+      `${ns.jobs.queued} queued, ${ns.jobs.claimed} claimed, ${ns.jobs.blocked} blocked, ${ns.jobs.done_today} done today`,
+      ns.jobs.blocked > 0 ? "warn" : ""
+    )
+  );
+  facts.push(
+    driver
+      ? fact("driver last seen", driver.last_seen ?? "never connected", driver.last_seen ? "" : "warn")
+      : fact("driver last seen", `no driver agent named ${ns.namespace}-driver`, "warn")
+  );
+
+  const paused = ns.paused
+    ? `<p class="bad"><strong>Paused:</strong> ${escapeHtml(ns.paused)}</p>`
+    : "";
+  const anchorProblem = ns.anchor_problem
+    ? `<p class="bad"><strong>Anchor problem:</strong> ${escapeHtml(ns.anchor_problem)}</p>`
+    : "";
+  const blocked = ns.jobs.blocked_jobs.length
+    ? `<h4>Blocked jobs, and what each waits on</h4><ul class="blocked-list">${ns.jobs.blocked_jobs.map(blockedJob).join("")}</ul>`
+    : "";
+
+  return `<section class="ns">
+<h3>${escapeHtml(ns.namespace)}</h3>
+${paused}${anchorProblem}
+<ul class="facts">${facts.join("")}</ul>
+${blocked}
+</section>`;
+}
+
 export function renderConsole(data: ConsoleData): string {
-  const rows = data.improve.namespaces.map((ns) => `<section class="ns"><h3>${escapeHtml(ns.namespace)}</h3></section>`);
+  const rows = data.improve.namespaces.map((ns) => namespaceRow(data, ns));
   const namespaces = rows.length
     ? rows.join("")
     : `<p class="empty">No namespaces on the improve roster.</p>`;
