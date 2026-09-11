@@ -50,6 +50,10 @@ export interface JobRow {
   // The scopes this job's work needs of the driver that claims it, as JSON, or null
   // for the jobs that need nothing unusual (migrations/0009).
   required_scopes: string | null;
+  // The TRACK RECORD this job's work needs of that driver, as JSON, or null
+  // (migrations/0011). The other half of the same question: required_scopes asks what
+  // a driver is permitted to do, this asks what it has actually done.
+  min_record: string | null;
   // How many times this job has hit a gate, and how many times a human sent it back
   // in. Counted where they happen (migrations/0007_jobs_resume.sql says why neither
   // is derived from the other).
@@ -128,4 +132,51 @@ export function missingForJob(agent: Agent, namespace: string, requiredScopes: s
 // test/encoding.test.ts fails the build on a second implementation.
 export function mintJobId(): string {
   return `job_${bytesToHex(crypto.getRandomValues(new Uint8Array(6)))}`;
+}
+
+// ---- what a job needs of the driver's HISTORY ---------------------------------
+//
+// migrations/0011. A scope says what a credential MAY do; this says what it must
+// already HAVE done. Some work should not go to a driver that has never had a pull
+// request merged, and a queue with no way to express that hands it to whoever asks
+// first.
+//
+// ONE FIELD, AND THAT IS DELIBERATE FOR NOW. Every bar here has to be a number the
+// agent record already computes and a human can read on the console, or the claim is
+// gated on something nobody can check before posting the job. prs_merged is that
+// number. A bar on a RATE is deliberately not offered: a rate over a small
+// denominator is noise, and "merge rate at least 0.8" would refuse an agent that has
+// merged one of one.
+export interface MinRecord {
+  prs_merged?: number;
+}
+
+// FAILS OPEN, for the same reason parseRequiredScopes does and with the same asymmetry
+// against parseScopes: a corrupt JOB requirement must not invent a bar nobody wrote,
+// because the cost is a job stranded in the queue behind a refusal no amount of work
+// can satisfy.
+export function parseMinRecord(json: string | null | undefined): MinRecord {
+  if (!json) return {};
+  let raw: unknown;
+  try {
+    raw = JSON.parse(json);
+  } catch {
+    return {};
+  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
+  const value = (raw as Record<string, unknown>).prs_merged;
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? { prs_merged: value } : {};
+}
+
+export function serializeMinRecord(min: MinRecord): string {
+  return JSON.stringify({ prs_merged: min.prs_merged ?? 0 });
+}
+
+// THE BAR, CHECKED AGAINST THE RECORD THE CONSOLE SHOWS. Returns a refusal naming the
+// shortfall, or null. Takes the record's numbers rather than the record, so this stays
+// a pure comparison and src/agent-record.ts stays the only place they are computed.
+export function missingForRecord(record: { prs_merged: number }, minRecord: string | null | undefined): string | null {
+  const { prs_merged } = parseMinRecord(minRecord);
+  if (prs_merged === undefined || record.prs_merged >= prs_merged) return null;
+  return `this job asks for a driver with at least ${prs_merged} merged pull request${prs_merged === 1 ? "" : "s"} on its record, and this one has ${record.prs_merged}.`;
 }

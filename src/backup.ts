@@ -71,6 +71,11 @@ export const TABLES = [
   // record of who asked for what and what came back, and the mirrored document
   // carries only the body.
   "jobs",
+  // What each finished job produced (migrations/0011). Nothing prunes it, and it is
+  // the only place the verified counts live: the pull requests they were read from
+  // can be deleted on GitHub, so a dump is the only copy of what was true when the
+  // job ended.
+  "job_outcomes",
   // The scoped credentials (migrations/0008). Nothing prunes it: a revoked agent
   // keeps its row so the audit trail it wrote still resolves to what it was allowed
   // to do. What the dump carries is the sha256 VERIFIER, never a key, exactly as

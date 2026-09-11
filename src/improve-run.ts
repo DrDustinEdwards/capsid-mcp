@@ -30,6 +30,7 @@ import {
 } from "./improve-state";
 import { verifyTaskDoc } from "./improve-task";
 import { SCOPE_FLAGS, parseScopes } from "./agents-schema";
+import { loadAgentRecords, type AgentRecord } from "./agent-record";
 import { jobsSummary, type JobsSummary } from "./jobs";
 import { integrityOf, REPORTS_PREFIX } from "./truth-report";
 import {
@@ -146,13 +147,18 @@ export interface AgentSummary {
   flags: string[];
   last_seen: string | null;
   revoked_at: string | null;
+  // WHAT THIS CREDENTIAL HAS DONE, from job_outcomes. The inventory above says what an
+  // agent MAY do; without this it said nothing about what it HAS done, and last_seen
+  // only answers "is this still in use". Counts and rates, never a composite score:
+  // see src/agent-record.ts for why that line is drawn there.
+  record: AgentRecord;
 }
 
 async function agentSummaries(db: D1Database): Promise<AgentSummary[]> {
   const { results } = await db
     .prepare("SELECT name, kind, scopes, last_seen, revoked_at FROM agents ORDER BY revoked_at IS NOT NULL, name")
     .all<{ name: string; kind: string; scopes: string; last_seen: string | null; revoked_at: string | null }>();
-  return (results ?? []).map((row) => {
+  const inventory = (results ?? []).map((row) => {
     const scopes = parseScopes(row.scopes);
     return {
       name: row.name,
@@ -164,6 +170,12 @@ async function agentSummaries(db: D1Database): Promise<AgentSummary[]> {
       revoked_at: row.revoked_at,
     };
   });
+  // THREE GROUPED READS FOR THE WHOLE INVENTORY, not three per credential. The
+  // aggregation itself is a pure function over the rows, so what it computes is
+  // checked against fixtures rather than against a fake that would agree with
+  // whatever it was handed.
+  const records = await loadAgentRecords(db, inventory);
+  return inventory.map((agent) => ({ ...agent, record: records[agent.name] }));
 }
 
 export async function improveStatus(env: Env, only?: string, taskPath?: string): Promise<StatusReport> {

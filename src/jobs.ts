@@ -6,13 +6,24 @@ import {
   jobDocPath,
   missingForJob,
   mintJobId,
+  missingForRecord,
+  serializeMinRecord,
   serializeRequiredScopes,
   type JobRow,
   type JobStatus,
+  type MinRecord,
   type RequiredScopes,
 } from "./jobs-schema";
 import type { Agent } from "./agents";
 import { signTaskBody, verifySignedBody } from "./improve-task";
+import { loadRecordRows, recordFor } from "./agent-record";
+import {
+  outcomeFrom,
+  outcomeStatement,
+  verifyEvidence,
+  type JobEvidence,
+  type JobOutcomeRow,
+} from "./job-outcomes";
 
 // THE WORK QUEUE. The ruling seat posts a job from a chat; a driver session on a
 // machine claims it, does it, and reports back.
@@ -43,6 +54,11 @@ export interface JobResult {
   truncated?: boolean;
   note?: string;
   refusal?: string;
+  // THE OUTCOME ROW THIS TRANSITION WROTE, returned so the driver sees what the
+  // Worker checked rather than assuming its own numbers were taken. `notes` names
+  // every verification that could not run, which is the difference between a count
+  // nobody checked and a count nobody tried to check.
+  outcome?: { row: JobOutcomeRow; notes: string[] };
 }
 
 function refuse(action: string, refusal: string): JobResult {
@@ -103,6 +119,22 @@ async function readJob(db: D1Database, id: string): Promise<JobRow | null> {
   return db.prepare("SELECT * FROM jobs WHERE id = ?1").bind(id).first<JobRow>();
 }
 
+// THE TRACK-RECORD BAR, CHECKED AT THE CLAIM (migrations/0011).
+//
+// READ ONLY WHEN A JOB ASKS FOR ONE, which is almost never. The record is computed
+// from every outcome row, so making every claim pay for that read to answer a
+// question nobody asked would put a table scan in front of the queue's hottest path.
+//
+// It goes through recordFor, the same function improve_status and the console call,
+// so the bar a claim is measured against is the number a human can read on the page.
+// `null` for namespaces because the improve-loop columns play no part in this
+// comparison and computing them here would attribute a namespace's attempts to
+// whichever credential happened to be asking.
+async function recordShortfall(db: D1Database, actor: string, job: JobRow): Promise<string | null> {
+  if (!job.min_record) return null;
+  return missingForRecord(recordFor(actor, await loadRecordRows(db), null), job.min_record);
+}
+
 // ---- post --------------------------------------------------------------------
 //
 // THE BODY IS SIGNED AT POST, with the same key and the same envelope as the
@@ -118,7 +150,15 @@ export async function postJob(
   env: Env,
   agent: Agent,
   now: Date,
-  args: { namespace: string; title: string; body: string; priority?: number; gate_required?: boolean; required_scopes?: Partial<RequiredScopes> }
+  args: {
+    namespace: string;
+    title: string;
+    body: string;
+    priority?: number;
+    gate_required?: boolean;
+    required_scopes?: Partial<RequiredScopes>;
+    min_record?: MinRecord;
+  }
 ): Promise<JobResult> {
   const actor = agent.actor;
   if (!env.IMPROVE_SCORE_SECRET) {
@@ -150,6 +190,10 @@ export async function postJob(
     // column's meaning is "this job needs something unusual", and a row of empty JSON
     // reads as a requirement nobody can see.
     required_scopes: args.required_scopes?.flags?.length ? serializeRequiredScopes(args.required_scopes) : null,
+    // NULL WHEN NO BAR WAS ASKED FOR, on the same reasoning as required_scopes above.
+    // A bar of zero is no bar, so it is stored as none rather than as a requirement
+    // every agent trivially meets.
+    min_record: args.min_record?.prs_merged ? serializeMinRecord(args.min_record) : null,
     blocked_count: 0,
     resumed_count: 0,
     created_at: now.toISOString(),
@@ -158,15 +202,27 @@ export async function postJob(
 
   const statements = [
     env.DB.prepare(
-      `INSERT INTO jobs (id, namespace, title, body, priority, status, posted_by, gate_required, required_scopes, created_at, updated_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, ?8, ?9, ?9)`
-    ).bind(job.id, job.namespace, job.title, job.body, job.priority, job.posted_by, job.gate_required, job.required_scopes, job.created_at),
+      `INSERT INTO jobs (id, namespace, title, body, priority, status, posted_by, gate_required, required_scopes, min_record, created_at, updated_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, ?8, ?9, ?10, ?10)`
+    ).bind(
+      job.id,
+      job.namespace,
+      job.title,
+      job.body,
+      job.priority,
+      job.posted_by,
+      job.gate_required,
+      job.required_scopes,
+      job.min_record,
+      job.created_at
+    ),
     ...(await mirrorStatements(env.DB, job, "job-posted", actor)),
     auditStatement(env.DB, actor, "job-posted", job, {
       title: job.title,
       priority: job.priority,
       gate_required: job.gate_required,
       ...(job.required_scopes ? { required_scopes: job.required_scopes } : {}),
+      ...(job.min_record ? { min_record: job.min_record } : {}),
     }),
   ];
   try {
@@ -294,6 +350,14 @@ export async function claimJob(
     );
   }
 
+  // AND WHAT IT NEEDS OF THE DRIVER'S HISTORY, on the same terms and in the same
+  // place: before the lease, so a driver that cannot satisfy the bar is not parked on
+  // a job for four hours, and the job stays queued for one that can.
+  const shortfall = await recordShortfall(env.DB, actor, candidate);
+  if (shortfall) {
+    return refuse("claim", `${actor} cannot claim ${candidate.id} ('${candidate.title}'): ${shortfall} The job stays queued for a driver that can do it.`);
+  }
+
   const verdict = await verifySignedBody(env.IMPROVE_SCORE_SECRET, candidate.body, "job body");
   if (!verdict.ok) {
     await env.DB.prepare(
@@ -358,6 +422,9 @@ async function holderTransition(
     // query-plans.test.ts can reconstruct it and EXPLAIN it. A statement assembled
     // at runtime is invisible to both.
     bumpBlocked?: boolean;
+    // What the driver says this job produced. Verified against GitHub and written
+    // into job_outcomes below, on the terminal transitions only.
+    evidence?: JobEvidence;
   }
 ): Promise<JobResult> {
   const actor = agent.actor;
@@ -389,15 +456,37 @@ async function holderTransition(
     return refuse(action, `${id} is held by ${current.claimed_by}, not by ${actor}.`);
   }
   const job = (await readJob(env.DB, id)) as JobRow;
-  await env.DB.batch([
+
+  // THE OUTCOME ROW, ON THE TERMINAL TRANSITIONS ONLY. A job that is still running
+  // has no outcome to record, and one that reached `done` or `failed` will not
+  // transition again: both are keyed updates out of `claimed`, so this runs once per
+  // job and the primary key enforces that rather than trusting it.
+  //
+  // A FAILED JOB GETS A ROW TOO. A driver whose jobs mostly fail is the thing this
+  // table exists to make visible, and recording only the successes would produce a
+  // record in which every agent looks equally good.
+  //
+  // VERIFICATION RUNS BEFORE THE BATCH AND CANNOT FAIL THE TRANSITION. The row is
+  // already updated by this point; verifyEvidence swallows its own errors and reports
+  // them as notes, so an unreachable GitHub costs the verified flags and not the
+  // driver's ability to close a finished job.
+  let outcome: { row: JobOutcomeRow; notes: string[] } | undefined;
+  const statements = [
     ...(await mirrorStatements(env.DB, job, `job-${action}`, actor)),
     auditStatement(env.DB, actor, `job-${action}`, job, {
       status: job.status,
       ...(patch.result_summary ? { result_summary: patch.result_summary } : {}),
       ...(patch.result_ref ? { result_ref: patch.result_ref } : {}),
     }),
-  ]);
-  return { ok: true, action, job };
+  ];
+  if (job.status === "done" || job.status === "failed") {
+    const verdict = await verifyEvidence(env, job.namespace, patch.evidence);
+    const row = outcomeFrom(job, verdict, now);
+    outcome = { row, notes: verdict.notes };
+    statements.push(outcomeStatement(env.DB, row));
+  }
+  await env.DB.batch(statements);
+  return { ok: true, action, job, ...(outcome ? { outcome } : {}) };
 }
 
 export async function heartbeatJob(env: Env, agent: Agent, now: Date, id: string): Promise<JobResult> {
@@ -409,7 +498,7 @@ export async function completeJob(
   agent: Agent,
   now: Date,
   id: string,
-  args: { result_summary: string; result_ref?: string }
+  args: { result_summary: string; result_ref?: string; evidence?: JobEvidence }
 ): Promise<JobResult> {
   if (!args.result_summary?.trim()) {
     return refuse("complete", "complete needs a result_summary. A done job with no summary is a job the seat has to reconstruct from the diff.");
@@ -419,6 +508,7 @@ export async function completeJob(
     result_summary: args.result_summary,
     result_ref: args.result_ref ?? null,
     lease_expires: null,
+    evidence: args.evidence,
   });
 }
 
@@ -466,10 +556,23 @@ export async function adminFailJob(env: Env, agent: Agent, now: Date, id: string
     return refuse("admin-fail", `${id} is already ${current.status}; there is nothing to fail.`);
   }
   const job = (await readJob(env.DB, id)) as JobRow;
-  await env.DB.batch([
+  const statements = [
     ...(await mirrorStatements(env.DB, job, "job-admin-fail", agent.actor)),
     auditStatement(env.DB, agent.actor, "job-admin-fail", job, { status: job.status, reason, held_by: job.claimed_by }),
-  ]);
+  ];
+  // THE OTHER WAY A JOB REACHES A TERMINAL STATE, and it gets a row for the same
+  // reason `fail` does: a job the seat had to close because its driver never came
+  // back is exactly the kind of ending the record should show.
+  //
+  // ONLY WHEN SOMEBODY HELD IT. A queued job the seat cancelled was never worked, so
+  // there is no agent to attribute it to, and inventing one would put a failure on a
+  // credential that had not touched the job. There is no evidence argument here
+  // either: the seat calling this did not do the work and cannot report on it.
+  if (job.claimed_by) {
+    const verdict = await verifyEvidence(env, job.namespace, undefined);
+    statements.push(outcomeStatement(env.DB, outcomeFrom(job, verdict, now)));
+  }
+  await env.DB.batch(statements);
   return { ok: true, action: "admin-fail", job };
 }
 
@@ -553,6 +656,13 @@ export async function resumeJob(
   const missing = missingForJob(agent, current.namespace, current.required_scopes);
   if (missing) {
     return refuse("resume", `${actor} cannot resume ${id} ('${current.title}'): ${missing} It stays blocked for a driver that can finish it.`);
+  }
+  // RESUME IS A CLAIM, so it asks the record question too. A job whose bar the
+  // resuming caller does not meet would otherwise be acquired by resuming it, which
+  // is the same escalation the scope check above refuses.
+  const resumeShortfall = await recordShortfall(env.DB, actor, current);
+  if (resumeShortfall) {
+    return refuse("resume", `${actor} cannot resume ${id} ('${current.title}'): ${resumeShortfall} It stays blocked for a driver that can finish it.`);
   }
 
   const verdict = await verifySignedBody(env.IMPROVE_SCORE_SECRET, current.body, "job body");
