@@ -1,6 +1,7 @@
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { createMcpHandler } from "agents/mcp";
 import { isAdminUser } from "./auth";
+import { adminAgent } from "./agents";
 import { runBackup } from "./backup";
 import { callerIp, checkRate, dcrRedirectRefusal, REGISTRATION_LIMIT } from "./rate-limit";
 import { defaultHandler } from "./routes";
@@ -27,7 +28,10 @@ const apiHandler = {
         status: 403,
       });
     }
-    return createMcpHandler(buildServer(env, "write", `github:${props.login}`), { route: "/mcp" })(request, env, ctx);
+    // The admitted admin is the synthetic agent "admin", holding every scope. The
+    // login stays the audit actor, because it is more specific than the synthetic
+    // name and every existing audit query reads it.
+    return createMcpHandler(buildServer(env, adminAgent(props.login)), { route: "/mcp" })(request, env, ctx);
   },
 };
 

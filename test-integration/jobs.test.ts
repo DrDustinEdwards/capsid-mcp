@@ -2,6 +2,7 @@ import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import { blockJob, claimJob, completeJob, expireJobLeases, failJob, heartbeatJob, jobsSummary, listJobs, postJob, resumeJob } from "../src/jobs";
 import { improveStatus } from "../src/improve-run";
+import { legacyAgent } from "../src/agents";
 import { JOB_LEASE_SECONDS, jobDocPath } from "../src/jobs-schema";
 import { splitSignedTask, verifyTaskDoc } from "../src/improve-task";
 
@@ -24,8 +25,14 @@ import { splitSignedTask, verifyTaskDoc } from "../src/improve-task";
 
 const SECRET = "test-root-secret";
 const SEAT = "github:DrDustinEdwards";
-const DRIVER = "opkey:aaaabbbbcccc";
-const OTHER = "opkey:ddddeeeeffff";
+const DRIVER_ACTOR = "opkey:aaaabbbbcccc";
+const OTHER_ACTOR = "opkey:ddddeeeeffff";
+// A claim is authorized against a CALLER now, not an actor string (migrations/0008).
+// These two are the legacy operator identity, which is what every existing claim in
+// the portfolio still presents and what these tests are about: the lease, the CAS and
+// the unique index are properties of SQLite and do not change with the caller.
+const DRIVER = legacyAgent("write", DRIVER_ACTOR);
+const OTHER = legacyAgent("write", OTHER_ACTOR);
 
 function jobsEnv() {
   return { ...env, IMPROVE_SCORE_SECRET: SECRET } as unknown as Parameters<typeof postJob>[0];
@@ -48,7 +55,7 @@ async function auditActions(id: string): Promise<string[]> {
 }
 
 async function post(over: Partial<{ namespace: string; title: string; body: string; priority: number; gate_required: boolean }> = {}) {
-  return postJob(jobsEnv(), SEAT, NOW, {
+  return postJob(jobsEnv(), legacyAgent("write", SEAT), NOW, {
     namespace: "capsid",
     title: "a job",
     body: "do the thing",
@@ -74,7 +81,7 @@ describe("the lifecycle", () => {
     const claimed = await claimJob(jobsEnv(), DRIVER, NOW, { namespace: "capsid" });
     expect(claimed.ok, claimed.refusal).toBe(true);
     expect(claimed.job!.id).toBe(id);
-    expect(claimed.job!.claimed_by).toBe(DRIVER);
+    expect(claimed.job!.claimed_by).toBe(DRIVER_ACTOR);
     // The lease is four hours out, from the clock the caller passed rather than the
     // runner's, so this is an assertion about the value and not about timing.
     expect(claimed.job!.lease_expires).toBe(new Date(NOW.getTime() + JOB_LEASE_SECONDS * 1000).toISOString());
@@ -110,7 +117,7 @@ describe("the lifecycle", () => {
     const actors = await env.DB.prepare("SELECT DISTINCT actor FROM audit_log WHERE params LIKE ?1")
       .bind(`%${id}%`)
       .all<{ actor: string }>();
-    expect(new Set((actors.results ?? []).map((r) => r.actor))).toEqual(new Set([SEAT, DRIVER]));
+    expect(new Set((actors.results ?? []).map((r) => r.actor))).toEqual(new Set([SEAT, DRIVER_ACTOR]));
   });
 });
 
@@ -162,7 +169,7 @@ describe("the refusals", () => {
     await claimJob(jobsEnv(), DRIVER, NOW, { id });
     const stolen = await completeJob(jobsEnv(), OTHER, NOW, id, { result_summary: "not mine" });
     expect(stolen.ok).toBe(false);
-    expect(stolen.refusal).toMatch(new RegExp(`held by ${DRIVER}, not by ${OTHER}`));
+    expect(stolen.refusal).toMatch(new RegExp(`held by ${DRIVER_ACTOR}, not by ${OTHER_ACTOR}`));
     expect((await row(id))?.status).toBe("claimed");
   });
 
@@ -177,7 +184,7 @@ describe("the refusals", () => {
 
   it("post refuses when there is no key to sign with", async () => {
     const unconfigured = { ...env, IMPROVE_SCORE_SECRET: undefined } as unknown as Parameters<typeof postJob>[0];
-    const result = await postJob(unconfigured, SEAT, NOW, { namespace: "capsid", title: "unsignable", body: "x" });
+    const result = await postJob(unconfigured, legacyAgent("write", SEAT), NOW, { namespace: "capsid", title: "unsignable", body: "x" });
     expect(result.ok).toBe(false);
     expect(result.refusal).toMatch(/IMPROVE_SCORE_SECRET is unset/);
     // Fail closed: nothing queued.
@@ -213,7 +220,7 @@ describe("the lease", () => {
     expect((await row(live.job!.id))?.status).toBe("claimed");
 
     // And it is claimable again, by anyone.
-    const reclaimed = await claimJob(jobsEnv(), SEAT.replace("github:", "opkey:"), later, { id: dead.job!.id });
+    const reclaimed = await claimJob(jobsEnv(), legacyAgent("write", SEAT.replace("github:", "opkey:")), later, { id: dead.job!.id });
     expect(reclaimed.ok, reclaimed.refusal).toBe(true);
   });
 
@@ -271,7 +278,7 @@ describe("resume", () => {
     expect(resumed.ok, resumed.refusal).toBe(true);
     const held = await row(id);
     expect(held?.status).toBe("claimed");
-    expect(held?.claimed_by).toBe(DRIVER);
+    expect(held?.claimed_by).toBe(DRIVER_ACTOR);
     // A FRESH LEASE, not the expired one it was blocked with.
     expect(held?.lease_expires).toBe(new Date(NOW.getTime() + JOB_LEASE_SECONDS * 1000).toISOString());
     expect(held?.resumed_count).toBe(1);
@@ -332,7 +339,7 @@ describe("resume", () => {
     const id = await blockedJob("other caller");
     const resumed = await resumeJob(jobsEnv(), OTHER, NOW, id, "seat approved");
     expect(resumed.ok, resumed.refusal).toBe(true);
-    expect((await row(id))?.claimed_by).toBe(OTHER);
+    expect((await row(id))?.claimed_by).toBe(OTHER_ACTOR);
   });
 
   it("resume refuses a queued job and a done job", async () => {
@@ -410,7 +417,7 @@ describe("the mirrored document", () => {
 
     await claimJob(jobsEnv(), DRIVER, NOW, { id });
     expect((await readDoc())!.body).toContain("status: **claimed**");
-    expect((await readDoc())!.body).toContain(DRIVER);
+    expect((await readDoc())!.body).toContain(DRIVER_ACTOR);
 
     await completeJob(jobsEnv(), DRIVER, NOW, id, { result_summary: "landed" });
     const atDone = await readDoc();

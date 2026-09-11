@@ -25,10 +25,11 @@ import {
   writeRepoFile,
 } from "../github";
 import { bounded, CI_DISPATCH_MAX_INPUTS, DEFAULT_SCAN_FILES, DEFAULT_SCAN_RESULTS, MAX_BODY, MAX_COMMIT_MESSAGE, MAX_PATH, MAX_PR_BODY, MAX_PR_TITLE, MAX_QUERY, MAX_REF, MAX_REPO_SELECTOR, MAX_SCAN_CAP, MAX_SHA, nsName } from "../limits";
-import { DENIED, fail, ok, type ToolCtx } from "./docs";
+import { fail, ok, type ToolCtx } from "./docs";
+import { repoWriteFlags } from "../scope";
 
 export function registerRepoTools(server: McpServer, ctx: ToolCtx): void {
-  const { env, db, mayWrite, actor } = ctx;
+  const { env, db, actor } = ctx;
 
   // Repo fallthrough: live GitHub access via the Capsid GitHub App. Reads are
   // open to any admitted client; writes require the operator key. The target
@@ -48,9 +49,25 @@ export function registerRepoTools(server: McpServer, ctx: ToolCtx): void {
     action: string,
     namespace: string,
     path: string | null,
-    fn: () => Promise<Record<string, unknown>>
+    fn: () => Promise<Record<string, unknown>>,
+    // What the call is actually asking to do, which is what decides the flags. The
+    // registrar has already checked the tool, the grant, the namespace and the repo
+    // selector by now; a wrapper could not have checked these, because `mode:
+    // "direct"` needs can_direct_write and `mode: "pr"` does not.
+    intent: { path?: string; mode?: string; action?: string; allow_workflow_write?: boolean } = {}
   ) => {
-    if (!mayWrite) return fail(DENIED);
+    // EVERY REPO MUTATION FUNNELS THROUGH HERE, which is why the flag check is here
+    // and not in each of the seven tools: this is the one place that already sees
+    // all of them (quality audit 1.5 put the GitHub dance behind one helper for the
+    // same reason). test/scope-coverage.test.ts derives that no repo write tool
+    // reaches GitHub any other way.
+    const refusal = ctx.scope({
+      tool: action,
+      namespace,
+      grant: "write",
+      flags: repoWriteFlags(action, { ...intent, path: intent.path ?? path ?? undefined }),
+    });
+    if (refusal) return fail(refusal);
     let result: Record<string, unknown>;
     try {
       result = await fn();
@@ -179,8 +196,12 @@ export function registerRepoTools(server: McpServer, ctx: ToolCtx): void {
       },
     },
     ({ namespace, path, content, message, mode, branch, repo, allow_workflow_write }) =>
-      guardedWrite("write_repo_file", namespace, path, () =>
-        writeRepoFile(env, namespace, path, content, message, mode ?? "pr", branch, repo, allow_workflow_write)
+      guardedWrite(
+        "write_repo_file",
+        namespace,
+        path,
+        () => writeRepoFile(env, namespace, path, content, message, mode ?? "pr", branch, repo, allow_workflow_write),
+        { path, mode: mode ?? "pr", allow_workflow_write }
       )
   );
 
@@ -235,8 +256,12 @@ export function registerRepoTools(server: McpServer, ctx: ToolCtx): void {
       },
     },
     ({ namespace, path, message, mode, branch, repo, allow_workflow_write }) =>
-      guardedWrite("delete_repo_file", namespace, path, () =>
-        deleteRepoFile(env, namespace, path, message, mode ?? "pr", branch, repo, allow_workflow_write)
+      guardedWrite(
+        "delete_repo_file",
+        namespace,
+        path,
+        () => deleteRepoFile(env, namespace, path, message, mode ?? "pr", branch, repo, allow_workflow_write),
+        { path, mode: mode ?? "pr", allow_workflow_write }
       )
   );
 
@@ -255,7 +280,13 @@ export function registerRepoTools(server: McpServer, ctx: ToolCtx): void {
       },
     },
     ({ namespace, number, action, merge_method, repo }) =>
-      guardedWrite("manage_pr", namespace, null, () => managePr(env, namespace, number, action, merge_method ?? "squash", repo))
+      guardedWrite(
+        "manage_pr",
+        namespace,
+        null,
+        () => managePr(env, namespace, number, action, merge_method ?? "squash", repo),
+        { action }
+      )
   );
 
   server.registerTool(
@@ -274,7 +305,17 @@ export function registerRepoTools(server: McpServer, ctx: ToolCtx): void {
       },
     },
     ({ namespace, repo, limit, ref, run_id }) =>
-      guarded(() => ciStatus(env, namespace, repo, { limit, logTail: mayWrite, ref, runId: run_id }))
+      // THE LOG TAIL IS WITHHELD FROM A READ-ONLY CALLER (2026-08-13): a build log
+      // carries whatever the workflow echoed. That is a scope question, so it is
+      // asked of the one enforcement point rather than decided here from a boolean.
+      guarded(() =>
+        ciStatus(env, namespace, repo, {
+          limit,
+          logTail: ctx.scope({ tool: "ci_status", namespace, grant: "write" }) === null,
+          ref,
+          runId: run_id,
+        })
+      )
   );
 
   // THE REPO FALLTHROUGH WIDENING, the SECOND ruled exception to hard rule 1 in one
@@ -364,6 +405,14 @@ export function registerRepoTools(server: McpServer, ctx: ToolCtx): void {
       },
     },
     ({ namespace, workflow, ref, run_id, inputs, repo }) =>
-      guardedWrite("ci_dispatch", namespace, null, () => ciDispatch(env, namespace, { workflow, ref, run_id, inputs }, repo))
+      guardedWrite(
+        "ci_dispatch",
+        namespace,
+        null,
+        () => ciDispatch(env, namespace, { workflow, ref, run_id, inputs }, repo),
+        // The workflow file name is the path this dispatch runs, so a dispatch of a
+        // workflow under a protected or money path is checked as one.
+        { path: workflow }
+      )
   );
 }

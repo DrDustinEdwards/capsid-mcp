@@ -88,10 +88,33 @@ An optional nightly loop that proposes one scoped code change at a time to a sma
 
 ## Auth model
 
-Two parallel paths, both fully gated:
+Every caller resolves to an **agent**: a name, a set of scopes, and its own audit identity. There is one enforcement point, `checkScope` in `src/scope.ts`, and every tool call goes through it before its handler runs.
+
+An agent's scopes are five axes. `namespaces` and `repos` are a list or `*`. `tools` is an allow list or `*`. `grants` is read, or read and write. `flags` are the **blast radius**, each naming an action whose consequence leaves this Worker:
+
+| flag | what it gates |
+| --- | --- |
+| `can_merge` | merging a pull request, which can trigger a deploy on a repo that deploys on push |
+| `can_direct_write` | a `mode: "direct"` commit, which lands on a default branch with no review |
+| `can_dispatch` | dispatching a workflow, which spends CI minutes and runs code with that repo's secrets in scope |
+| `can_write_workflows` | writing under `.github/workflows/`, which is editing what measures the code |
+| `can_touch_protected` | tests, CI, lint and compiler config, lockfiles, manifests, the agent steering layer, migrations |
+| `money_paths` | a path naming a billing or payment surface |
+
+A new agent is born with **read on its named namespaces and no flags**; widen it deliberately. Scopes are stored as JSON and the parse **fails closed**: a null, truncated or wrong-shaped scopes column resolves to no namespaces, no tools, no grants and no flags, because a permissive parse of a corrupt row looks exactly like a working one until the day it matters. Mint, list, revoke and re-scope with the `agents` tool, which is **admin only**: a minted agent that could mint another could widen itself, and every scope below it would be decoration.
+
+Keys are never stored. `agents` returns a minted key once; the table holds its sha256. Revoking sets `revoked_at` rather than deleting, so the audit rows an agent wrote still resolve to what it was allowed to do, and its key stops resolving immediately.
+
+Three kinds of caller resolve, and the order is load-bearing:
+
+1. **A minted agent**, matched on the sha256 of its bearer token, carrying exactly its row's scopes. Checked first, so a key that is somehow both an agent and an operator entry gets the narrower authority.
+2. **A legacy operator key**, unchanged and still holding everything it holds today, until its hash is removed from `OPERATOR_KEY_HASH` by hand.
+3. **The OAuth admin session**, which is the synthetic agent `admin` with every scope.
+
+Both gated paths:
 
 1. **OAuth (`/mcp`)** for human clients. The client discovers the server via the `.well-known` endpoints, registers itself dynamically, and is sent through `/authorize`. After a one-time approval screen, the browser goes to GitHub. On return, the GitHub user is checked against `ADMIN_GITHUB_LOGIN`: set it to your GitHub username, or to your immutable numeric GitHub user id (find it at `https://api.github.com/users/<login>`). Any other GitHub account gets a 403. The admin check runs again on every `/mcp` request as defense in depth. An admitted admin holds a full write grant.
-2. **Operator keys (`/ops/mcp`)** for agents and cron. Same server, gated by sha256-hashed bearer keys. `OPERATOR_KEY_HASH` holds one or more comma-separated hashes: a plain entry is a full (write) key, and an entry prefixed `ro:` is a read-only key that can use the read tools but is denied write, delete, move, register_namespace, update_namespace, repo writes, PR management, and lint finalize. Revoke a key by removing its hash; the others keep working. The OAuth library never sees this route, so the two paths cannot interfere.
+2. **Agent and operator keys (`/ops/mcp`)** for agents and cron. Same server, gated by sha256-hashed bearer keys. An agent key resolves to its row. Failing that, `OPERATOR_KEY_HASH` holds one or more comma-separated hashes: a plain entry is a full (write) key, and an entry prefixed `ro:` is a read-only key that can use the read tools but is denied write, delete, move, register_namespace, update_namespace, repo writes, PR management, and lint finalize. Revoke a key by removing its hash; the others keep working. The OAuth library never sees this route, so the two paths cannot interfere.
 
 Login and repo access use two different GitHub credentials: a GitHub **OAuth App** for login (OAuth Apps cannot mint installation tokens) and a separate GitHub **App** for repo access. Keep both.
 
@@ -111,7 +134,7 @@ D1 Time Travel already provides 30-day point-in-time recovery, so backups here a
 
 A daily Cron Trigger (09:00 UTC) exports the whole database to the `MEDIA` R2 bucket:
 
-- `backups/json/<timestamp>/<table>.json` one JSON dump per table, eleven per run (`TABLES` in `src/backup.ts`: documents, namespaces, document_versions, audit_log, document_links, the four improve-loop tables, jobs, and improve_jti). Retention treats the run, not the object: a run is kept for 90 days, the 14 most recent runs are always kept whatever their age, and a run that ages out is deleted whole.
+- `backups/json/<timestamp>/<table>.json` one JSON dump per table, twelve per run (`TABLES` in `src/backup.ts`: documents, namespaces, document_versions, audit_log, document_links, the four improve-loop tables, jobs, agents, and improve_jti). Retention treats the run, not the object: a run is kept for 90 days, the 14 most recent runs are always kept whatever their age, and a run that ages out is deleted whole.
 - `backups/markdown/<namespace>/<path>` a plain-markdown mirror of every document body, verbatim, one file per document. This mirror tracks the current state (files for deleted documents are pruned), so the knowledge base stays readable and portable with no Capsid dependency.
 
 After each export the history tables are pruned in D1: `document_versions` rows older than 90 days and `audit_log` rows older than 180 days. Pruning runs after the export, so every pruned row exists in at least one retained JSON dump.
@@ -130,15 +153,15 @@ Three paths, in the order to try them. Path 2 has been executed end to end again
 
 1. **D1 Time Travel** (last 30 days, fastest), for fat-finger recovery or a bad bulk change. `wrangler d1 time-travel info capsid`, then `wrangler d1 time-travel restore capsid --bookmark=<bookmark>`. This rewinds the live database in place, so take a fresh bookmark first to keep the restore itself reversible.
 
-2. **Table-scoped export and import**, for rebuilding into a new database (migration, region move, corruption). Note that `wrangler d1 export` fails outright on this database, because D1 cannot export databases with FTS5 virtual tables. Export the eleven real tables individually and data-only, taking the schema from the migrations instead:
+2. **Table-scoped export and import**, for rebuilding into a new database (migration, region move, corruption). Note that `wrangler d1 export` fails outright on this database, because D1 cannot export databases with FTS5 virtual tables. Export the twelve real tables individually and data-only, taking the schema from the migrations instead:
 
    ```
    wrangler d1 export capsid --remote --no-schema --table <table> --output export-<table>.sql
    ```
 
-   The eleven tables are `documents`, `namespaces`, `document_versions`, `audit_log`, `document_links`, the four improve-loop tables `improve_scores`, `improve_attempts`, `improve_runs`, `improve_skills` (added by `migrations/0003_improve.sql`), `jobs`, the work queue (added by `migrations/0006_jobs.sql`), and `improve_jti`, the signed-request replay cache (added by `migrations/0004_improve_jti.sql`). `src/backup.ts` `TABLES` is the authoritative list, derived-checked against `migrations/` by `test/backup.test.ts`. Never export `documents_fts` or its `documents_fts_*` shadow tables: FTS5 derives them from `documents`, and they are what makes a whole-database export fail.
+   The twelve tables are `documents`, `namespaces`, `document_versions`, `audit_log`, `document_links`, the four improve-loop tables `improve_scores`, `improve_attempts`, `improve_runs`, `improve_skills` (added by `migrations/0003_improve.sql`), `jobs`, the work queue (added by `migrations/0006_jobs.sql`), `agents`, the scoped credentials (added by `migrations/0008_agents.sql`), and `improve_jti`, the signed-request replay cache (added by `migrations/0004_improve_jti.sql`). `src/backup.ts` `TABLES` is the authoritative list, derived-checked against `migrations/` by `test/backup.test.ts`. Never export `documents_fts` or its `documents_fts_*` shadow tables: FTS5 derives them from `documents`, and they are what makes a whole-database export fail.
 
-   Create the new database, apply **every** migration in `migrations/` in order (`0001_init.sql`, then `0002_document_links.sql`, `0003_improve.sql`, `0004_improve_jti.sql`, `0005_query_plan_indexes.sql`, `0006_jobs.sql` and `0007_jobs_resume.sql`; stopping early leaves later tables missing for the import to land in, and a column the code reads absent from a table that does exist), then execute the exports with `documents` first. Importing `documents` fires the FTS sync triggers, so `documents_fts` rebuilds itself and needs no separate step. The remaining tables have no triggers and no foreign keys, so their import order does not matter. Verify with count queries against both databases and one MATCH query on the new one, then point `wrangler.jsonc` at the new `database_id` and deploy.
+   Create the new database, apply **every** migration in `migrations/` in order (`0001_init.sql`, then `0002_document_links.sql`, `0003_improve.sql`, `0004_improve_jti.sql`, `0005_query_plan_indexes.sql`, `0006_jobs.sql`, `0007_jobs_resume.sql`, `0008_agents.sql` and `0009_jobs_required_scopes.sql`; stopping early leaves later tables missing for the import to land in, and a column the code reads absent from a table that does exist), then execute the exports with `documents` first. Importing `documents` fires the FTS sync triggers, so `documents_fts` rebuilds itself and needs no separate step. The remaining tables have no triggers and no foreign keys, so their import order does not matter. Verify with count queries against both databases and one MATCH query on the new one, then point `wrangler.jsonc` at the new `database_id` and deploy.
 
 3. **The R2 JSON dump**, for anything beyond the 30-day Time Travel window. Wrangler cannot list R2 objects, so get the exact keys from the Cloudflare dashboard or from the `json_keys` field of a `/ops/backup` response, then fetch each table's object: `wrangler r2 object get capsid-media/backups/json/<timestamp>/<table>.json --file <table>.json`. Convert each object's `rows` to INSERT statements and follow path 2 from the create step, `documents` first. The same dumps are mirrored off-account in the private `capsid-backups` repository, so this path still works if the Cloudflare account is gone. The `backups/markdown/` mirror is the last-resort human-readable copy: bodies only, no metadata.
 
@@ -253,11 +276,12 @@ Note: MCP clients cache the tool list at connect time. After deploying new tools
 
 ## Roadmap
 
-Three arcs, in order:
+**Agents as users** shipped on 2026-09-11: see **Auth model** above. The credentials exist and the enforcement point is live; what remains is operational, namely minting one agent per project and per machine and then removing the operator hash, which `docs/bootstrap.md` walks through.
 
-1. **Agents as users.** Per-client scoped credentials, so an agent is a first-class caller with its own grant and its own audit identity rather than one of a handful of shared operator keys.
-2. **The console.** A read-only surface for the things that currently need a tool call to see: what the queue is holding, which jobs are blocked and on what command, and what the loop did last night.
-3. **Skill records.** Capturing what an agent learned doing the work, in a form the next session retrieves, so the store holds capability and not only decisions.
+Two arcs left, in order:
+
+1. **The console.** A read-only surface for the things that currently need a tool call to see: what the queue is holding, which jobs are blocked and on what command, and what the loop did last night.
+2. **Skill records.** Capturing what an agent learned doing the work, in a form the next session retrieves, so the store holds capability and not only decisions.
 
 ## License
 

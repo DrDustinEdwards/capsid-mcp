@@ -4,10 +4,10 @@ import { z } from "zod";
 import { bounded, docPath, MAX_DOC_STATUS, nsName } from "../limits";
 import { ROSTER as IMPROVE_ROSTER, onRoster, RUN_CONDITIONS } from "../improve-schema";
 import { improveControl, improveRunManual, improveStatus } from "../improve-run";
-import { DENIED, fail, ok, type ToolCtx } from "./docs";
+import { fail, ok, type ToolCtx } from "./docs";
 
 export function registerImproveTools(server: McpServer, ctx: ToolCtx): void {
-  const { env, mayWrite } = ctx;
+  const { env } = ctx;
 
   // THE IMPROVE LOOP'S TWO TOOLS, a ruled exception to hard rule 1 (the surface is
   // small and stays that way), recorded in capsid/decisions.md alongside the
@@ -43,7 +43,6 @@ export function registerImproveTools(server: McpServer, ctx: ToolCtx): void {
       },
     },
     async ({ action, namespace, value, reason, actions_minutes_month, model_usd_month, dry_run, condition, release }) => {
-      if (!mayWrite) return fail(DENIED);
       try {
         if (action && action !== "run") {
           return ok(await improveControl(env, action, { value, namespace, reason, actions_minutes_month, model_usd_month, release }));
@@ -65,7 +64,7 @@ export function registerImproveTools(server: McpServer, ctx: ToolCtx): void {
     {
       annotations: hintsFor("improve_status"),
       description:
-        "The improve loop's current state: the mode, and per namespace the pause reason if any, whether its anchor block is pinned, the best known commit and score, the last run, and lifetime totals for attempts, keeps, reverts, estimated model cost and CI minutes. Each namespace also carries a jobs block: how many queued, claimed and blocked, how many finished today, and the BLOCKED JOBS THEMSELVES with the command each is waiting on, because a count of blocked jobs tells nobody what to run. It also serves protected_paths, the deterministic path guard's pattern list (source and flags per entry), which the subscription-mode driver rebuilds and applies to each attempt's changed paths before any push, so that guard cannot drift from the Worker's. Read-only. cost_usd is an estimate computed from token counts and published rates, not a bill.",
+        "The improve loop's current state: the mode, and per namespace the pause reason if any, whether its anchor block is pinned, the best known commit and score, the last run, and lifetime totals for attempts, keeps, reverts, estimated model cost and CI minutes. Each namespace also carries a jobs block: how many queued, claimed and blocked, how many finished today, and the BLOCKED JOBS THEMSELVES with the command each is waiting on, because a count of blocked jobs tells nobody what to run. It also serves protected_paths, the deterministic path guard's pattern list (source and flags per entry), which the subscription-mode driver rebuilds and applies to each attempt's changed paths before any push, so that guard cannot drift from the Worker's, and agents, the credential inventory: every minted agent with its kind, the namespaces and grants it holds, the blast-radius flags it holds (only the ones it has, because a row of falses hides the one agent that can merge), when it was last seen, and whether it has been revoked. Never a key and never the stored verifier. Read-only. cost_usd is an estimate computed from token counts and published rates, not a bill.",
       inputSchema: {
         namespace: nsName.optional().describe("Limit to one namespace. Omit for the whole roster."),
         task_path: docPath

@@ -54,6 +54,10 @@ export const TOOL_HINTS: Record<string, ToolHints> = {
   // job out of claimed, and the mirrored document is rewritten on every
   // transition, so the tool can overwrite existing state.
   jobs: destructive(),
+
+  // The credential control plane. revoke and update_scopes both overwrite existing
+  // state: one ends a credential, the other changes what it may do.
+  agents: destructive(),
 };
 
 // Object.hasOwn, not a bare index: "constructor" is not a missing tool.

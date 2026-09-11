@@ -4,10 +4,14 @@ import {
   JOB_LEASE_SECONDS,
   JOBS_ROWS_MAX,
   jobDocPath,
+  missingForJob,
   mintJobId,
+  serializeRequiredScopes,
   type JobRow,
   type JobStatus,
+  type RequiredScopes,
 } from "./jobs-schema";
+import type { Agent } from "./agents";
 import { signTaskBody, verifySignedBody } from "./improve-task";
 
 // THE WORK QUEUE. The ruling seat posts a job from a chat; a driver session on a
@@ -24,7 +28,12 @@ import { signTaskBody, verifySignedBody } from "./improve-task";
 // reader who found the job through brief or search sees the state the table holds.
 // It is a projection, and its body says so.
 
-const ACTOR_SHAPE = /^(github:|opkey:)/;
+// WHO CAN HOLD A LEASE. migrations/0006 states that claimed_by carries the same shape
+// as audit_log.actor, so one query joins a job to what its driver did. A minted agent
+// speaks that vocabulary as `agent:<name>` (src/agents-schema.ts, agentActor), and
+// the name is UNIQUE in the agents table and never reused, so the string identifies
+// exactly one credential forever.
+const ACTOR_SHAPE = /^(github:|opkey:|agent:)/;
 
 export interface JobResult {
   ok: boolean;
@@ -107,10 +116,11 @@ async function readJob(db: D1Database, id: string): Promise<JobRow | null> {
 // refuse one at a time at 03:00 instead of here.
 export async function postJob(
   env: Env,
-  actor: string,
+  agent: Agent,
   now: Date,
-  args: { namespace: string; title: string; body: string; priority?: number; gate_required?: boolean }
+  args: { namespace: string; title: string; body: string; priority?: number; gate_required?: boolean; required_scopes?: Partial<RequiredScopes> }
 ): Promise<JobResult> {
+  const actor = agent.actor;
   if (!env.IMPROVE_SCORE_SECRET) {
     return refuse(
       "post",
@@ -136,6 +146,10 @@ export async function postJob(
     result_ref: null,
     result_summary: null,
     gate_required: args.gate_required ? 1 : 0,
+    // NULL WHEN NOTHING WAS ASKED FOR, rather than an empty requirement object. The
+    // column's meaning is "this job needs something unusual", and a row of empty JSON
+    // reads as a requirement nobody can see.
+    required_scopes: args.required_scopes?.flags?.length ? serializeRequiredScopes(args.required_scopes) : null,
     blocked_count: 0,
     resumed_count: 0,
     created_at: now.toISOString(),
@@ -144,11 +158,16 @@ export async function postJob(
 
   const statements = [
     env.DB.prepare(
-      `INSERT INTO jobs (id, namespace, title, body, priority, status, posted_by, gate_required, created_at, updated_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, ?8, ?8)`
-    ).bind(job.id, job.namespace, job.title, job.body, job.priority, job.posted_by, job.gate_required, job.created_at),
+      `INSERT INTO jobs (id, namespace, title, body, priority, status, posted_by, gate_required, required_scopes, created_at, updated_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, ?8, ?9, ?9)`
+    ).bind(job.id, job.namespace, job.title, job.body, job.priority, job.posted_by, job.gate_required, job.required_scopes, job.created_at),
     ...(await mirrorStatements(env.DB, job, "job-posted", actor)),
-    auditStatement(env.DB, actor, "job-posted", job, { title: job.title, priority: job.priority, gate_required: job.gate_required }),
+    auditStatement(env.DB, actor, "job-posted", job, {
+      title: job.title,
+      priority: job.priority,
+      gate_required: job.gate_required,
+      ...(job.required_scopes ? { required_scopes: job.required_scopes } : {}),
+    }),
   ];
   try {
     await env.DB.batch(statements);
@@ -210,12 +229,13 @@ export async function listJobs(
 // refusal names the job already held rather than reporting a lost race.
 export async function claimJob(
   env: Env,
-  actor: string,
+  agent: Agent,
   now: Date,
   args: { namespace?: string; id?: string }
 ): Promise<JobResult> {
+  const actor = agent.actor;
   if (!ACTOR_SHAPE.test(actor)) {
-    return refuse("claim", `'${actor}' is not a caller identity this queue can hold a lease for. A claim is recorded against a github: login or an opkey: fingerprint.`);
+    return refuse("claim", `'${actor}' is not a caller identity this queue can hold a lease for. A claim is recorded against a github: login, an opkey: fingerprint, or an agent: name.`);
   }
   const held = await env.DB.prepare("SELECT * FROM jobs WHERE status = 'claimed' AND claimed_by = ?1 LIMIT 1")
     .bind(actor)
@@ -260,6 +280,20 @@ export async function claimJob(
   // apply. Only the loop writes a run doc, so its audit actor is the loop; a job is
   // posted by a human seat, so its actor is that seat. What proves a job went
   // through `post` is that this Worker's key signed it.
+  // WHAT THIS JOB NEEDS OF THE DRIVER, checked BEFORE the lease is taken. A claim
+  // that takes the lease and then refuses has parked the job on a driver that cannot
+  // do it, and since a caller holds one claim at a time it has also stopped that
+  // driver taking anything else for four hours. The check runs through the one
+  // enforcement point, so a job requirement and an agent scope are compared by the
+  // same function that decides every tool call.
+  const missing = missingForJob(agent, candidate.namespace, candidate.required_scopes);
+  if (missing) {
+    return refuse(
+      "claim",
+      `${actor} cannot claim ${candidate.id} ('${candidate.title}'): ${missing} The job stays queued for a driver that can do it.`
+    );
+  }
+
   const verdict = await verifySignedBody(env.IMPROVE_SCORE_SECRET, candidate.body, "job body");
   if (!verdict.ok) {
     await env.DB.prepare(
@@ -309,7 +343,7 @@ export async function claimJob(
 // already returned to the queue cannot be completed out from under its new owner.
 async function holderTransition(
   env: Env,
-  actor: string,
+  agent: Agent,
   now: Date,
   action: "heartbeat" | "complete" | "fail" | "block",
   id: string,
@@ -326,6 +360,7 @@ async function holderTransition(
     bumpBlocked?: boolean;
   }
 ): Promise<JobResult> {
+  const actor = agent.actor;
   const won = await env.DB.prepare(
     `UPDATE jobs SET status = ?2, result_summary = COALESCE(?3, result_summary), result_ref = COALESCE(?4, result_ref),
        lease_expires = ?5, updated_at = ?6, blocked_count = blocked_count + ?8
@@ -365,13 +400,13 @@ async function holderTransition(
   return { ok: true, action, job };
 }
 
-export async function heartbeatJob(env: Env, actor: string, now: Date, id: string): Promise<JobResult> {
-  return holderTransition(env, actor, now, "heartbeat", id, { status: "claimed", lease_expires: leaseUntil(now) });
+export async function heartbeatJob(env: Env, agent: Agent, now: Date, id: string): Promise<JobResult> {
+  return holderTransition(env, agent, now, "heartbeat", id, { status: "claimed", lease_expires: leaseUntil(now) });
 }
 
 export async function completeJob(
   env: Env,
-  actor: string,
+  agent: Agent,
   now: Date,
   id: string,
   args: { result_summary: string; result_ref?: string }
@@ -379,7 +414,7 @@ export async function completeJob(
   if (!args.result_summary?.trim()) {
     return refuse("complete", "complete needs a result_summary. A done job with no summary is a job the seat has to reconstruct from the diff.");
   }
-  return holderTransition(env, actor, now, "complete", id, {
+  return holderTransition(env, agent, now, "complete", id, {
     status: "done",
     result_summary: args.result_summary,
     result_ref: args.result_ref ?? null,
@@ -387,9 +422,9 @@ export async function completeJob(
   });
 }
 
-export async function failJob(env: Env, actor: string, now: Date, id: string, reason: string): Promise<JobResult> {
+export async function failJob(env: Env, agent: Agent, now: Date, id: string, reason: string): Promise<JobResult> {
   if (!reason?.trim()) return refuse("fail", "fail needs a reason. A failed job with no reason is one nobody can retry or rule on.");
-  return holderTransition(env, actor, now, "fail", id, { status: "failed", result_summary: reason, lease_expires: null });
+  return holderTransition(env, agent, now, "fail", id, { status: "failed", result_summary: reason, lease_expires: null });
 }
 
 // BLOCKED CARRIES THE EXACT COMMAND. A job that hit a gate is not a failure, it is
@@ -397,14 +432,14 @@ export async function failJob(env: Env, actor: string, now: Date, id: string, re
 // a description of the situation. The console shows these.
 export async function blockJob(
   env: Env,
-  actor: string,
+  agent: Agent,
   now: Date,
   id: string,
   args: { reason: string; command?: string }
 ): Promise<JobResult> {
   if (!args.reason?.trim()) return refuse("block", "block needs a reason: what gate was hit.");
   const summary = args.command ? `${args.reason}\n\nRun this, then send it back in with jobs action 'resume':\n\n    ${args.command}` : args.reason;
-  return holderTransition(env, actor, now, "block", id, {
+  return holderTransition(env, agent, now, "block", id, {
     status: "blocked",
     result_summary: summary,
     lease_expires: null,
@@ -435,13 +470,14 @@ export async function blockJob(
 // what was approved is recorded rather than implied.
 export async function resumeJob(
   env: Env,
-  actor: string,
+  agent: Agent,
   now: Date,
   id: string,
   reason: string
 ): Promise<JobResult> {
+  const actor = agent.actor;
   if (!ACTOR_SHAPE.test(actor)) {
-    return refuse("resume", `'${actor}' is not a caller identity this queue can hold a lease for. A claim is recorded against a github: login or an opkey: fingerprint.`);
+    return refuse("resume", `'${actor}' is not a caller identity this queue can hold a lease for. A claim is recorded against a github: login, an opkey: fingerprint, or an agent: name.`);
   }
   if (!reason?.trim()) {
     return refuse("resume", "resume needs a reason: what the human approved. A job that came back off a gate with no record of who cleared it is a gate that did not happen.");
@@ -465,6 +501,15 @@ export async function resumeJob(
       "resume",
       `${id} is ${current.status}, not blocked. Resume is how a job comes back off a gate; a queued job is claimed and a done or failed one is finished.`
     );
+  }
+
+  // RESUME IS A CLAIM, so it asks the same scope question a claim asks. The caller
+  // that sends a job back in after a gate is routinely not the one that blocked it,
+  // and it ends up holding the lease and doing the rest of the work: a driver that
+  // could not have claimed this job must not acquire it by resuming it.
+  const missing = missingForJob(agent, current.namespace, current.required_scopes);
+  if (missing) {
+    return refuse("resume", `${actor} cannot resume ${id} ('${current.title}'): ${missing} It stays blocked for a driver that can finish it.`);
   }
 
   const verdict = await verifySignedBody(env.IMPROVE_SCORE_SECRET, current.body, "job body");

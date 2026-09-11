@@ -3,13 +3,14 @@ import { hintsFor } from "../tool-annotations";
 import { z } from "zod";
 import { bounded, docPath, MAX_BODY, MAX_TITLE, nsName } from "../limits";
 import { JOB_ACTIONS, JOB_LEASE_SECONDS, JOB_STATUSES, isJobStatus } from "../jobs-schema";
+import { SCOPE_FLAGS } from "../agents-schema";
 import { blockJob, claimJob, completeJob, failJob, heartbeatJob, listJobs, postJob, resumeJob } from "../jobs";
-import { DENIED, fail, ok, type ToolCtx } from "./docs";
+import { fail, ok, type ToolCtx } from "./docs";
 
 const MAX_JOB_ID = 64;
 
 export function registerJobTools(server: McpServer, ctx: ToolCtx): void {
-  const { env, db, mayWrite, actor } = ctx;
+  const { env, db, agent } = ctx;
 
   // THE WORK QUEUE'S ONE TOOL, a ruled exception to hard rule 1 taking the surface
   // from 30 to 31 (capsid/decisions.md, 2026-09-10). Seven actions on one tool
@@ -33,6 +34,12 @@ export function registerJobTools(server: McpServer, ctx: ToolCtx): void {
         body: bounded(MAX_BODY).optional().describe('For post: the full prompt the driver executes. Signed on the way in.'),
         priority: z.number().int().optional().describe('For post: higher runs first. Defaults to 0.'),
         gate_required: z.boolean().optional().describe('For post: the work is known to need a human confirmation (a push, a deploy, a secret). The driver stops at it rather than discovering the gate halfway through.'),
+        required_flags: z
+          .array(z.enum(SCOPE_FLAGS))
+          .optional()
+          .describe(
+            `For post: the blast-radius flags this job's work needs of the driver that claims it (${SCOPE_FLAGS.join(", ")}). The claim refuses an agent that does not hold them and leaves the job queued for one that does. Omit it for work that needs nothing unusual, which is most work.`
+          ),
         status: bounded(32).optional().describe(`For list: one of ${JOB_STATUSES.join(" | ")}.`),
         id: bounded(MAX_JOB_ID).optional().describe('The job id, for claim (optional, to take a specific one), heartbeat, complete, fail and block.'),
         result_summary: bounded(MAX_TITLE).optional().describe('For complete: what happened, in a sentence the seat can read without opening the diff.'),
@@ -50,33 +57,37 @@ export function registerJobTools(server: McpServer, ctx: ToolCtx): void {
           }
           return ok(await listJobs(env, { namespace: args.namespace, status: args.status }));
         }
-        // Everything else changes the queue.
-        if (!mayWrite) return fail(DENIED);
+        // EVERYTHING ELSE CHANGES THE QUEUE, so the grant is checked here rather than
+        // at the registrar: `jobs` is one tool with a read action and seven write
+        // ones, and the registrar cannot know which this call is.
+        const refusal = ctx.scope({ tool: "jobs", grant: "write", namespace: args.namespace });
+        if (refusal) return fail(refusal);
         switch (args.action) {
           case "post": {
             if (!args.namespace || !args.title || !args.body) {
               return fail("post needs namespace, title and body.");
             }
             return ok(
-              await postJob(env, actor, now, {
+              await postJob(env, agent, now, {
                 namespace: args.namespace,
                 title: args.title,
                 body: args.body,
                 priority: args.priority,
                 gate_required: args.gate_required,
+                required_scopes: args.required_flags ? { flags: args.required_flags } : undefined,
               })
             );
           }
           case "claim":
-            return ok(await claimJob(env, actor, now, { namespace: args.namespace, id: args.id }));
+            return ok(await claimJob(env, agent, now, { namespace: args.namespace, id: args.id }));
           case "heartbeat": {
             if (!args.id) return fail("heartbeat needs the job id.");
-            return ok(await heartbeatJob(env, actor, now, args.id));
+            return ok(await heartbeatJob(env, agent, now, args.id));
           }
           case "complete": {
             if (!args.id) return fail("complete needs the job id.");
             return ok(
-              await completeJob(env, actor, now, args.id, {
+              await completeJob(env, agent, now, args.id, {
                 result_summary: args.result_summary ?? "",
                 result_ref: args.result_ref,
               })
@@ -84,15 +95,15 @@ export function registerJobTools(server: McpServer, ctx: ToolCtx): void {
           }
           case "fail": {
             if (!args.id) return fail("fail needs the job id.");
-            return ok(await failJob(env, actor, now, args.id, args.reason ?? ""));
+            return ok(await failJob(env, agent, now, args.id, args.reason ?? ""));
           }
           case "block": {
             if (!args.id) return fail("block needs the job id.");
-            return ok(await blockJob(env, actor, now, args.id, { reason: args.reason ?? "", command: args.command }));
+            return ok(await blockJob(env, agent, now, args.id, { reason: args.reason ?? "", command: args.command }));
           }
           case "resume": {
             if (!args.id) return fail("resume needs the job id.");
-            return ok(await resumeJob(env, actor, now, args.id, args.reason ?? ""));
+            return ok(await resumeJob(env, agent, now, args.id, args.reason ?? ""));
           }
         }
         return fail(`unknown jobs action '${args.action}'.`);

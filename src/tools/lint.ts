@@ -7,10 +7,10 @@ import { authoritativeFor, scanCountClaims } from "../counts";
 import { buildTruthReport, renderTruthReport, reportPath, type ReportDoc, type ReportEdge } from "../truth-report";
 import { docPath, GATHER_BUDGET, LINT_CONSUMED_MAX, nsName } from "../limits";
 import { improveWriteRefusal } from "../improve-scores";
-import { DENIED, fail, ok, pathMutation, requireConfirmation, type ToolCtx } from "./docs";
+import { fail, ok, pathMutation, requireConfirmation, type ToolCtx } from "./docs";
 
 export function registerLintTools(server: McpServer, ctx: ToolCtx): void {
-  const { env, db, mayWrite, actor } = ctx;
+  const { env, db, actor } = ctx;
 
   // Consolidation loop (the LLM Wiki maintenance step). The Worker does no reasoning:
   // a capable client calls gather, synthesizes the update with the read and write
@@ -161,7 +161,11 @@ export function registerLintTools(server: McpServer, ctx: ToolCtx): void {
         });
       }
 
-      if (!mayWrite) return fail(DENIED);
+      // THE READ HALF IS ABOVE THIS LINE. gather compiles a packet and writes
+      // nothing; report and finalize both produce or archive documents, so the grant
+      // is checked here, where the mode is known, rather than at the registrar.
+      const modeRefusal = ctx.scope({ tool: "lint", grant: "write", namespace });
+      if (modeRefusal) return fail(modeRefusal);
 
       // ---- mode "report": measure the store rather than compile it ----------
       //

@@ -203,7 +203,9 @@ test("a read-only key cannot reach any mutating tool, and writes nothing", async
     const result = (await client.callTool({ name: tool, arguments: args })) as { isError?: boolean; content: Array<{ text: string }> };
     await close();
     assert.equal(result.isError, true, `${tool} did not refuse a read-only key`);
-    assert.match(result.content[0].text, /write-grant operator key/);
+    // The refusal names the missing scope (src/scope.ts). It used to name the
+    // "write-grant operator key" because that was the only thing a caller could be.
+    assert.match(result.content[0].text, /requires the write grant/);
     // The refusal has to come BEFORE any statement, not after the work is done.
     assert.deepEqual(recorded, [], `${tool} wrote ${recorded.length} statement(s) while refusing a read-only key`);
   }

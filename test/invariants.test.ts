@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { sourceFiles, toolBlocks, type ToolBlock } from "./source-files.ts";
+import { TOOL_GRANTS, requiredGrant } from "../src/scope.ts";
 
 // The two write-path invariants, guarded.
 //
@@ -27,7 +28,25 @@ import { sourceFiles, toolBlocks, type ToolBlock } from "./source-files.ts";
 // server.ts be split later without blinding the guard.
 
 const MUTATING_SQL = /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\b/i;
-const OPERATOR_GATE = "if (!mayWrite)";
+// THE GATE MOVED, AND THERE IS STILL EXACTLY ONE PER WRITE TOOL.
+//
+// It used to be the line `if (!mayWrite) return fail(DENIED)`, spelled once inside
+// each write handler. It is now src/scope.ts, reached two ways, and a write tool has
+// to be covered by one of them:
+//
+//   - THE REGISTRAR, for a tool that writes whatever action it is called with. Its
+//     requirement is `write` in TOOL_GRANTS and the wrapper checks it before the
+//     handler runs, so the handler carries no gate of its own and cannot forget one.
+//   - AN INLINE ctx.scope call asking for the write grant, for the two tools whose
+//     requirement depends on their action (`jobs` has a read action, `lint` has
+//     gather). The registrar cannot decide those, so they check at the point where
+//     the action is known.
+//
+// Asserting coverage rather than a spelling is what makes this stronger than what it
+// replaces: the old scan could only see a gate in a handler that contained its own
+// SQL, so every tool whose writes happen a module away (the queue, the improve loop,
+// every repo write) had to be trusted or named by hand.
+const SCOPE_GATE = /ctx\.scope\(\{[^}]*grant: "write"/;
 
 const BLOCKS: ToolBlock[] = toolBlocks();
 
@@ -45,14 +64,50 @@ test("the block scan found the whole tool surface", () => {
 });
 
 test("every tool whose handler contains mutating SQL is gated on the write grant", () => {
-  const ungated = BLOCKS.filter((b) => MUTATING_SQL.test(b.body) && !b.body.includes(OPERATOR_GATE)).map(
-    (b) => `${b.name} (src/${b.file})`
-  );
+  const ungated = BLOCKS.filter(
+    (b) => MUTATING_SQL.test(b.body) && requiredGrant(b.name) !== "write" && !SCOPE_GATE.test(b.body)
+  ).map((b) => `${b.name} (src/${b.file})`);
   assert.deepEqual(
     ungated,
     [],
-    `these tools issue INSERT/UPDATE/DELETE with no "${OPERATOR_GATE}" gate, so a read-only ro: key can reach them: ${ungated.join(", ")}`
+    `these tools issue INSERT/UPDATE/DELETE and are neither write-gated at the registrar (TOOL_GRANTS) nor carrying their own ctx.scope grant check, so a read-only caller can reach them: ${ungated.join(", ")}`
   );
+});
+
+test("EVERY registered tool has a stated requirement, in both directions", () => {
+  // The registrar reads TOOL_GRANTS to decide what a call needs. A tool missing from
+  // it falls back to `write`, which is the safe direction and is still a drift: the
+  // table would be describing a surface it no longer covers. An entry with no tool is
+  // the other direction, and means a tool was renamed or removed and its requirement
+  // was left behind.
+  const registered = BLOCKS.map((b) => b.name).sort();
+  assert.deepEqual(Object.keys(TOOL_GRANTS).sort(), registered);
+});
+
+test("a tool marked read does not mutate, which is the claim it would be dangerous to get wrong", () => {
+  // The direction that matters. A write tool wrongly marked `read` is admitted for a
+  // read-only caller by the registrar and then writes.
+  const lying = BLOCKS.filter((b) => requiredGrant(b.name) === "read" && MUTATING_SQL.test(b.body)).map((b) => b.name);
+  assert.deepEqual(lying, [], `these tools are marked read in TOOL_GRANTS and contain mutating SQL: ${lying.join(", ")}`);
+  // Vacuity: the classification is not simply empty of read tools.
+  const reads = BLOCKS.filter((b) => requiredGrant(b.name) === "read").length;
+  assert.ok(reads >= 8, `only ${reads} tools classify as read; the derivation is broken`);
+});
+
+test("the two action-scoped tools really do carry their own check", () => {
+  // They are the only tools the registrar cannot decide for, so they are the only
+  // ones where forgetting the call leaves a hole. Named, because there being exactly
+  // two of them is the property: a third would mean the registrar is losing ground.
+  const actionScoped = Object.entries(TOOL_GRANTS)
+    .filter(([, requirement]) => requirement === "action")
+    .map(([name]) => name)
+    .sort();
+  assert.deepEqual(actionScoped, ["jobs", "lint"]);
+  for (const name of actionScoped) {
+    const block = BLOCKS.find((b) => b.name === name);
+    assert.ok(block, `no block parsed for ${name}`);
+    assert.match(block.body, SCOPE_GATE, `${name} is action-scoped and carries no ctx.scope write check`);
+  }
 });
 
 test("the gate check is not vacuous: several tools are found to be mutating", () => {
@@ -75,5 +130,14 @@ test("the one mutating helper outside a tool handler carries the gate itself", (
   const helper = owner.text.slice(owner.text.indexOf("const guardedWrite"), owner.text.indexOf("const REPO_ARG"));
   assert.ok(helper.length > 200, `could not bound guardedWrite in src/${owner.name}`);
   assert.ok(MUTATING_SQL.test(helper), "guardedWrite no longer writes the audit row");
-  assert.ok(helper.includes(OPERATOR_GATE), "guardedWrite lost its write gate: every repo write tool is now open to ro: keys");
+  assert.match(
+    helper,
+    SCOPE_GATE,
+    "guardedWrite lost its scope check: every repo write tool is now unchecked for the grant and for the flags a repo mutation needs"
+  );
+  assert.match(
+    helper,
+    /repoWriteFlags\(/,
+    "guardedWrite no longer computes the flags a repo mutation needs, so can_merge, can_direct_write, can_dispatch, can_write_workflows, can_touch_protected and money_paths are checked nowhere"
+  );
 });

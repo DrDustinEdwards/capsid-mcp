@@ -29,6 +29,7 @@ import {
   readMode,
 } from "./improve-state";
 import { verifyTaskDoc } from "./improve-task";
+import { SCOPE_FLAGS, parseScopes } from "./agents-schema";
 import { jobsSummary, type JobsSummary } from "./jobs";
 import { integrityOf, REPORTS_PREFIX } from "./truth-report";
 import {
@@ -124,7 +125,45 @@ export interface StatusReport {
   // any push, through scripts/path-guard.mjs. Served rather than copied so a pattern
   // added to PROTECTED_PATH_PATTERNS is in the next call's response.
   protected_paths: ServedProtectedPath[];
+  // THE CREDENTIAL INVENTORY, on the console a driver already reads. An inventory
+  // that can only be seen by calling a separate admin-only tool is one nobody looks
+  // at, and last_seen only answers "is this credential still in use" if somebody
+  // sees it. Revoked rows are included and say so, because dropping them makes
+  // "revoked" and "never existed" look the same.
+  //
+  // What is NOT here: the key (it exists nowhere), the stored verifier, and a row of
+  // six booleans per agent. A reader wants the exception, so only the flags an agent
+  // HOLDS are listed.
+  agents: AgentSummary[];
   namespaces: NamespaceStatus[];
+}
+
+export interface AgentSummary {
+  name: string;
+  kind: string;
+  namespaces: "*" | string[];
+  grants: string[];
+  flags: string[];
+  last_seen: string | null;
+  revoked_at: string | null;
+}
+
+async function agentSummaries(db: D1Database): Promise<AgentSummary[]> {
+  const { results } = await db
+    .prepare("SELECT name, kind, scopes, last_seen, revoked_at FROM agents ORDER BY revoked_at IS NOT NULL, name")
+    .all<{ name: string; kind: string; scopes: string; last_seen: string | null; revoked_at: string | null }>();
+  return (results ?? []).map((row) => {
+    const scopes = parseScopes(row.scopes);
+    return {
+      name: row.name,
+      kind: row.kind,
+      namespaces: scopes.namespaces,
+      grants: scopes.grants,
+      flags: SCOPE_FLAGS.filter((flag) => scopes.flags[flag]),
+      last_seen: row.last_seen,
+      revoked_at: row.revoked_at,
+    };
+  });
 }
 
 export async function improveStatus(env: Env, only?: string, taskPath?: string): Promise<StatusReport> {
@@ -194,6 +233,7 @@ export async function improveStatus(env: Env, only?: string, taskPath?: string):
       "cost_usd is an ESTIMATE computed from token counts and published rates, including cache read and write multipliers. It is for sanity-checking, not accounting.",
     budget,
     protected_paths: servedProtectedPaths(),
+    agents: await agentSummaries(env.DB),
     namespaces: out,
   };
 }

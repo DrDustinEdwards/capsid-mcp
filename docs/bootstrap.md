@@ -156,7 +156,118 @@ whose authorization list is decorative. The manual step is the gate.
 The response is not stored anywhere and the key is not recoverable. Lose it and
 mint another; remove the old hash.
 
-## 8. The loop on/off checklist
+## 8. Minting an agent, one per project and per machine
+
+An operator key is a tier. An **agent** is a caller: its own key, its own scopes,
+its own audit identity, its own revocation. `OPERATOR_KEY_HASH` still works and
+keeps every authority it has today; agents are what replaces it, one credential at
+a time, and the old key is removed when nothing needs it any more.
+
+Mint one as the admin (an OAuth session on `/mcp`, or a write-grant operator key
+on `/ops/mcp`). A minted agent cannot mint another, deliberately: an agent that can
+widen itself has no scope.
+
+```
+agents(action: "mint", name: "capsid-driver", kind: "driver", namespaces: ["capsid"],
+       grants: ["read", "write"])
+```
+
+The response carries the key **once**. Nothing stores it: the table holds its
+sha256, and a lost key is replaced by revoking that agent and minting another.
+
+**One agent per project and per machine.** The name says both, so an audit row
+reads as a sentence: `capsid-driver-laptop`, `foxing-driver-desktop`. The point is
+that revoking a compromised laptop does not stop the desktop working, and that
+`agent:foxing-driver-laptop` in the audit log needs no lookup to understand.
+
+### Where the key lives on the machine
+
+The driver reads its own key from a file, one per agent:
+
+```
+~/.capsid/agent-<name>.key
+```
+
+One line, the key, nothing else. `chmod 600` it. It is never committed, never
+pasted into a chat, and never read back by anything but the driver, which sends it
+as the bearer token:
+
+```
+Authorization: Bearer <contents of ~/.capsid/agent-capsid-driver.key>
+```
+
+against `POST /ops/mcp`. A file rather than an environment variable because the
+driver is a long-lived session on a workstation, and an environment variable set
+once in a shell profile ends up in every process on the machine, including the
+ones a job runs.
+
+### What a driver should hold, and what it should not
+
+The default for a new agent is read on its named namespaces with no flags. Widen
+it to what the work actually needs and no further:
+
+| scope | a project driver | the seat |
+| --- | --- | --- |
+| `namespaces` | its own | all of them |
+| `grants` | read, write | read, write |
+| `can_merge` | **no** | yes |
+| `can_direct_write` | **no** | no |
+| `can_write_workflows` | **no** | no |
+| `can_dispatch` | no | no |
+| `can_touch_protected` | no | no |
+| `money_paths` | no | no |
+
+A driver opens pull requests; a human merges them. That is the same rule the
+improve loop already runs on, and giving a driver `can_merge` is how it stops being
+a rule. `can_direct_write` is off even for the seat: a direct commit to a default
+branch on a repo that deploys on push is a deploy, and a deploy is a gate.
+
+Widen one later with `agents(action: "update_scopes", ...)`, which names the axes it
+changes and leaves the rest. Revoke with `agents(action: "revoke", name: ...)`: the
+row stays, so the audit rows that agent wrote still resolve to what it was allowed
+to do, and its key stops working immediately.
+
+### The migration path, one credential at a time
+
+`OPERATOR_KEY_HASH` keeps working and keeps every authority it has today. It stops
+working when its hash is removed from the secret, and not before, so nothing has to
+be cut over in one sitting. The order that works:
+
+1. Mint the six agents below, as the admin. Each returns its key once; write each
+   into `~/.capsid/agent-<name>.key` on the machine that will use it.
+2. Point one driver at its key and let it work a job. `improve_status` shows
+   `last_seen` moving, which is how you know the agent is the credential in use and
+   not the operator key underneath it.
+3. When every machine has an agent and `last_seen` proves it, remove the operator
+   hash: `npx wrangler secret put OPERATOR_KEY_HASH` with the remaining entries.
+
+The six, as calls:
+
+```
+agents(action: "mint", name: "capsid-driver",        kind: "driver", namespaces: ["capsid"],        grants: ["read", "write"])
+agents(action: "mint", name: "dustinedwards-driver", kind: "driver", namespaces: ["dustinedwards"], grants: ["read", "write"])
+agents(action: "mint", name: "foxhound-driver",      kind: "driver", namespaces: ["foxhound"],      grants: ["read", "write"])
+agents(action: "mint", name: "foxing-driver",        kind: "driver", namespaces: ["foxing"],        grants: ["read", "write"])
+agents(action: "mint", name: "germomics-driver",     kind: "driver", namespaces: ["germomics"],     grants: ["read", "write"])
+agents(action: "mint", name: "seat",                 kind: "seat",   namespaces: ["*"],             grants: ["read", "write"], flags: { can_merge: true })
+```
+
+Five drivers, one per namespace, each with write on its own namespace and **no
+flags**: no merge, no direct write, no workflow write. One seat across every
+namespace that may merge, and may not commit directly to a default branch.
+
+Nothing else is granted. `can_dispatch`, `can_touch_protected` and `money_paths`
+stay off for all six until something concrete needs one, at which point
+`update_scopes` grants it and the audit row records who widened what, and from what.
+
+### Jobs can say what they need
+
+`jobs(action: "post", ..., required_flags: ["can_merge"])` records the blast radius
+the work needs. The claim refuses a driver that does not hold those flags and
+leaves the job queued for one that does, so the mismatch surfaces at the claim
+rather than four hours later when the lease expires.
+
+## 9. The loop on/off checklist
 
 The nightly loop is off by default and stays off until every line here is true.
 Each item exists because of something that went wrong when it was not checked.

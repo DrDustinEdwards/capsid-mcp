@@ -2,6 +2,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { hintsFor } from "../tool-annotations";
 import { z } from "zod";
 import type { Env } from "../env";
+import type { Agent } from "../agents";
+import { IMPROVE_OVERRIDE_FLAGS, type ScopeNeed } from "../scope";
 import { parseReposList, REPO_SHAPE, requireSinglePrimary } from "../github";
 import { sha256Hex } from "../auth";
 import { documentUpsert, guardedCommit, isMissingRowAbort, requireBodyUnchanged, requireExists } from "../store-guards";
@@ -33,8 +35,6 @@ function boundedRows<T>(rows: T[], limit: number, advice: string) {
 export function fail(message: string) {
   return { content: [{ type: "text" as const, text: message }], isError: true };
 }
-
-export const DENIED = "unauthorized: this tool requires a write-grant operator key; read-only (ro:) keys can only use the read tools";
 
 // PATH_MUTATION_HELPER_START
 // The only site that mutates documents.path or deletes a documents row.
@@ -167,11 +167,20 @@ export interface ToolCtx {
   grant: ToolGrant;
   mayWrite: boolean;
   actor: string;
+  // THE CALLER, resolved once per request (src/agents.ts). `grant`, `mayWrite` and
+  // `actor` are all projections of it, kept as their own fields so the tool modules
+  // read unchanged; the scope checks that need more than a grant read this.
+  agent: Agent;
+  // THE ONE CHECK, bound to this caller (src/scope.ts). Returns a refusal naming the
+  // missing scope, or null. The registrar has already checked the tool, the grant,
+  // the namespace and the repo by the time a handler runs; this is for what only the
+  // handler knows: an action tool's action, and the flags a repo mutation needs.
+  scope: (need: ScopeNeed) => string | null;
   lastActor: (ns: string, path: string) => Promise<string | null>;
 }
 
 export function registerDocTools(server: McpServer, ctx: ToolCtx): void {
-  const { db, mayWrite, actor, lastActor } = ctx;
+  const { db, actor, lastActor } = ctx;
 
   server.registerTool(
     "list",
@@ -397,7 +406,6 @@ export function registerDocTools(server: McpServer, ctx: ToolCtx): void {
       },
     },
     async ({ namespace, path, title, body, mode, find, replace_with, type, tags, status, confirm, links, if_match, allow_improve_paths }) => {
-      if (!mayWrite) return fail(DENIED);
       const writeMode = mode ?? "replace";
       const typeError = type === undefined ? null : validateDocType(type);
       if (typeError) return fail(typeError);
@@ -488,6 +496,15 @@ export function registerDocTools(server: McpServer, ctx: ToolCtx): void {
       // still goes through the normalizer.
       if (writeMode !== "meta") body = normalizeDashes(body as string, "prose");
 
+      // THE OVERRIDE IS ITSELF SCOPED. allow_improve_paths is how a caller writes the
+      // loop's own control surface (its run documents, its prompts, its skills, its
+      // anchors), and before agents it was open to anything holding the write grant.
+      // It is the document-side twin of the repo-side protected-path flag, so it asks
+      // for the same one.
+      if (allow_improve_paths === true) {
+        const overrideRefusal = ctx.scope({ tool: "write", namespace, flags: IMPROVE_OVERRIDE_FLAGS });
+        if (overrideRefusal) return fail(overrideRefusal);
+      }
       // IMPROVE CONTROL-SURFACE GUARD (audit 2026-09-06). Computed on the final
       // assembled and normalized body, so it sees exactly what would be stored: a
       // patch or append that ends up changing scores.md's anchor block is caught the
@@ -728,7 +745,6 @@ export function registerDocTools(server: McpServer, ctx: ToolCtx): void {
       },
     },
     async ({ namespace, path, version_id, confirm, if_match, allow_improve_paths }) => {
-      if (!mayWrite) return fail(DENIED);
       const nsError = await requireRegisteredNamespace(db, namespace);
       if (nsError) return fail(nsError);
       const version = await db
@@ -740,6 +756,15 @@ export function registerDocTools(server: McpServer, ctx: ToolCtx): void {
         .prepare("SELECT id, title, body FROM documents WHERE namespace = ?1 AND path = ?2")
         .bind(namespace, path)
         .first<{ id: number; title: string | null; body: string | null }>();
+      // THE OVERRIDE IS ITSELF SCOPED. allow_improve_paths is how a caller writes the
+      // loop's own control surface (its run documents, its prompts, its skills, its
+      // anchors), and before agents it was open to anything holding the write grant.
+      // It is the document-side twin of the repo-side protected-path flag, so it asks
+      // for the same one.
+      if (allow_improve_paths === true) {
+        const overrideRefusal = ctx.scope({ tool: "restore", namespace, flags: IMPROVE_OVERRIDE_FLAGS });
+        if (overrideRefusal) return fail(overrideRefusal);
+      }
       // THE IMPROVE CONTROL-SURFACE GUARD, on restore too (audit 2026-09-07, Opus
       // MAJOR 5.4). The guard shipped on `write` alone, so restoring
       // improve/prompts/run.md to an earlier version installed an older system prompt
@@ -876,7 +901,6 @@ export function registerDocTools(server: McpServer, ctx: ToolCtx): void {
       inputSchema: { namespace: nsName, path: docPath, confirm: z.boolean().optional(), allow_improve_paths: z.boolean().optional() },
     },
     async ({ namespace, path, confirm, allow_improve_paths }) => {
-      if (!mayWrite) return fail(DENIED);
       const nsError = await requireRegisteredNamespace(db, namespace);
       if (nsError) return fail(nsError);
       const prior = await db
@@ -957,7 +981,6 @@ export function registerDocTools(server: McpServer, ctx: ToolCtx): void {
       inputSchema: { namespace: nsName, path: docPath, new_path: docPath, confirm: z.boolean().optional(), allow_improve_paths: z.boolean().optional() },
     },
     async ({ namespace, path, new_path, confirm, allow_improve_paths }) => {
-      if (!mayWrite) return fail(DENIED);
       const nsError = await requireRegisteredNamespace(db, namespace);
       if (nsError) return fail(nsError);
       // Existence and the edge count are both read BEFORE the batch. D1's meta.changes
@@ -1133,7 +1156,6 @@ export function registerDocTools(server: McpServer, ctx: ToolCtx): void {
       },
     },
     async ({ namespace, repo, label, repos }) => {
-      if (!mayWrite) return fail(DENIED);
       const ns = namespace.trim();
       if (!ns) return fail("namespace is required");
       let list: Array<{ repo: string; label: string }>;
@@ -1181,7 +1203,6 @@ export function registerDocTools(server: McpServer, ctx: ToolCtx): void {
       inputSchema: { namespace: nsName, repos: bounded(MAX_REPOS_JSON) },
     },
     async ({ namespace, repos }) => {
-      if (!mayWrite) return fail(DENIED);
       const ns = namespace.trim();
       if (!ns) return fail("namespace is required");
       const parsed = parseReposList(repos);
