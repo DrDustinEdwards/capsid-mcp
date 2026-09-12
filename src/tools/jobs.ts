@@ -57,6 +57,11 @@ export function registerJobTools(server: McpServer, ctx: ToolCtx): void {
         result_ref: resultRef.optional().describe('For complete: where the work landed, a document key or a PR URL.'),
         reason: bounded(MAX_TITLE).optional().describe('For fail and block: why. For resume: what the human approved, which is what the audit row records.'),
         command: bounded(MAX_TITLE).optional().describe('For block: the exact command the human must run. It goes into the summary the console shows.'),
+        approved_by_policy: bounded(32)
+          .optional()
+          .describe(
+            "For resume: the version of capsid/policy/gates.md this approval is made under. Pass it when the seat is approving a blocked command on the signed gate policy rather than on a human having said yes. The Worker matches the command the job blocked on against the policy's classes (an additive migration, a branch push, opening a pull request) and REFUSES the resume when it matches none, so this narrows what the seat may approve alone rather than widening it. The audit row records which class matched and what it matched on."
+          ),
         evidence: z
           .object({
             prs: z.array(resultRef).max(MAX_EVIDENCE_PRS).optional().describe("Pull request URLs this job produced."),
@@ -127,7 +132,7 @@ export function registerJobTools(server: McpServer, ctx: ToolCtx): void {
           }
           case "resume": {
             if (!args.id) return fail("resume needs the job id.");
-            return ok(await resumeJob(env, agent, now, args.id, args.reason ?? ""));
+            return ok(await resumeJob(env, agent, now, args.id, args.reason ?? "", args.approved_by_policy));
           }
         }
         return fail(`unknown jobs action '${args.action}'.`);
