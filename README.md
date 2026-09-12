@@ -1,6 +1,6 @@
 # Capsid
 
-Capsid is a control plane for AI agents working across a portfolio of repositories. It provides structured memory, scoped credentials with an audit trail over every write, a signed work queue that hands a task from a chat to a machine, and an optional self-improvement loop scored against hidden tests.
+Capsid is a control plane for AI agents working across a portfolio of repositories. It stores structured memory, issues scoped credentials with an audit trail over every write, runs a signed work queue that hands a task from a chat to a machine, and optionally runs a self-improvement loop scored against hidden tests.
 
 It is a single-user Cloudflare Worker. It speaks MCP over Streamable HTTP and exposes 32 tools in five groups: documents, repo access, maintenance, the work queue, and self-improvement. It also serves Resources (every document at `capsid://<namespace>/<path>`) and Prompts (templates stored as documents).
 
@@ -20,12 +20,12 @@ Every write snapshots the prior version into `document_versions` and appends to 
 
 - **Memory.** Documents are typed (`core`, `concept`, `decision`, `task`, `episodic`, `procedural`, `prompt`, `source` and more), stored in D1 with FTS5 search, and grouped into namespaces that map to GitHub repos. `write` validates the type, so an off-schema document cannot escape the consolidation loop. Full model: [docs/schema.md](docs/schema.md).
 - **Agents.** Every caller resolves to an agent with its own key, scopes and audit identity, through one enforcement point. Scopes are five axes, and the blast-radius flags (merge, direct write, dispatch, workflows, protected paths, money paths) are held one at a time by separate roles.
-- **Repo access.** A dedicated GitHub App mints short-lived installation tokens, so the Worker reads and writes your repositories with no long-lived credential stored. The namespace mapping is the authorization boundary.
+- **Repo access.** A dedicated GitHub App mints short-lived installation tokens. The Worker reads and writes mapped repositories with no long-lived credential stored. The namespace mapping is the authorization boundary.
 - **The work queue.** A job hands a task from a chat that has no shell to a session that has no conversation. Bodies are signed, claims take a four-hour lease, and a job reaching a push, a deploy or a merge blocks with the exact command a human runs.
 - **The self-improvement loop.** An optional nightly loop proposes one scoped change at a time, has each repo's own CI score it against hidden tests, and opens a pull request only for changes that improved the repo without regressing an anchor. Off by default, and it never merges.
-- **The console.** One admin page at `/console` showing every namespace: pauses, job counts, the command each blocked job waits on, the agent inventory and recent activity. It renders what the tools already compute, so the page and the tools cannot disagree.
+- **The console.** One admin page at `/console` showing every namespace: pauses, job counts, the command each blocked job waits on, the agent inventory and recent activity. It renders what the tools already compute.
 - **Backups.** A daily cron exports every table to R2 as JSON plus a markdown mirror of every document body, pulled off-account daily. Restore is documented and rehearsed weekly against a scratch database.
-- **An audit trail under all of it.** Every write snapshots the prior version into `document_versions` and appends to `audit_log`, and every destructive write asks for confirmation first.
+- **Audit trail.** Every write snapshots the prior version into `document_versions` and appends to `audit_log`. Every destructive write asks for confirmation first.
 
 ## Documentation
 
@@ -35,7 +35,7 @@ Every write snapshots the prior version into `document_versions` and appends to 
 - [docs/autonomy.md](docs/autonomy.md) auto-merge, pre-approved gate classes, the nightly driver and the watcher
 - [docs/improve.md](docs/improve.md) the self-improvement loop: how it runs, and what stops it moving its own goalposts
 - [docs/skills.md](docs/skills.md) how an idea abstracted from work that landed is offered to other projects
-- [docs/console.md](docs/console.md) what the admin page shows, who gets in, and what it deliberately cannot do
+- [docs/console.md](docs/console.md) what the admin page shows, who gets in, and what it cannot do
 - [docs/consolidation.md](docs/consolidation.md) the wiki maintenance loop, and the confirmation step on destructive writes
 - [docs/backups.md](docs/backups.md) what the daily dump contains, and three restore paths in the order to try them
 - [docs/rollback.md](docs/rollback.md) serving the previous Worker version when a deploy shipped a bad one
@@ -55,7 +55,7 @@ Every write snapshots the prior version into `document_versions` and appends to 
 - `POST /backup/credential` mints the credential the off-account backup writes with
 - `POST /token`, `POST /register` token exchange and dynamic client registration (served by the library)
 - `GET /.well-known/oauth-authorization-server` and `GET /.well-known/oauth-protected-resource` discovery metadata (served by the library)
-- `GET /health` no auth. Reports deploy provenance (git sha, whether the tree was dirty, build time) and probes the store: `SELECT 1` against D1 plus an FTS5 MATCH pinned to one known document. Either probe failing returns 503 with `status: "degraded"` and a `store` object naming which one, because a Worker whose bindings resolved to nothing starts normally and would otherwise answer `ok` while every read tool errors
+- `GET /health` no auth. Reports deploy provenance (git sha, whether the tree was dirty, build time) and probes the store: `SELECT 1` against D1 plus an FTS5 MATCH pinned to one known document. Either probe failing returns 503 with `status: "degraded"` and a `store` object naming which one. A Worker whose bindings resolved to nothing starts normally and would otherwise answer `ok` while every read tool errors.
 
 ## Clone setup
 
@@ -148,15 +148,21 @@ MCP clients cache the tool list at connect time. After deploying new tools, reco
 
 ## What's next
 
-**The experiment scheduler**, once the loop has real nights behind it. Nothing else is planned: everything else this README describes is shipped and running.
+The experiment scheduler, once the loop has real nights behind it. Nothing else is planned.
 
 ## Switches
 
-**Three switches, all off by default, each turned on separately.** The loop runs only when `improve_mode` in `APP_KV` is set to `subscription` or `api`, by `improve_run` action `mode`; anything unreadable or unexpected falls back to `off`. Auto-merge and pre-approved gates run only when their policy document's `enabled` field is `true` **and** the document has been signed again afterwards with `improve_run` action `sign_policy`, which is admin only; editing without re-signing leaves the policy authorizing nothing. The nightly driver exists only after `node scripts/schedule-drivers.mjs --install --namespace <ns> --apply`, and the task it creates is disabled until it is enabled by hand.
+Three switches, all off by default. Each is turned on separately.
+
+The loop runs only when `improve_mode` in `APP_KV` is set to `subscription` or `api`, by `improve_run` action `mode`. Anything unreadable or unexpected falls back to `off`.
+
+Auto-merge and pre-approved gates run only when their policy document's `enabled` field is `true` and the document has been signed again afterwards with `improve_run` action `sign_policy`, which is admin only. Editing without re-signing leaves the policy authorizing nothing.
+
+The nightly driver exists only after `node scripts/schedule-drivers.mjs --install --namespace <ns> --apply`. The task it creates is disabled until it is enabled by hand.
 
 ## Security
 
-Several independent audits have run against this surface. What they produced is in the code: path traversal closed on every document path, OAuth consent bound to the exact redirect it was granted for, the scorer isolated so attempt code never runs beside a credential, protected paths enforced by a deterministic guard, an Origin allowlist on the browser-facing routes, and a replay cache keyed by a database primary key rather than a read-then-write. Each fix ships with a test observed failing against the code it replaced. The audits live in Capsid, not in this repository.
+Independent audits of this surface produced these fixes, now in the code: path traversal closed on every document path, OAuth consent bound to the exact redirect it was granted for, the scorer isolated so attempt code never runs beside a credential, protected paths enforced by a deterministic guard, an Origin allowlist on the browser-facing routes, and a replay cache keyed by a database primary key rather than a read-then-write. Each fix ships with a test observed failing against the code it replaced. The audits live in Capsid, not in this repository.
 
 ## License
 

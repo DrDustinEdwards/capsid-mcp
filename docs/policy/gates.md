@@ -50,6 +50,5 @@ like a branch push and carries a force flag can never match `push_branch`:
 
 It cannot describe less than the code enforces: a class the Worker would approve that
 this document does not name is refused at load time. It cannot approve a command that
-matched no class, because the refusal is the default and a match is what has to be
-demonstrated. And it ships disabled, so turning it on is a deliberate act recorded in
-the audit log.
+matched no class. The refusal is the default and a match has to be demonstrated. It
+ships disabled. Turning it on is recorded in the audit log.

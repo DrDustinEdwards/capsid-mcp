@@ -2,11 +2,11 @@
 
 A nightly loop that tries small changes to a handful of projects, has each
 project's own CI measure whether they helped, keeps the ones that did and reverts
-the rest. It is **off by default** and it never merges anything.
+the rest. It is off by default and it never merges anything.
 
 **This document is redacted from the private canon.** The roster, the scores, the
-holdout contents and the rulings are not here. What is here is the design and the
-reasoning, which is the part worth reading if you are building something similar.
+holdout contents and the rulings are not here. What is here is the design.
+
 ## How it runs
 
 - **Modes.** `subscription` has the Worker write a task document for a session to run, so it calls no model itself. `api` calls the model directly. `off` is the default, and any unreadable or unexpected setting falls back to it.
@@ -21,19 +21,17 @@ reasoning, which is the part worth reading if you are building something similar
 
 ## Why it is shaped this way
 
-**A Worker cannot run a build or a test suite.** There is no process to spawn. So
-the scoring happens in each repository's own CI, with its real toolchain, and the
-result comes back over a signed endpoint. Anything the Worker measured itself
-would be a proxy wearing an anchor's name.
+A Worker cannot run a build or a test suite. There is no process to spawn.
+Scoring happens in each repository's own CI, with its real toolchain, and the
+result comes back over a signed endpoint.
 
-**A run cannot finish in one cron invocation.** CI takes minutes. So a run is a
+A run cannot finish in one cron invocation. CI takes minutes. A run is a
 small state machine in the database, and a tick every five minutes advances
 whichever runs are unfinished, one step at a time. Every step is safe to repeat,
 because ticks overlap and isolates die mid-flight. Every transition is
 `UPDATE ... WHERE status = <expected> RETURNING id`, never a row count.
 
-**The loop must not be able to move its own goalposts.** That is the whole design
-problem, and nothing else here is interesting by comparison.
+The loop cannot move its own goalposts.
 
 ## What stops it moving its own goalposts
 
@@ -46,8 +44,8 @@ differently.
 them. This section is checksummed and the checksum is pinned out of band; if the
 section changes, every run for that project refuses until a human re-pins it.
 
-**Secondary** metrics are what the loop optimises. This section is deliberately
-NOT checksummed, so reweighting a metric is a free edit. Covering the whole file
+**Secondary** metrics are what the loop optimises. This section is not
+checksummed, so reweighting a metric is a free edit. Covering the whole file
 would mean every legitimate tuning change breaks every run until someone
 refreshes the pin, and the failure would be a refusal at 03:00 that nobody sees
 until morning. Checksumming the anchor block gives the property that actually
@@ -56,19 +54,19 @@ matters and leaves the tuning surface tunable.
 A metric may be marked `stub`: parsed, reported, and excluded from scoring until
 the marker is removed, so declaring an intention never scores as a zero.
 
-**A metric is declared only once something reports it.** Two metrics were declared
+A metric is declared only once something reports it. Two metrics were declared
 in every scores document for weeks and emitted as a literal null on every run by
-every repository. A document that lists a metric nobody measures is worse than one
-that lists fewer: it reads as five signals and behaves as three. The scorer now
-exports the list it actually reports, and a test derives the documents' list from
-it and fails in both directions.
+every repository. A document that lists a metric nobody measures reads as five
+signals and behaves as three. The scorer now exports the list it actually
+reports, and a test derives the documents' list from it and fails in both
+directions.
 
 ### The path guard
 
 A deterministic check refuses any change touching tests, CI configuration, lint or
 compiler configuration, lockfiles, package manifests, migrations, or the loop's
 own files. It runs with no model and cannot be argued with. Those paths are what
-MEASURE the work, and a system that can edit its own measurements has none.
+measure the work. An attempt may not change them.
 
 Getting the lockfile list right matters more than it looks: the scorer installs
 from a lockfile before it runs anything, so an unprotected lockfile for the fifth
@@ -90,7 +88,7 @@ The build result is a job output the CI runner sets from a step's own outcome.
 Metrics written to a file on a runner that has already executed attempt code are
 treated as hostile for that field, because they are.
 
-The two secondary metrics that CAN be recomputed are recomputed inside the same
+The two secondary metrics that can be recomputed are recomputed inside the same
 container, from the repository's own commands, taken from a map on the default
 branch. The one that cannot (bundle size, which needs a bundler) still comes from
 the artifact, and is cross-checked: a disagreement is logged and the container's
@@ -98,7 +96,7 @@ value wins. A phase that could not run reports null rather than falling back to
 the artifact, because an unmeasured metric must never be readable as the number
 the attempt wrote down.
 
-**How that was verified.** A branch was pushed that genuinely broke two tests and
+How that was verified. A branch was pushed that genuinely broke two tests and
 deleted the test file that catches it, so the build job measured a perfect suite
 and wrote it into the artifact. The container ran the default branch's tests
 against that source and reported 0.9906. Both mismatches were logged and the
@@ -113,33 +111,31 @@ compile. A source scan enforces that only one module may name the binding, and t
 runtime environment still has it. Three layers, each defeating a different
 evasion.
 
-CI pulls the suite with a **one-hour, object-read-only credential** minted on
+CI pulls the suite with a one-hour, object-read-only credential minted on
 request and signed with the same per-project key as the score report, rather than
 a long-lived account-wide token.
 
-**The cheapest attack on a hidden suite is not to pass it but to shrink it.** So
-the size is declared in a manifest the attempt cannot write, and a report claiming
+The size is declared in a manifest the attempt cannot write. A report claiming
 fewer tests than the manifest declares is refused outright. A project with no
-manifest is refused too, because a project with no hidden suite would otherwise
+manifest is refused too: a project with no hidden suite would otherwise
 score exactly like one with a passing suite.
 
 ### The task document is signed
 
 In the mode where a human session drives the loop, the Worker writes a task
 document and the session executes it. That document is executed as an instruction
-list, on a machine holding repository clones, local git and a write grant, which
-makes it the cheapest thing in the system to steer. It is signed, the ordinary
-write tool refuses its path without an explicit audited flag, and verification
-requires **both** a valid signature and an audit actor that is the loop itself.
+list, on a machine holding repository clones, local git and a write grant. It is
+signed. The ordinary write tool refuses its path without an explicit audited flag.
+Verification requires both a valid signature and an audit actor that is the loop
+itself.
 
 ## What is measured, and when a change is kept
 
-An attempt is kept only when no anchor regressed **and** the weighted secondary
-score strictly improved. **A tie reverts**, because churn accumulates into a diff
+An attempt is kept only when no anchor regressed and the weighted secondary
+score strictly improved. A tie reverts, because churn accumulates into a diff
 nobody can review.
 
-**Reporting nothing must never be the cheapest way to score well.** An anchor CI
-did not report counts as failed, never as skipped. A comparison with no comparable
+An anchor CI did not report counts as failed, never as skipped. A comparison with no comparable
 metrics reverts and says so.
 
 ## What stops it, in increasing order of scope
@@ -152,7 +148,7 @@ metrics reverts and says so.
   stops.
 - **The drift gate**, per project. Too many reverts across recent runs, or any
   anchor dropping against the best recorded run, pauses the project. The pause key
-  has **no expiry, deliberately**: an expiring pause silently resumes a project
+  has no expiry: an expiring pause silently resumes a project
   that was stopped for a reason nobody has looked at.
 - **The mode back to off**, for everything. An unset key, an unrecognised value,
   or an unreadable store all mean off.
@@ -161,7 +157,7 @@ metrics reverts and says so.
 
 Nothing is deleted, ever. One row per attempt with its lineage parent, its scores
 on both sides and why it was kept or reverted; one archive document per attempt,
-written **before** the score arrives so an attempt that is never scored still
+written before the score arrives so an attempt that is never scored still
 leaves a record; one run summary; and an audit row for every step. Every table is
 in the nightly backup, so the lineage survives outside the database.
 
