@@ -5,7 +5,7 @@ loop on. Written for a stranger with a Cloudflare account and a GitHub org.
 
 ## 1. Configuration
 
-The real `wrangler.jsonc` is **gitignored** and a fresh clone has none. Copy the
+The real `wrangler.jsonc` is gitignored and a fresh clone has none. Copy the
 example and fill in the ids:
 
 ```
@@ -26,17 +26,16 @@ bindings. Only `wrangler dev` and `wrangler deploy` need the real file.
 | `MEDIA` | R2 | backups, the markdown mirror, the report sink |
 | `HOLDOUT` | R2 | the loop's hidden test suites |
 
-**The two KV namespaces are separate on purpose.** They shared one for a while,
+The two KV namespaces are separate. They shared one for a while,
 which meant the Worker's caches lived in the same keyspace as the provider's
 tokens.
 
-**The two buckets are separate on purpose too**, and it is not tidiness: the code
-that generates loop attempts is handed an environment type that structurally
-omits `HOLDOUT`, so it cannot read the hidden tests. Merging the buckets would
-delete that guarantee.
+The two buckets are separate too. The code that generates loop attempts is handed
+an environment type that structurally omits `HOLDOUT`, so it cannot read the hidden
+tests. Merging the buckets would delete that guarantee.
 
-**Resolve by name, verify by id.** Assert the resolved id equals a pinned value
-rather than trusting the name. A name is not an identity, and a Worker pointed at
+Resolve by name, verify by id. Assert the resolved id equals a pinned value
+rather than trusting the name. A name is not an identity. A Worker pointed at
 nothing starts fine and answers healthy while every read errors.
 
 ## 3. Secrets
@@ -53,13 +52,13 @@ Never commit one, and never read, display or log the contents of an env file.
 
 ### Operator keys
 
-`OPERATOR_KEY_HASH` is a **comma-separated list of sha256 hashes**. The keys
+`OPERATOR_KEY_HASH` is a comma-separated list of sha256 hashes. The keys
 themselves exist nowhere on the server.
 
-- A plain entry, `<sha256 of the key>`, grants **write**.
-- An entry written as `ro:<sha256 of the key>` is **read-only**.
+- A plain entry, `<sha256 of the key>`, grants write.
+- An entry written as `ro:<sha256 of the key>` is read-only.
 
-**The prefix is on the ENTRY, not on the key.** The server hashes whatever key was
+The prefix is on the entry, not on the key. The server hashes whatever key was
 presented and compares it against each entry with the prefix stripped, so the tier
 is a property of what the operator wrote down rather than of what the caller sends.
 A read-only key is denied every mutating tool, and one read tool is partially
@@ -67,12 +66,12 @@ gated: CI status returns run metadata but withholds the failing job's log tail,
 because a build log carries whatever the workflow echoed.
 
 Revoke by removing a hash. Add one by appending. There is a helper for minting a
-read-only key: see **Minting a read-only key** below.
+read-only key: see Minting a read-only key below.
 
 ## 4. The GitHub App
 
 Capsid reaches private repositories through a GitHub App installation token,
-cached in KV. It is a **GitHub App**, not a personal token, so access is scoped to
+cached in KV. It is a GitHub App, not a personal token, so access is scoped to
 an installation and revocable in one place.
 
 ### Permissions
@@ -87,17 +86,17 @@ nobody has checked.
 | Contents | Read and write | reading files and trees, committing, branches, deleting files | exercised continuously since 2026-07-06 |
 | Pull requests | Read and write | opening, merging and closing pull requests | exercised continuously |
 | Actions | Read and write | reading workflow runs and logs; dispatching a workflow and re-running failed jobs | read confirmed 2026-08-16; dispatch is what the loop uses to score |
-| Workflows | Write | committing under `.github/workflows/` | **confirmed by probe 2026-09-07**: a pull request authoring a workflow file succeeded, and was closed immediately |
+| Workflows | Write | committing under `.github/workflows/` | confirmed by probe 2026-09-07: a pull request authoring a workflow file succeeded, and was closed immediately |
 
-That last row is the one worth reading twice. **The App can author workflows in
-every mapped repository**, so a write-grant operator key can commit CI that runs
+The App can author workflows in
+every mapped repository, so a write-grant operator key can commit CI that runs
 with those repositories' secrets. The tools therefore refuse any path under
 `.github/workflows/` unless an explicit opt-in flag is passed, and passing it is
 audit-logged.
 
-**The granted permission set was not read back from the API**; each row is
-evidence from a call that worked. If you are standing this up fresh, grant the
-list above and expect to find out which ones you missed by watching calls fail.
+The granted permission set was not read back from the API. Each row is
+evidence from a call that worked. On a fresh setup, grant the list above and
+expect missed permissions to show up as failed calls.
 
 ### The connector that does not work
 
@@ -120,7 +119,7 @@ The deploy job fails if the live database is behind, which is deliberate: a Work
 deployed against a schema it does not have is a Worker that answers errors on
 every write path.
 
-Restore is in README Restore; do not use `wrangler d1 export`.
+Restore is in `docs/backups.md`. Do not use `wrangler d1 export`.
 
 ## 6. Verifying a deploy
 
@@ -134,9 +133,9 @@ npm run deploy
 npm run verify:live    # the live gate family against the deployed Worker
 ```
 
-`EXPECT_SHA` asserts which commit is live. **A tool list is cached by the client
-at connect time**, so a tool deployed mid-session is invisible until the connector
-reconnects; verify a fresh deploy by calling the Worker directly rather than by
+`EXPECT_SHA` asserts which commit is live. A tool list is cached by the client
+at connect time, so a tool deployed mid-session is invisible until the connector
+reconnects. Verify a fresh deploy by calling the Worker directly rather than by
 waiting.
 
 ## 7. Minting a read-only key
@@ -148,23 +147,22 @@ by hand:
 improve_run(action: "mint_operator_key")
 ```
 
-It returns the key **once**, prints the hash, and prints the exact command to
-append that hash to `OPERATOR_KEY_HASH`. It deliberately does **not** set the
-secret itself: a Worker that can widen its own authorization list is a Worker
-whose authorization list is decorative. The manual step is the gate.
+It returns the key once, prints the hash, and prints the exact command to
+append that hash to `OPERATOR_KEY_HASH`. It does not set the
+secret itself. The manual step is the gate.
 
 The response is not stored anywhere and the key is not recoverable. Lose it and
 mint another; remove the old hash.
 
 ## 8. Minting an agent, one per project and per machine
 
-An operator key is a tier. An **agent** is a caller: its own key, its own scopes,
+An operator key is a tier. An agent is a caller: its own key, its own scopes,
 its own audit identity, its own revocation. `OPERATOR_KEY_HASH` still works and
-keeps every authority it has today; agents are what replaces it, one credential at
-a time, and the old key is removed when nothing needs it any more.
+keeps every authority it has today. Agents replace it, one credential at
+a time. The old key is removed when nothing needs it any more.
 
 Mint one as the admin (an OAuth session on `/mcp`, or a write-grant operator key
-on `/ops/mcp`). A minted agent cannot mint another, deliberately: an agent that can
+on `/ops/mcp`). A minted agent cannot mint another. An agent that can
 widen itself has no scope.
 
 ```
@@ -172,13 +170,13 @@ agents(action: "mint", name: "capsid-driver", kind: "driver", namespaces: ["caps
        grants: ["read", "write"])
 ```
 
-The response carries the key **once**. Nothing stores it: the table holds its
+The response carries the key once. Nothing stores it: the table holds its
 sha256, and a lost key is replaced by revoking that agent and minting another.
 
-**One agent per project and per machine.** The name says both, so an audit row
-reads as a sentence: `capsid-driver-laptop`, `foxing-driver-desktop`. The point is
-that revoking a compromised laptop does not stop the desktop working, and that
-`agent:foxing-driver-laptop` in the audit log needs no lookup to understand.
+One agent per project and per machine. The name says both, so an audit row
+reads as a sentence: `capsid-driver-laptop`, `foxing-driver-desktop`. Revoking a
+compromised laptop does not stop the desktop working. `agent:foxing-driver-laptop`
+in the audit log needs no lookup to understand.
 
 ### Where the key lives on the machine
 
@@ -210,15 +208,15 @@ it to what the work actually needs and no further:
 | --- | --- | --- |
 | `namespaces` | its own | all of them |
 | `grants` | read, write | read, write |
-| `can_merge` | **no** | yes |
-| `can_direct_write` | **no** | no |
-| `can_write_workflows` | **no** | no |
+| `can_merge` | no | yes |
+| `can_direct_write` | no | no |
+| `can_write_workflows` | no | no |
 | `can_dispatch` | no | no |
 | `can_touch_protected` | no | no |
 | `money_paths` | no | no |
 
 A driver opens pull requests; a human merges them. That is the same rule the
-improve loop already runs on, and giving a driver `can_merge` is how it stops being
+improve loop already runs on. Giving a driver `can_merge` is how it stops being
 a rule. `can_direct_write` is off even for the seat: a direct commit to a default
 branch on a repo that deploys on push is a deploy, and a deploy is a gate.
 
@@ -236,7 +234,7 @@ be cut over in one sitting. The order that works:
 1. Mint the six agents below, as the admin. Each returns its key once; write each
    into `~/.capsid/agent-<name>.key` on the machine that will use it.
 2. Point one driver at its key and let it work a job. `improve_status` shows
-   `last_seen` moving, which is how you know the agent is the credential in use and
+   `last_seen` moving, which is how to know the agent is the credential in use and
    not the operator key underneath it.
 3. When every machine has an agent and `last_seen` proves it, remove the operator
    hash: `npx wrangler secret put OPERATOR_KEY_HASH` with the remaining entries.
@@ -253,9 +251,9 @@ CAPSID_OPERATOR_KEY=<write-grant key> node scripts/mint-agents.mjs --apply
 CAPSID_OPERATOR_KEY=<write-grant key> node scripts/mint-agents.mjs --namespace foxing --apply
 ```
 
-`--namespace` mints one project without touching the rest, which is what you want
+`--namespace` mints one project without touching the rest, which is what to run
 once the first six are live: a project joins the roster later, or one key is lost
-and needs replacing, and re-minting the set is not available to you then. An
+and needs replacing, and re-minting the set is not available then. An
 unknown namespace is refused and the refusal lists the known ones, because
 "minted 0 agents" and "minted the one you meant" are the same output to anybody
 not counting. `test/mint-agents.test.ts` derives the driver list from
@@ -273,8 +271,8 @@ agents(action: "mint", name: "germomics-driver",     kind: "driver", namespaces:
 agents(action: "mint", name: "seat",                 kind: "seat",   namespaces: ["*"],             grants: ["read", "write"], flags: { can_merge: true })
 ```
 
-Five drivers, one per namespace, each with write on its own namespace and **no
-flags**: no merge, no direct write, no workflow write. One seat across every
+Five drivers, one per namespace, each with write on its own namespace and no
+flags: no merge, no direct write, no workflow write. One seat across every
 namespace that may merge, and may not commit directly to a default branch.
 
 Nothing else is granted. `can_dispatch`, `can_touch_protected` and `money_paths`
@@ -307,7 +305,7 @@ Each item exists because of something that went wrong when it was not checked.
       that does not already pass reverts every attempt forever.
 - [ ] **The manifest total matches the real case count.** A report claiming fewer
       tests than the manifest declares is refused, which is the defence against
-      the cheapest attack: shrinking the suite rather than passing it.
+      shrinking the suite rather than passing it.
 - [ ] **The signing secret is set**, and each repository holds its own derived
       per-project key as a repository secret. A key leaking from one repository
       must not verify for another.
@@ -331,7 +329,7 @@ improve_run(action: "mode", value: "api")            # the Worker drives it
 
 Start with the human-driven mode. It does everything except talk to a model: it
 reads the scores, verifies the pin, picks the base commit and writes a signed task
-document. Nothing is spent, and you get to read what it was going to do.
+document. Nothing is spent, and the signed task document is there to read.
 
 ### Switching it off
 
@@ -346,12 +344,12 @@ starts writing to every repository on the roster.
 
 ### After the first night
 
-- [ ] Read the run summary and every attempt archive. They are written **before**
+- [ ] Read the run summary and every attempt archive. They are written before
       the score arrives, so an attempt that was never scored still left a record.
 - [ ] Check the audit log for the loop's actor. One query answers what it did.
-- [ ] Look at the pull request. **Nothing is merged automatically while the
-      auto-merge policy is disabled, and it ships disabled.** That is the human
-      gate rather than an oversight. If it is ever enabled, what the Worker may
+- [ ] Look at the pull request. Nothing is merged automatically while the
+      auto-merge policy is disabled, and it ships disabled. That is the human
+      gate. If it is ever enabled, what the Worker may
       merge alone is `docs/policy/auto-merge.md`, and every merge it makes names
       the policy version and every check that passed in the audit log.
 
@@ -361,7 +359,7 @@ starts writing to every repository on the roster.
 folder that runs `claude -p "/improve work"` at 04:00 America/Chicago and posts the
 run log to `<namespace>/jobs/nightly-<date>.md`.
 
-**Why a local task and not a cloud routine.** Ruled 2026-09-12 against a measured
+Why a local task and not a cloud routine. Ruled 2026-09-12 against a measured
 alternative, recorded in `capsid/autonomy-part3-routines.md`. A Claude Code cloud
 routine can only attach claude.ai connectors, and the registered Capsid connector
 points at `/mcp`, the OAuth path, which resolves to the single admin login. A nightly
@@ -371,7 +369,7 @@ were minted to replace. There is also no verified way to hand a routine a secret
 this machine the per-namespace key files already exist, so the scheduler runs here and
 each task reaches Capsid as exactly one driver.
 
-It is off in two separate senses, and both are deliberate:
+It is off in two separate senses, and both are on purpose:
 
 ```
 node scripts/schedule-drivers.mjs --list                            # what exists now
@@ -381,7 +379,7 @@ schtasks /Change /TN "Capsid improve driver (capsid)" /ENABLE       # the separa
 ```
 
 Nothing is created without `--apply`, and a task that is created is created
-**disabled**. Enabling it is its own command, because installing a scheduler and
+disabled. Enabling it is its own command, because installing a scheduler and
 switching on a nightly unattended agent are two different decisions and a setup script
 should not make the second one.
 
@@ -390,8 +388,6 @@ Removing is the same shape:
 ```
 node scripts/schedule-drivers.mjs --remove --namespace capsid --apply
 ```
-
-Three things worth knowing before enabling one:
 
 - **The task does not carry a credential.** It runs the script, which runs `claude` in
   that project folder, and the driver session gets its credential from the
