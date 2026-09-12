@@ -146,13 +146,11 @@ Every write snapshots the prior version into `document_versions` and appends to 
 
 MCP clients cache the tool list at connect time. After deploying new tools, reconnect the connector or start a new chat to see them.
 
-## Roadmap
+## What's next
 
-Four things shipped on 2026-09-11. **Agents as users**: the credentials and the one enforcement point are live, and what remains there is operational, mint one agent per project and per machine then remove the operator hash (`docs/bootstrap.md`). **The console** (PR #20): the admin surface for what the queue holds, which jobs are blocked and on what command, and what the loop did last night. **The model-refresh skill**: a weekly cron in the claude-skills repo that rewrites the model-facing lines in this repo's skills and commands to match a named model's prompting guide, calibration only, never a gate or a ruling or task content. **Jobs as evidence** (PR #21): a verified outcome row per finished job, and agent records as counts and rates.
+**The experiment scheduler**, once the loop has real nights behind it. Nothing else is planned: everything else this README describes is shipped and running.
 
-Two more shipped on 2026-09-12. **Autonomy** (PR #24): auto-merge by signed policy, pre-approved gate classes, and a nightly scheduled driver, all described under Autonomy above. **Skill records** (PR #25): the lifecycle, the evaluation cycle, the bounded edit gate and the console panel, described under Skills above.
-
-One item left: **the experiment scheduler**, once the loop has real nights behind it.
+## Switches
 
 **Three switches, all off by default, each turned on separately.** The loop runs only when `improve_mode` in `APP_KV` is set to `subscription` or `api`, by `improve_run` action `mode`; anything unreadable or unexpected falls back to `off`. Auto-merge and pre-approved gates run only when their policy document's `enabled` field is `true` **and** the document has been signed again afterwards with `improve_run` action `sign_policy`, which is admin only; editing without re-signing leaves the policy authorizing nothing. The nightly driver exists only after `node scripts/schedule-drivers.mjs --install --namespace <ns> --apply`, and the task it creates is disabled until it is enabled by hand.
 
