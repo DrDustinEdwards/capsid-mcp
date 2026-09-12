@@ -201,6 +201,28 @@ as a total, which is how a count lies without anybody writing a wrong number.
 and found empty is `0`. An average over a column that spelled both the same way
 would be an average over a lie.
 
+### A swallowed parameter tag is refused
+
+`complete`, `fail` and `post` refuse a `result_summary`, `reason` or `body` that
+contains the literal text `</name>` for one of the `jobs` tool's own parameter
+names, and the refusal names both the field and the tag.
+
+This is a measured failure, twice on 2026-09-11, not a hypothetical. A caller that
+closes a parameter tag inside a value sends one argument where it meant to send
+three: `result_ref` and `evidence` never arrive as arguments at all, they arrive as
+literal text in the middle of `result_summary`. Both times the job was completed
+with no reference and no evidence, and the outcome row recorded nothing.
+
+It is refused rather than cleaned up because what was lost is the STRUCTURE, not the
+text: stripping the tags would leave a tidy summary still missing its `result_ref`
+and its `evidence`, and the caller would never learn. And the outcome row cannot be
+corrected afterwards by design, so before the write is the only place to catch it.
+
+The match is the full `</name>` spelling and nothing looser, so prose ABOUT the rule
+is not refused: a job body that writes the pieces apart, as this feature's own job
+body did, passes. `test/jobs.test.ts` checks both directions, against the actual
+stored text of the first job it happened to.
+
 ### agent_record
 
 `src/agent-record.ts` aggregates those rows into one record per credential, served

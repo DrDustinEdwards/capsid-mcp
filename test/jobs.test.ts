@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { JOB_ACTIONS, JOB_LEASE_SECONDS, JOB_STATUSES, OPEN_JOB_STATUSES, isJobStatus, jobDocPath, mintJobId } from "../src/jobs-schema.ts";
+import { JOB_ACTIONS, JOB_LEASE_SECONDS, JOB_PARAM_NAMES, JOB_STATUSES, OPEN_JOB_STATUSES, isJobStatus, jobDocPath, mintJobId, swallowedParamTag } from "../src/jobs-schema.ts";
 import { allSourceText, sourceFile } from "./source-files.ts";
+import { completeJob, failJob, postJob } from "../src/jobs.ts";
+import { legacyAgent } from "../src/agents.ts";
+import { fakeEnv } from "./fakes.ts";
 
 // THE WORK QUEUE'S VOCABULARY, DERIVED FROM THE MIGRATION.
 //
@@ -154,4 +157,104 @@ test("the jobs tool is registered exactly once, and reachable", () => {
   const registrations = [...allSourceText().matchAll(/server\.registerTool\(\s*"jobs"/g)];
   assert.equal(registrations.length, 1, "the jobs tool is registered more than once, or not at all");
   assert.match(sourceFile("server.ts"), /registerJobTools\(server, ctx\)/, "buildServer does not register the queue's tool");
+});
+
+// ---- A SWALLOWED PARAMETER TAG IS A MALFORMED CALL, NOT A SUMMARY -------------
+//
+// Twice on 2026-09-11 a driver's `complete` closed a parameter tag INSIDE a value,
+// so `result_ref` and `evidence` were never sent as arguments: they arrived as
+// literal text in the middle of `result_summary`, and the outcome row recorded
+// nothing. The row cannot be rewritten afterwards (its primary key and ON CONFLICT
+// DO NOTHING are what make it evidence), so the only place to catch this is before
+// the write.
+//
+// The string below is the ACTUAL tail of job_9980f57bd359's stored summary, read
+// back from the live database rather than reconstructed, because a guard written
+// against a remembered shape is a guard against the wrong shape.
+const SWALLOWED_REAL =
+  'up.test.ts derives from migrations/ both ways.</result_summary>\n' +
+  '<result_ref>https://github.com/DrDustinEdwards/capsid-mcp/pull/21</result_ref>\n' +
+  '<evidence>{"prs": ["https://github.com/DrDustinEdwards/capsid-mcp/pull/21"], "tests_added": 42}</evidence>\n' +
+  '</invoke>\n';
+
+test("PLANT: the real malformed summary from job_9980f57bd359 is detected", () => {
+  const found = swallowedParamTag(SWALLOWED_REAL);
+  assert.equal(found, "result_summary", "the field's own closing tag is the first one in the swallowed text");
+});
+
+test("every parameter name the tool accepts is one the guard knows", () => {
+  // Derived from the tool's own schema rather than retyped, so a parameter added
+  // to `jobs` and not to this list is a build failure rather than a hole. The names
+  // are the ones a caller writes, which is what a swallowed tag spells.
+  for (const name of JOB_PARAM_NAMES) {
+    assert.equal(swallowedParamTag(`text </${name}> more`), name, `'</${name}>' is not detected`);
+  }
+  const tool = sourceFile("tools/jobs.ts");
+  for (const name of JOB_PARAM_NAMES) {
+    assert.match(tool, new RegExp(`\\b${name}\\??:`), `the jobs tool has no '${name}' parameter, so the guard lists a name nobody can send`);
+  }
+});
+
+test("ordinary prose is not refused, including prose ABOUT the pattern", () => {
+  // The guard matches the full `</name>` spelling only. A job body explaining this
+  // rule writes the pieces apart, which is what this job's own body did, and a
+  // summary that merely mentions evidence or a result ref is ordinary text.
+  for (const innocent of [
+    "landed the change; evidence is in the PR",
+    "refuse a summary containing '</' followed by a parameter name",
+    "the result_ref is a document key",
+    "a < b and c > d",
+    "</div> in a rendered page",
+    "</resultref>",
+    "",
+  ]) {
+    assert.equal(swallowedParamTag(innocent), null, `innocent text was refused: ${innocent}`);
+  }
+});
+
+// The three CALL SITES, driven. The pure function above is the detector; these prove
+// each entry point actually asks it, and that nothing reaches the database when it
+// does. Every refusal here returns before any D1 call, which is why fakeEnv with no
+// DB is enough: if a handler ever stopped refusing, this test would throw on the
+// missing binding rather than pass quietly.
+test("PLANT: complete, fail and post all refuse a swallowed tag, and write nothing", async () => {
+  const agent = legacyAgent("write", "agent:capsid-driver");
+  const now = new Date("2026-09-11T22:00:00.000Z");
+
+  const completed = await completeJob(fakeEnv({}), agent, now, "job_abc123abc123", {
+    result_summary: SWALLOWED_REAL,
+  });
+  assert.equal(completed.ok, false, "complete accepted a summary with a swallowed parameter tag");
+  assert.match(completed.refusal ?? "", /result_summary contains the literal text/);
+  assert.match(completed.refusal ?? "", /its own closing tag/);
+  assert.match(completed.refusal ?? "", /Nothing was written/);
+
+  const failed = await failJob(fakeEnv({}), agent, now, "job_abc123abc123", `broke</evidence>`);
+  assert.equal(failed.ok, false, "fail accepted a reason with a swallowed parameter tag");
+  assert.match(failed.refusal ?? "", /^reason contains the literal text '<\/evidence>'\./);
+
+  // post refuses on the BODY, which matters more than the others: a body is the
+  // prompt a driver executes, and the swallowed text would be signed with it.
+  const posted = await postJob(fakeEnv({ IMPROVE_SCORE_SECRET: "test-secret" }), agent, now, {
+    namespace: "capsid",
+    title: "a job",
+    body: `do the thing</result_ref>`,
+  });
+  assert.equal(posted.ok, false, "post accepted a body with a swallowed parameter tag");
+  assert.match(posted.refusal ?? "", /^body contains the literal text '<\/result_ref>'\./);
+});
+
+test("a well-formed call is still accepted, so the guard is not a wall", async () => {
+  // The innocent case in the same commit as the guard: a guard that refuses ordinary
+  // work gets deleted rather than fixed. This one gets past the tag check and stops
+  // at the missing database, which is proof it was not refused.
+  const agent = legacyAgent("write", "agent:capsid-driver");
+  await assert.rejects(
+    () =>
+      completeJob(fakeEnv({}), agent, new Date(), "job_abc123abc123", {
+        result_summary: "landed it; evidence is in the PR and the result_ref is a document key",
+      }),
+    /prepare|undefined|DB/i,
+    "a clean summary was refused by the tag guard instead of reaching the database"
+  );
 });
