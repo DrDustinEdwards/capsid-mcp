@@ -1,5 +1,5 @@
 import { sha256Hex } from "./auth";
-import { anchorKey, PROMPTS_PREFIX, RUN_TASK_PREFIX, SCORES_PATH, SKILLS_PREFIX } from "./improve-schema";
+import { anchorKey, POLICY_PREFIX, PROMPTS_PREFIX, RUN_TASK_PREFIX, SCORES_PATH, SKILLS_PREFIX } from "./improve-schema";
 
 // ---- the shapes -------------------------------------------------------------
 
@@ -161,6 +161,15 @@ export async function improveWriteRefusal(
   }
   if (path.startsWith(PROMPTS_PREFIX)) {
     return `${namespace}/${path} is the improve loop's run-prompt surface and the ordinary write tool refuses it. It steers the nightly attempt generator, so a write here is only accepted with allow_improve_paths: true, which is audit-logged.`;
+  }
+  // THE POLICY DOCUMENTS (autonomy arc, 2026-09-12). capsid/policy/auto-merge.md says
+  // what this Worker may merge with no human, and capsid/policy/gates.md says which
+  // blocked commands the seat may approve without one. Both are read by the Worker as
+  // authority, so a write here is a ruling rather than an edit. Same treatment as the
+  // run prompt: refused outright by the ordinary write tool, accepted only with
+  // allow_improve_paths, which itself needs can_touch_protected and is audit-logged.
+  if (path.startsWith(POLICY_PREFIX)) {
+    return `${namespace}/${path} is an autonomy policy document. It decides what this Worker may do without a human, so a write here is a ruling. Pass allow_improve_paths: true to write it anyway; the flag needs the can_touch_protected scope and is audit-logged.`;
   }
   if (path.startsWith(SKILLS_PREFIX)) {
     return `${namespace}/${path} is an improve loop skill document, re-injected into other projects' runs, and the ordinary write tool refuses it. Pass allow_improve_paths: true to write it anyway; the flag is audit-logged.`;

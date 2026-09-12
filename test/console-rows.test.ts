@@ -33,6 +33,7 @@ function namespaceStatus(overrides: Partial<NamespaceStatus> = {}): NamespaceSta
   return {
     namespace: "capsid",
     paused: null,
+    awaiting_seat: [],
     anchor_pinned: true,
     anchor_problem: null,
     best: { sha: "deadbee", score: 0.82, recorded_at: "2026-09-10T04:00:00Z" },

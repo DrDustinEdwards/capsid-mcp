@@ -17,6 +17,8 @@ import {
   type RequiredScopes,
 } from "./jobs-schema";
 import type { Agent } from "./agents";
+import { approveByPolicy } from "./gate-policy";
+import { readRepoFile } from "./github/contents";
 import { signTaskBody, verifySignedBody } from "./improve-task";
 import { loadRecordRows, recordFor } from "./agent-record";
 import {
@@ -590,6 +592,19 @@ export async function adminFailJob(env: Env, agent: Agent, now: Date, id: string
   return { ok: true, action: "admin-fail", job };
 }
 
+// THE ONE SPELLING OF THE RESUME INSTRUCTION. blockJob writes it into the summary and
+// commandFromSummary reads it back out, so the format cannot drift between the two.
+export const RESUME_MARKER = "Run this, then send it back in with jobs action 'resume':";
+
+/** The exact command a blocked job is waiting on, or null when it recorded none. */
+export function commandFromSummary(summary: string | null): string | null {
+  if (!summary) return null;
+  const at = summary.indexOf(RESUME_MARKER);
+  if (at === -1) return null;
+  const rest = summary.slice(at + RESUME_MARKER.length).trim();
+  return rest.length > 0 ? rest : null;
+}
+
 export async function blockJob(
   env: Env,
   agent: Agent,
@@ -598,7 +613,7 @@ export async function blockJob(
   args: { reason: string; command?: string }
 ): Promise<JobResult> {
   if (!args.reason?.trim()) return refuse("block", "block needs a reason: what gate was hit.");
-  const summary = args.command ? `${args.reason}\n\nRun this, then send it back in with jobs action 'resume':\n\n    ${args.command}` : args.reason;
+  const summary = args.command ? `${args.reason}\n\n${RESUME_MARKER}\n\n    ${args.command}` : args.reason;
   return holderTransition(env, agent, now, "block", id, {
     status: "blocked",
     result_summary: summary,
@@ -633,7 +648,13 @@ export async function resumeJob(
   agent: Agent,
   now: Date,
   id: string,
-  reason: string
+  reason: string,
+  // THE PRE-APPROVED GATE (autonomy arc part 2). When set, the seat is approving this
+  // resume on the signed gate policy rather than on a human having said yes, and the
+  // value is the policy version it read. The command the job blocked on is matched
+  // against the policy classes and the resume is REFUSED when it matches none, so this
+  // narrows what the seat may do on its own rather than widening it.
+  approvedByPolicy?: string
 ): Promise<JobResult> {
   const actor = agent.actor;
   if (!ACTOR_SHAPE.test(actor)) {
@@ -695,6 +716,26 @@ export async function resumeJob(
     return refuse("resume", `${id} failed its signature check and has been marked failed: ${verdict.reason}`);
   }
 
+  // THE POLICY CHECK RUNS BEFORE THE LEASE IS TAKEN, so a refusal leaves the job
+  // blocked exactly as it was rather than claimed by a caller whose approval did not
+  // hold.
+  let policyMatch: { klass: string; detail: string; version: string } | null = null;
+  if (approvedByPolicy !== undefined) {
+    const command = commandFromSummary(current.result_summary);
+    const verdict = await approveByPolicy(env, approvedByPolicy, command, async (path) => {
+      try {
+        const file = await readRepoFile(env, current.namespace, path);
+        return (file as { content?: string }).content ?? null;
+      } catch {
+        return null;
+      }
+    });
+    if (!verdict.approved) {
+      return refuse("resume", id + " is not pre-approved: " + verdict.reason);
+    }
+    policyMatch = { klass: verdict.klass, detail: verdict.detail, version: verdict.policyVersion };
+  }
+
   const expires = leaseUntil(now);
   const won = await env.DB.prepare(
     `UPDATE jobs SET status = 'claimed', claimed_by = ?2, claimed_at = ?3, lease_expires = ?4,
@@ -714,6 +755,12 @@ export async function resumeJob(
       approved: reason,
       lease_expires: expires,
       resumed_count: job.resumed_count,
+      // WHICH CLASS MATCHED, not merely that one did. A row saying "approved by policy"
+      // cannot be checked against the policy afterwards; one naming the class and what
+      // it matched can.
+      ...(policyMatch
+        ? { approved_by_policy: policyMatch.version, policy_class: policyMatch.klass, policy_detail: policyMatch.detail }
+        : {}),
     }),
   ]);
   return { ok: true, action: "resume", job };

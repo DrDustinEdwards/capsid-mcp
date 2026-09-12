@@ -349,5 +349,60 @@ starts writing to every repository on the roster.
 - [ ] Read the run summary and every attempt archive. They are written **before**
       the score arrives, so an attempt that was never scored still left a record.
 - [ ] Check the audit log for the loop's actor. One query answers what it did.
-- [ ] Look at the pull request. **Nothing is merged automatically**, and that is
-      the human gate rather than an oversight.
+- [ ] Look at the pull request. **Nothing is merged automatically while the
+      auto-merge policy is disabled, and it ships disabled.** That is the human
+      gate rather than an oversight. If it is ever enabled, what the Worker may
+      merge alone is `docs/policy/auto-merge.md`, and every merge it makes names
+      the policy version and every check that passed in the audit log.
+
+## 10. The nightly driver, one scheduled task per project
+
+`scripts/schedule-drivers.mjs` installs a Windows Task Scheduler task per project
+folder that runs `claude -p "/improve work"` at 04:00 America/Chicago and posts the
+run log to `<namespace>/jobs/nightly-<date>.md`.
+
+**Why a local task and not a cloud routine.** Ruled 2026-09-12 against a measured
+alternative, recorded in `capsid/autonomy-part3-routines.md`. A Claude Code cloud
+routine can only attach claude.ai connectors, and the registered Capsid connector
+points at `/mcp`, the OAuth path, which resolves to the single admin login. A nightly
+routine would therefore run the whole queue as the admin, holding every namespace and
+every blast-radius flag, which is the wide credential the per-namespace driver agents
+were minted to replace. There is also no verified way to hand a routine a secret. On
+this machine the per-namespace key files already exist, so the scheduler runs here and
+each task reaches Capsid as exactly one driver.
+
+It is off in two separate senses, and both are deliberate:
+
+```
+node scripts/schedule-drivers.mjs --list                            # what exists now
+node scripts/schedule-drivers.mjs --install                         # dry run, changes nothing
+node scripts/schedule-drivers.mjs --install --namespace capsid --apply
+schtasks /Change /TN "Capsid improve driver (capsid)" /ENABLE       # the separate act
+```
+
+Nothing is created without `--apply`, and a task that is created is created
+**disabled**. Enabling it is its own command, because installing a scheduler and
+switching on a nightly unattended agent are two different decisions and a setup script
+should not make the second one.
+
+Removing is the same shape:
+
+```
+node scripts/schedule-drivers.mjs --remove --namespace capsid --apply
+```
+
+Three things worth knowing before enabling one:
+
+- **The task does not carry a credential.** It runs the script, which runs `claude` in
+  that project folder, and the driver session gets its credential from the
+  project-scoped MCP server configured there. The key file is read only to post the run
+  log afterwards, and its value never reaches a log or a console.
+- **The log is posted even when the run fails.** The task invokes the script rather
+  than `claude` directly for exactly this reason: a session that died is the run whose
+  record matters most. A long transcript is trimmed to its tail.
+- **04:00 stays 04:00 across the daylight-saving switch**, because Task Scheduler takes
+  a local wall-clock time. The Worker's own cron needs two UTC expressions and
+  `chicagoHour()` to pin the same instant.
+
+A namespace with no `~/.capsid/agent-<ns>-driver.key` is skipped by name rather than
+scheduled on whatever credential happens to be configured.
