@@ -35,6 +35,22 @@ async function harness(opts: { runs?: Array<Record<string, unknown>>; budget?: s
     seed: {
       "improve:anchor:capsid": pin,
       improve_mode: "subscription",
+      // THE WATCHER IS NOT WHAT THESE TESTS ARE ABOUT, and it rides the same tick on
+      // its own half-hourly stamp. Seeded fresh so it is not due, which keeps the
+      // "an exceeded budget reached the network zero times" assertion below guarding
+      // exactly what it was written to guard: the improve RUN path. The watcher is
+      // deliberately outside the budget (it spends no model tokens and no CI minutes,
+      // and an exhausted budget is when nobody is looking at the surface), so folding
+      // it into that assertion would be asserting the opposite of the design.
+      //
+      // DERIVED FROM NOW AND STAMPED UTC, not typed. This was written as
+      // "2026-09-15 08:04:00" and passed on a workstation and failed in CI: V8 parses
+      // a space-separated timestamp as LOCAL time, so on America/Chicago it resolved
+      // to 13:04Z, AFTER this NOW, and the watcher was never due; on the UTC runner it
+      // resolved to 08:04Z, nearly four hours before, and the watcher ran and reached
+      // the network. The Worker itself only ever writes toISOString(), so this is the
+      // fixture matching production rather than a workaround.
+      "watcher:last": new Date(NOW.getTime() - 60_000).toISOString(),
       ...(opts.budget === undefined ? {} : { "improve:budget": opts.budget }),
     },
     seedToken: true,

@@ -1,0 +1,26 @@
+-- A REVIEWER BETWEEN THE DRIVER AND THE SEAT.
+--
+-- WHAT THIS IS FOR. A driver finishes, opens a pull request and blocks for the seat
+-- to merge. That is the right shape and it has one reader in it: the seat, deciding
+-- whether to merge from the diff alone. This column says a job's work is one where a
+-- second reader should look first.
+--
+-- WHY A COLUMN AND NOT A CONVENTION. The alternative is a driver remembering to wait,
+-- which is the party being reviewed deciding whether it is reviewed. The gate belongs
+-- on the row, checked by the Worker, so it holds whether or not the driver co-operates.
+--
+-- WHAT A REVIEW IS: a comment on the pull request whose body starts with REVIEW: and
+-- ends with APPROVE, CHANGES or BLOCK. Deliberately not a GitHub review approval: the
+-- reviewer agent holds can_comment_pr and nothing else, so a comment is the only mark
+-- it can leave, and reading the thing it can actually write keeps the credential
+-- narrow. src/review.ts is the parser and states why each rule is where it is.
+--
+-- CHANGES SPENDS A CORRECTION, from the same budget migrations/0016 opened. Sending
+-- work back for a rewrite is exactly the loop that cap exists to bound, and counting
+-- it separately would let a job go round forever as long as each turn was a review
+-- rather than a gate.
+--
+-- NOT IDEMPOTENT, like 0007, 0009, 0011, 0012 and 0016: wrangler runs each migration
+-- file exactly once and SQLite has no ADD COLUMN IF NOT EXISTS.
+
+ALTER TABLE jobs ADD COLUMN review_required INTEGER NOT NULL DEFAULT 0;

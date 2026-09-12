@@ -1,0 +1,25 @@
+-- THE RETRY CAP: two corrections, then a human.
+--
+-- WHAT THIS IS FOR. `resume` made a gate a pause rather than an ending (0007), and
+-- that is right. What it did not bound is the LOOP: a driver that blocks, is sent
+-- back, blocks again on the same thing, is sent back again, and blocks again is not
+-- making progress, and nothing in the queue noticed. Every individual resume was
+-- defensible, which is exactly why the composition needed a ceiling rather than a
+-- judgement call at each step.
+--
+-- WHY A THIRD COUNTER, beside resumed_count and blocked_count. Those two are
+-- HISTORY and are never reset: they answer "how many gates has this job hit" and
+-- "how many times has it come back". This one is a BUDGET, it is what the cap is
+-- measured against, and group 4's reviewer flow spends from the same budget when a
+-- CHANGES verdict sends the work back. Deriving the budget from the history would
+-- tie the cap to gates the job passed legitimately, and a job that cleared three
+-- real gates is not a job that is looping.
+--
+-- WHAT IT DOES NOT COUNT: an ADMIN resume. The cap exists to put a human at the
+-- boundary, so the human arriving is the thing that lifts it rather than the thing
+-- that spends it. An admin resume leaves this column where it was.
+--
+-- NOT IDEMPOTENT, like 0007, 0009, 0011 and 0012: wrangler runs each migration file
+-- exactly once and SQLite has no ADD COLUMN IF NOT EXISTS.
+
+ALTER TABLE jobs ADD COLUMN corrections_count INTEGER NOT NULL DEFAULT 0;

@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Agent } from "./agents";
-import { allowsScope, describeScope, type AgentGrant, type ScopeFlag } from "./agents-schema";
+import { allowsScope, allowsToolAction, describeScope, type AgentGrant, type ScopeFlag } from "./agents-schema";
 import { protectedHits } from "./improve-schema";
 
 // ONE ENFORCEMENT POINT. Every tool call, and every repo mutation inside one, is
@@ -98,6 +98,11 @@ export function requiredGrant(tool: string): ToolRequirement {
 
 export interface ScopeNeed {
   tool: string;
+  // The action, for a tool whose action decides what it does. Passed by the two
+  // "action" tools at the point where the action is known, and by nothing else.
+  // Present means the tools axis may narrow this call to the actions it names; see
+  // allowsToolAction in agents-schema.ts for the rule.
+  action?: string;
   // The namespace this call touches, when it names one. `undefined` means the call
   // does not name one; see namespaceRequired below for why that is not the same as
   // "allowed".
@@ -119,6 +124,7 @@ const FLAG_REASON: Record<ScopeFlag, string> = {
   can_write_workflows: "a workflow is what MEASURES the code, and a caller that can edit its own measurements has none",
   can_touch_protected: "a protected path is tests, CI, lint or compiler config, a lockfile, a manifest, the agent steering layer, or a migration",
   money_paths: "the path names a billing or payment surface",
+  can_comment_pr: "commenting on a pull request writes to a repo, and a reviewer that may comment must not thereby be able to merge or close",
 };
 
 // THE ONE CHECK. Returns a refusal naming the missing scope, or null.
@@ -128,8 +134,12 @@ const FLAG_REASON: Record<ScopeFlag, string> = {
 // its namespace is out of scope, which would leak which namespaces exist.
 export function checkScope(agent: Agent, need: ScopeNeed): string | null {
   const scopes = agent.scopes;
-  if (!allowsScope(scopes.tools, need.tool)) {
-    return `unauthorized: ${agent.actor} is not scoped to the '${need.tool}' tool. Its tool scope is ${describeScope(scopes.tools)}.`;
+  if (!allowsToolAction(scopes.tools, need.tool, need.action)) {
+    // The refusal names the QUALIFIED thing that failed. A watcher told it is "not
+    // scoped to the 'jobs' tool" after being minted with jobs in its list would go
+    // looking for the wrong bug.
+    const asked = need.action === undefined ? need.tool : `${need.tool}.${need.action}`;
+    return `unauthorized: ${agent.actor} is not scoped to the '${asked}' tool. Its tool scope is ${describeScope(scopes.tools)}.`;
   }
   if (need.grant && !scopes.grants.includes(need.grant)) {
     return (
@@ -263,6 +273,10 @@ export function repoWriteFlags(
   if (args.mode === "direct") flags.push("can_direct_write");
   if (args.allow_workflow_write === true) flags.push("can_write_workflows");
   if (tool === "manage_pr" && args.action === "merge") flags.push("can_merge");
+  // A COMMENT IS A WRITE, AND IT IS THE SMALLEST ONE THIS TOOL MAKES. Separated from
+  // can_merge rather than folded into it so the reviewer role can hold one without
+  // the other, which is the whole reason the role exists.
+  if (tool === "manage_pr" && args.action === "comment") flags.push("can_comment_pr");
   if (tool === "ci_dispatch") flags.push("can_dispatch");
   // THE SAME PROTECTED LIST THE IMPROVE LOOP ENFORCES (src/improve-schema.ts), not a
   // second copy of it. Those paths are what MEASURE a repo: its tests, its CI, its

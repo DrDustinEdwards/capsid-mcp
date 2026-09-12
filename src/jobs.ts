@@ -15,9 +15,14 @@ import {
   type JobStatus,
   type MinRecord,
   type RequiredScopes,
+  CORRECTION_CAP,
+  RETRY_CAP_REASON,
+  atCorrectionCap,
+  cappedSummary,
 } from "./jobs-schema";
 import type { Agent } from "./agents";
 import { approveByPolicy } from "./gate-policy";
+import { reviewGate, type ReviewOutcome } from "./review";
 import { outcomePrStatements } from "./outcome-prs";
 import { readRepoFile } from "./github/contents";
 import { signTaskBody, verifySignedBody } from "./improve-task";
@@ -163,6 +168,7 @@ export async function postJob(
     gate_required?: boolean;
     required_scopes?: Partial<RequiredScopes>;
     min_record?: MinRecord;
+    review_required?: boolean;
   }
 ): Promise<JobResult> {
   const actor = agent.actor;
@@ -206,14 +212,16 @@ export async function postJob(
     min_record: args.min_record?.prs_merged ? serializeMinRecord(args.min_record) : null,
     blocked_count: 0,
     resumed_count: 0,
+    corrections_count: 0,
+    review_required: args.review_required ? 1 : 0,
     created_at: now.toISOString(),
     updated_at: now.toISOString(),
   };
 
   const statements = [
     env.DB.prepare(
-      `INSERT INTO jobs (id, namespace, title, body, priority, status, posted_by, gate_required, required_scopes, min_record, created_at, updated_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, ?8, ?9, ?10, ?10)`
+      `INSERT INTO jobs (id, namespace, title, body, priority, status, posted_by, gate_required, required_scopes, min_record, review_required, created_at, updated_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, ?8, ?9, ?10, ?11, ?11)`
     ).bind(
       job.id,
       job.namespace,
@@ -224,6 +232,7 @@ export async function postJob(
       job.gate_required,
       job.required_scopes,
       job.min_record,
+      job.review_required,
       job.created_at
     ),
     ...(await mirrorStatements(env.DB, job, "job-posted", actor)),
@@ -233,6 +242,7 @@ export async function postJob(
       gate_required: job.gate_required,
       ...(job.required_scopes ? { required_scopes: job.required_scopes } : {}),
       ...(job.min_record ? { min_record: job.min_record } : {}),
+      ...(job.review_required ? { review_required: true } : {}),
     }),
   ];
   try {
@@ -508,6 +518,83 @@ export async function heartbeatJob(env: Env, agent: Agent, now: Date, id: string
   return holderTransition(env, agent, now, "heartbeat", id, { status: "claimed", lease_expires: leaseUntil(now) });
 }
 
+// THE REVIEW GATE, CONSULTED BY BOTH TRANSITIONS THAT HAND WORK ON.
+//
+// A gate on one of them would not be a gate: a driver that found `complete` refused
+// would simply `block` instead, and the bypass would look like ordinary use. So the
+// same function answers for both, and the answer is turned into a JobResult here so
+// the two cannot describe the same verdict differently.
+//
+// Returns null when the gate does not apply (no review_required, or no pull request),
+// which is the normal path for almost every job.
+async function reviewRefusal(
+  env: Env,
+  agent: Agent,
+  now: Date,
+  action: string,
+  id: string,
+  resultRef: string | null
+): Promise<JobResult | null> {
+  const current = await readJob(env.DB, id);
+  if (!current) return null;
+  // The reference this call is about, not only the one already stored: a driver
+  // completing with the pull request it just opened has it in its arguments.
+  const ref = resultRef ?? current.result_ref;
+  let outcome: ReviewOutcome | null;
+  try {
+    outcome = await reviewGate(env, { namespace: current.namespace, review_required: current.review_required, result_ref: ref });
+  } catch (err) {
+    // A GITHUB FAILURE HOLDS THE JOB, it does not wave it through. This gate exists to
+    // put a second reader in front of the seat, and an unreadable comment list is not
+    // evidence that one looked.
+    return refuse(
+      action,
+      `${id} needs a review and GitHub could not be read: ${err instanceof Error ? err.message : String(err)}. ` +
+        `The job stays claimed; try again rather than treating an unreadable review as an approval.`
+    );
+  }
+  if (outcome === null || outcome.kind === "proceed") return null;
+
+  if (outcome.kind === "waiting") {
+    return refuse(action, `${id} is ${outcome.reason} The job stays claimed and its lease keeps running.`);
+  }
+
+  // CHANGES and BLOCK both MOVE the job, so neither is a plain refusal: the row has to
+  // record what the reviewer said, or the next reader sees a job that stalled for no
+  // stated reason.
+  const { review } = outcome;
+  const said = review.said ? ` ${review.said}` : "";
+  if (outcome.kind === "rework") {
+    // BACK TO THE DRIVER, and it spends a correction from the same budget the retry
+    // cap bounds. A review sending work round forever is the loop that cap exists for,
+    // and counting it separately would exempt it.
+    const summary = `review by ${review.by}: CHANGES.${said}`;
+    const won = await env.DB.prepare(
+      `UPDATE jobs SET result_summary = ?2, corrections_count = corrections_count + 1, updated_at = ?3
+       WHERE id = ?1 AND status = 'claimed' AND claimed_by = ?4 RETURNING id`
+    )
+      .bind(id, summary, now.toISOString(), agent.actor)
+      .first<{ id: string }>();
+    if (!won) return refuse(action, `${id} moved between reading it and recording the review. Ask again.`);
+    const job = (await readJob(env.DB, id)) as JobRow;
+    await env.DB.batch([
+      ...(await mirrorStatements(env.DB, job, "job-review-changes", agent.actor)),
+      auditStatement(env.DB, agent.actor, "job-review-changes", job, {
+        verdict: review.verdict,
+        by: review.by,
+        at: review.at,
+        corrections_count: job.corrections_count,
+      }),
+    ]);
+    return { ok: false, action, job, refusal: `${summary} The job stays claimed: fix it and hand it on again. This spent a correction (${job.corrections_count} of ${CORRECTION_CAP}).` };
+  }
+
+  // HALT. Blocked for the seat, with the objection as the reason, through the ordinary
+  // block path so the gate counter and the mirror document behave exactly as they do
+  // for any other block.
+  return blockJob(env, agent, now, id, { reason: `review by ${review.by}: BLOCK.${said}`, fromReview: true });
+}
+
 export async function completeJob(
   env: Env,
   agent: Agent,
@@ -523,6 +610,8 @@ export async function completeJob(
   // the summary, and the row recorded nothing.
   const swallowed = swallowedParamTag(args.result_summary);
   if (swallowed) return refuse("complete", swallowedTagRefusal("result_summary", swallowed));
+  const review = await reviewRefusal(env, agent, now, "complete", id, args.result_ref ?? null);
+  if (review) return review;
   return holderTransition(env, agent, now, "complete", id, {
     status: "done",
     result_summary: args.result_summary,
@@ -616,13 +705,28 @@ export async function blockJob(
   agent: Agent,
   now: Date,
   id: string,
-  args: { reason: string; command?: string }
+  args: { reason: string; command?: string; fromReview?: boolean }
 ): Promise<JobResult> {
   if (!args.reason?.trim()) return refuse("block", "block needs a reason: what gate was hit.");
+  // THE GATE IS CONSULTED HERE TOO, because a gate on `complete` alone is one a
+  // driver bypasses by blocking instead. `fromReview` is set by the halt path below,
+  // which reaches this function to do the blocking: without it a BLOCK verdict would
+  // consult the review that produced it and recurse.
+  if (!args.fromReview) {
+    const review = await reviewRefusal(env, agent, now, "block", id, null);
+    if (review) return review;
+  }
   const summary = args.command ? `${args.reason}\n\n${RESUME_MARKER}\n\n    ${args.command}` : args.reason;
+  // THE CAP IS APPLIED WHERE THE BLOCK IS WRITTEN, so a capped job says so in the
+  // one field every reader already looks at: the console prints result_summary, the
+  // driver reads it to continue, and a human deciding reads it there too. The budget
+  // is read before the transition, because the transition is what makes this block
+  // the third one.
+  const current = await readJob(env.DB, id);
+  const capped = current !== null && atCorrectionCap(current.corrections_count);
   return holderTransition(env, agent, now, "block", id, {
     status: "blocked",
-    result_summary: summary,
+    result_summary: capped ? cappedSummary(summary) : summary,
     lease_expires: null,
     bumpBlocked: true,
   });
@@ -706,6 +810,19 @@ export async function resumeJob(
     return refuse("resume", `${actor} cannot resume ${id} ('${current.title}'): ${resumeShortfall} It stays blocked for a driver that can finish it.`);
   }
 
+  // THE RETRY CAP, CHECKED BEFORE ANYTHING IS SPENT. A job sent back twice already
+  // is one where each further correction has stopped being progress, and what to do
+  // next belongs to a person. An ADMIN is that person arriving, so an admin resume
+  // passes and does not spend the budget.
+  if (!agent.admin && atCorrectionCap(current.corrections_count)) {
+    return refuse(
+      "resume",
+      `${id} has been corrected ${current.corrections_count} times, which is the cap of ${CORRECTION_CAP}: ${RETRY_CAP_REASON}. ` +
+        `Every resume so far was defensible on its own, which is why the ceiling is counted rather than argued. ` +
+        `An admin caller may resume it; a driver or the seat may not.`
+    );
+  }
+
   const verdict = await verifySignedBody(env.IMPROVE_SCORE_SECRET, current.body, "job body");
   if (!verdict.ok) {
     await env.DB.prepare(
@@ -743,12 +860,16 @@ export async function resumeJob(
   }
 
   const expires = leaseUntil(now);
+  // AN ADMIN RESUME DOES NOT SPEND THE BUDGET, and the 0 or 1 is BOUND rather than
+  // interpolated for the same reason bumpBlocked is: the statement stays one static
+  // string that the source guards can read and the query-plan test can EXPLAIN.
+  const spend = agent.admin ? 0 : 1;
   const won = await env.DB.prepare(
     `UPDATE jobs SET status = 'claimed', claimed_by = ?2, claimed_at = ?3, lease_expires = ?4,
-       resumed_count = resumed_count + 1, updated_at = ?3
+       resumed_count = resumed_count + 1, corrections_count = corrections_count + ?5, updated_at = ?3
      WHERE id = ?1 AND status = 'blocked' RETURNING id`
   )
-    .bind(id, actor, now.toISOString(), expires)
+    .bind(id, actor, now.toISOString(), expires, spend)
     .first<{ id: string }>();
   if (!won) {
     return refuse("resume", `${id} left blocked between reading it and resuming it. Ask again.`);
@@ -761,6 +882,8 @@ export async function resumeJob(
       approved: reason,
       lease_expires: expires,
       resumed_count: job.resumed_count,
+      corrections_count: job.corrections_count,
+      ...(agent.admin ? { cap_lifted_by_admin: true } : {}),
       // WHICH CLASS MATCHED, not merely that one did. A row saying "approved by policy"
       // cannot be checked against the policy afterwards; one naming the class and what
       // it matched can.

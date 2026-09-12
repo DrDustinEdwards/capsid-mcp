@@ -32,6 +32,12 @@ export const SCOPE_FLAGS = [
   "can_write_workflows",
   "can_touch_protected",
   "money_paths",
+  // A REVIEWER WRITES ONE THING AND IT IS NOT CODE. Commenting on a pull request
+  // goes through manage_pr, which is a write tool, so a reviewer needs the write
+  // grant; without a flag of its own that grant would also let it merge and close.
+  // The flag is what makes "may say something about this PR" smaller than "may
+  // decide this PR". Added with the roles arc, 2026-09-12.
+  "can_comment_pr",
 ] as const;
 export type ScopeFlag = (typeof SCOPE_FLAGS)[number];
 
@@ -64,7 +70,7 @@ export function isAgentKind(value: unknown): value is AgentKind {
   return typeof value === "string" && (AGENT_KINDS as readonly string[]).includes(value);
 }
 
-function noFlags(): Record<ScopeFlag, boolean> {
+export function noFlags(): Record<ScopeFlag, boolean> {
   // Built fresh each time. A shared frozen object would be one mutation away from
   // handing every agent in the isolate a flag somebody set on one of them.
   const flags = {} as Record<ScopeFlag, boolean>;
@@ -134,6 +140,34 @@ export function serializeScopes(scopes: AgentScopes): string {
 // an entry.
 export function allowsScope(list: ScopeList, value: string): boolean {
   return list === "*" ? true : list.includes(value);
+}
+
+// THE SAME COMPARISON, FOR A TOOL WHOSE ACTION DECIDES WHAT IT DOES.
+//
+// The tools axis names tools, and for almost every tool that is the whole question.
+// `jobs` is the exception the watcher role exposed: one tool with a read action and
+// seven write ones, where "may post a job" and "may claim, complete and resume one"
+// are different authorities that the tool name cannot separate.
+//
+// So an entry may be QUALIFIED, `jobs.post`, and the rule is:
+//
+//   - "*" allows everything, so every agent minted before this change is untouched.
+//   - A list naming at least one action OF THIS TOOL is narrowed to the actions it
+//     names. Anything else of that tool is refused.
+//   - A bare tool name with no qualified sibling keeps meaning the whole tool, which
+//     is what it has always meant. Narrowing is opted into, never inherited.
+//   - The narrowing reaches ONLY the tool it names: `jobs.post` says nothing about
+//     `lint`.
+//
+// Kept beside allowsScope rather than in the enforcement point so the rule is one
+// pure function the tests can drive to every corner without an agent or a server.
+export function allowsToolAction(list: ScopeList, tool: string, action: string | undefined): boolean {
+  if (list === "*") return true;
+  if (!list.includes(tool)) return false;
+  if (action === undefined) return true;
+  const prefix = `${tool}.`;
+  const qualified = list.some((entry) => entry.startsWith(prefix));
+  return qualified ? list.includes(`${prefix}${action}`) : true;
 }
 
 // How a scope list reads in a refusal. A refusal that says "not in scope" without

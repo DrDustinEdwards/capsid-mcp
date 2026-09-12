@@ -356,6 +356,10 @@ async function blockedJob(command: string) {
     updated_at: "2026-09-12T00:00:00.000Z",
     resumed_count: 0,
     blocked_count: 1,
+    // A real row always carries this (migrations/0016, DEFAULT 0). Spelled here
+    // because atCorrectionCap FAILS CLOSED: a budget it cannot read is one it
+    // cannot bound, so an absent column refuses the resume rather than allowing it.
+    corrections_count: 0,
     required_scopes: null,
     min_record: null,
   };

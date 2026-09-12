@@ -4,6 +4,7 @@ import { autoMergeTick } from "../auto-merge";
 import { runEvaluationCycle } from "../skills-evaluate";
 import { sweepIfDue } from "../outcome-prs";
 import { expireJobLeases } from "../jobs";
+import { gatherFindings, watcherTick } from "../watcher";
 import { proposeChange, pushAttempt } from "../improve-attempt";
 import { pathMonitor } from "../improve-gates";
 import {
@@ -101,6 +102,17 @@ export async function tickRuns(env: Env, now: Date): Promise<TickOutcome[]> {
     if (cycle.ran) console.log(`SKILL_CYCLE ${cycle.note}`);
   } catch (err) {
     console.error(`SKILL_CYCLE_THREW: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // THE WATCHER rides this tick too, on its own half-hourly stamp, and is placed with
+  // the others for the same reason: it spends no model tokens and no CI minutes, and
+  // an exhausted improve budget is exactly when nobody is looking at the surface. It
+  // only ever POSTS A JOB, so the worst a broken pass can do is add a row to a queue.
+  try {
+    const watched = await watcherTick(env, now, () => gatherFindings(env, now));
+    if (watched.ran) console.log(`WATCHER ${watched.note}`);
+  } catch (err) {
+    console.error(`WATCHER_THREW: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   // THE MERGE-STATE SWEEP, daily, on its own stamp. Every outcome row records a pull

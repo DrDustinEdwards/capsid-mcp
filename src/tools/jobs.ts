@@ -40,6 +40,12 @@ export function registerJobTools(server: McpServer, ctx: ToolCtx): void {
         body: bounded(MAX_BODY).optional().describe('For post: the full prompt the driver executes. Signed on the way in.'),
         priority: z.number().int().optional().describe('For post: higher runs first. Defaults to 0.'),
         gate_required: z.boolean().optional().describe('For post: the work is known to need a human confirmation (a push, a deploy, a secret). The driver stops at it rather than discovering the gate halfway through.'),
+        review_required: z
+          .boolean()
+          .optional()
+          .describe(
+            "For post: this job's work needs a REVIEWER to speak before it reaches the seat. The driver cannot complete or block a job carrying a pull request until a comment on that pull request starts with 'REVIEW:' and ends with APPROVE, CHANGES or BLOCK. APPROVE hands it on as now; CHANGES sends it back to the driver and spends a correction from the retry cap's budget; BLOCK stops it for the seat with the objection as the reason. The newest review wins, since a reviewer is allowed to change its mind."
+          ),
         required_flags: z
           .array(z.enum(SCOPE_FLAGS))
           .optional()
@@ -99,7 +105,12 @@ export function registerJobTools(server: McpServer, ctx: ToolCtx): void {
         // EVERYTHING ELSE CHANGES THE QUEUE, so the grant is checked here rather than
         // at the registrar: `jobs` is one tool with a read action and seven write
         // ones, and the registrar cannot know which this call is.
-        const refusal = ctx.scope({ tool: "jobs", grant: "write", namespace: args.namespace });
+        //
+        // The ACTION goes with it, because the same fact that makes the grant
+        // uncheckable at the registrar makes the tools axis uncheckable there: a
+        // watcher scoped to `jobs.post` may post and may not claim, and only here is
+        // it known which of those this call is.
+        const refusal = ctx.scope({ tool: "jobs", action: args.action, grant: "write", namespace: args.namespace });
         if (refusal) return fail(refusal);
         switch (args.action) {
           case "post": {
@@ -115,6 +126,7 @@ export function registerJobTools(server: McpServer, ctx: ToolCtx): void {
                 gate_required: args.gate_required,
                 required_scopes: args.required_flags ? { flags: args.required_flags } : undefined,
                 min_record: args.min_record,
+                review_required: args.review_required,
               })
             );
           }
