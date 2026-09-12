@@ -16,263 +16,31 @@ Every write snapshots the prior version into `document_versions` and appends to 
 - R2: `MEDIA` for media, backups and reports; `HOLDOUT` for the loop's hidden test suites, bound separately so attempt code cannot reach it
 - KV, two separate namespaces: `APP_KV` for the Worker's caches, `OAUTH_KV` for the provider's clients, grants and tokens. They must not be the same namespace (see Clone setup)
 
-## Knowledge model
-
-Documents are typed. The model is Karpathy's LLM Wiki pattern: raw sources compiled into a maintained wiki.
-
-- `core` one always-loaded summary per namespace, read first
-- `concept`, `decision`, `note`, `spec`, `task`, `protocol`, `post`, `reference` compiled knowledge and content
-- `episodic` session summaries
-- `procedural` agent-updatable rules
-- `prompt` templates with `{{variable}}` placeholders
-- `source` raw, un-compiled input
-
-`write` validates the type against this list, so an off-schema type cannot escape the consolidation loop.
-
-Namespaces are projects, each mapped to its GitHub repo or repos in the `namespaces` table. The `namespaces` tool reports each namespace's count of unconsolidated `episodic` and `source` documents.
-
-## Auth model
-
-Every caller resolves to an **agent**: a name, a set of scopes, and its own audit identity. There is one enforcement point, `checkScope` in `src/scope.ts`. The registrar wraps every tool registration before any tool module runs, so a tool is covered by existing, and `TOOL_GRANTS` states what each tool requires.
-
-Scopes are five axes. `namespaces` and `repos` are a list or `*`. `tools` is an allow list or `*`. `grants` is read, or read and write. `flags` are the blast radius:
-
-| flag | what it gates |
-| --- | --- |
-| `can_merge` | merging a pull request, which can trigger a deploy on a repo that deploys on push |
-| `can_direct_write` | a `mode: "direct"` commit, which lands on a default branch with no review |
-| `can_dispatch` | dispatching a workflow, which spends CI minutes and runs code with that repo's secrets in scope |
-| `can_write_workflows` | writing under `.github/workflows/` |
-| `can_touch_protected` | tests, CI, lint and compiler config, lockfiles, manifests, the agent steering layer, migrations |
-| `money_paths` | a path naming a billing or payment surface |
-| `can_comment_pr` | commenting on a pull request, which is the smallest write `manage_pr` makes and is deliberately not `can_merge` |
-
-A new agent gets read on its named namespaces and no flags. Scopes are stored as JSON and the parse fails closed: a null, truncated or wrong-shaped column resolves to no namespaces, no tools, no grants and no flags.
-
-### Roles
-
-Roles are few and separated, and each one is a single capability rather than a bundle. `scripts/mint-agents.mjs` holds them; `node scripts/mint-agents.mjs --roles` prints a mint command for each, and a test fails the build if any role names a second blast-radius flag.
-
-| role | reads | writes | flag |
-| --- | --- | --- | --- |
-| `<ns>-driver` | its own namespace | its own namespace, pull requests only | none |
-| `auditor` | every namespace and repo | nothing at all | none |
-| `reviewer` | every namespace and repo | a comment on a pull request | `can_comment_pr` |
-| `watcher` | every namespace | `jobs.post`, and no other job action | none |
-| `seat` | every namespace | every namespace | `can_merge` |
-| `site-seat` | `dustinedwards` | `dustinedwards` | `can_merge` |
-
-The reviewer and the watcher both need the write grant, because commenting and posting a job both go through write tools. What keeps that from being a general write is the **tools axis, which may name an action**: an entry can be qualified, `jobs.post` or `manage_pr.comment`, and a list naming at least one action of a tool is narrowed to the actions it names. A bare tool name with no qualified sibling still means the whole tool, and `*` still allows everything, so no agent minted before this changes behaviour. The two tools whose action decides what they do (`jobs` and `lint`) pass the action to `checkScope` at the point where it is known, which is the same shape the grant check already uses.
-
-The `agents` tool is **admin only**, because an agent that could mint another could widen itself. `mint` returns a key once and stores only its sha256. `list` is the inventory, revoked rows included. `revoke` sets `revoked_at` rather than deleting, so rows an agent wrote still resolve to what it was allowed to do, while its key stops resolving immediately. `update_scopes` replaces named axes and leaves the rest.
-
-Audit rows and `jobs.claimed_by` record a minted agent as `agent:<name>`.
-
-Three kinds of caller resolve, in this order:
-
-1. **A minted agent**, matched on the sha256 of its bearer token. Checked first, so a key that is both an agent and an operator entry gets the narrower authority.
-2. **A legacy operator key**, until its hash is removed from `OPERATOR_KEY_HASH` by hand.
-3. **The OAuth admin session**, the synthetic agent `admin` with every scope.
-
-The operator hash has been removed from the roster machines. Every Claude Code session now runs as its folder's driver agent, and the admin OAuth session is the only wider credential.
-
-Two gated endpoints:
-
-1. **OAuth (`/mcp`)** for human clients. The client discovers the server via `.well-known`, registers dynamically, and goes through `/authorize` and a one-time approval screen to GitHub. On return the user is checked against `ADMIN_GITHUB_LOGIN`: your GitHub username, or your numeric user id (find it at `https://api.github.com/users/<login>`). Any other account gets a 403. The check runs again on every `/mcp` request. An admitted admin holds a full write grant.
-2. **Agent and operator keys (`/ops/mcp`)** for agents and cron, gated by sha256-hashed bearer keys. An agent key resolves to its row. Failing that, `OPERATOR_KEY_HASH` holds comma-separated hashes: a plain entry is a write key, an entry prefixed `ro:` is read-only and is denied write, delete, move, register_namespace, update_namespace, repo writes, PR management and lint finalize. Revoke by removing a hash; the others keep working. The OAuth library never sees this route.
-
-Login and repo access use two different GitHub credentials: an OAuth App for login (OAuth Apps cannot mint installation tokens) and a GitHub App for repo access. Keep both.
-
-`register_namespace` returns the command that mints the new namespace's driver agent, `node scripts/mint-agents.mjs --namespace <ns> --apply`. It does not mint it: minting is admin only, and `register_namespace` takes a plain write grant.
-
-## Repo access
-
-Capsid reaches your repositories through a dedicated GitHub App. The Worker mints a short-lived installation token (an RS256 JWT signed with Web Crypto, exchanged for an installation access token, cached in KV), so no long-lived token is stored. Repos resolve from the `namespaces` table.
-
-A namespace can map to several repos, each with a label (for example `primary` and `legacy`). Every repo tool takes an optional `repo` parameter, a label or a mapped `owner/name`, defaulting to `primary`. An unmapped repo is rejected, so the namespace mapping is the authorization boundary.
-
-- **Read**: `list_repo_tree`, `read_repo_file`, `search_code`, `repo_refs`, `repo_history`, `ci_status`
-- **Write**: `write_repo_file`, `create_branch`, `delete_branch`, `open_pr`, `delete_repo_file`, `manage_pr`, `ci_dispatch`
-
-`write_repo_file` defaults to `mode: "pr"` (commit to a new branch, open a pull request); `mode: "direct"` commits to the default branch and needs `can_direct_write`. `manage_pr` merges (squash by default) or closes a pull request, and deletes the head branch when it is safe.
-
-`search_code` is a server-side tree walk (a recursive Git Trees listing, then bounded content scans), not GitHub's code search API, which returns empty results for private repositories under an App installation token. Use `path_prefix` to narrow large repos.
-
-## Consolidation (lint)
-
-The `lint` tool runs the wiki maintenance loop. The Worker never calls an LLM; the driving client does the reasoning with the ordinary read and write tools.
-
-- `lint(namespace, mode: "gather")` returns a read-only packet: the namespace `core.md`, the compiled `concept` and `decision` documents, every un-archived `episodic` and `source` document, and the schema and conventions.
-- `lint(namespace, mode: "finalize", consumed: [paths])` archives the consumed entries under an `archive/` prefix and writes one audit row. It moves and never deletes, and `gather` excludes `archive/`, so the loop is idempotent.
-
-## Work queue
-
-The queue hands a task from a chat that has no shell to a session that has no conversation. A job is a title plus a body, and the body is the full prompt a driver executes. `jobs` carries the lifecycle: `post`, `claim`, `heartbeat`, then `complete`, `fail`, `block` or `resume`. The seat merges; drivers never hold `can_merge`.
-
-- **Bodies are signed**, with the same key and envelope as the loop's task documents. `claim` verifies the body first, and one edited after signing is marked failed rather than left queued. A job is executable input arriving as a database row, and the driver is a session holding local shell and repo credentials.
-- **Leases, not locks.** A claim runs four hours; a five-minute tick returns an expired one to the queue. One claim per caller across every namespace.
-- **A job can require flags.** `post` takes `required_flags`, stored in `jobs.required_scopes`. A claim by an agent lacking them is refused and the job stays queued.
-- **Blocked is a pause.** A job reaching a push, a deploy, a secret, a live migration or a merge stops and is blocked with the exact command a human must run. Blocked jobs surface in `improve_status` with that command, with how many gates the job hit and how many times it came back. `resume` then returns it to a holder with a fresh lease, records what was approved, and re-verifies the signature. Any write-grant caller may resume, since the seat that approves is routinely not the session that blocked.
-- **A job can require a track record.** `post` also takes `min_record` (`{prs_merged: n}`), stored in `jobs.min_record`. `required_flags` asks what a driver is permitted to do; this asks what it has already done, measured against the same agent record the console shows. A claim below the bar is refused and the job stays queued.
-- **`complete` takes a `result_ref`**, a document key or a pull request URL, and an optional `evidence` object (`prs`, `commits`, `files_changed`, `tests_added`).
-- **Finishing a job writes one row of evidence.** `complete` and `fail` each write a single `job_outcomes` row, and the Worker never stores a count it could check and did not: every pull request named in `evidence` is read from GitHub, so the merge, commit and file counts recorded are GitHub's rather than the driver's, and the last one's head commit is checked for a CI conclusion. A per-field `verified` flag says which numbers were checked, a field nobody reported is `NULL` rather than `0`, and the row is written once, enforced by its primary key. An unreachable GitHub costs the verified flags, never the driver's ability to close finished work.
-- **Agent records are built from those rows.** `improve_status` and the console carry a record per credential: jobs done, failed and blocked, gates hit and resumes, pull requests opened and merged, a merge rate, a CI green rate and a median duration. Counts and rates only, never a composite score, and only a verified field feeds a rate, since a rate built from what a credential said about itself is a credential grading its own work. A rate with no denominator is `null`, not zero.
-- **Two corrections, then a human.** `resume` makes a gate a pause rather than an ending, and `corrections_count` is what bounds the loop that opens: a driver sent back twice has spent the budget, and the third hand-off is refused for a driver AND for the seat, with `retry cap; human decision required` written into the summary above whatever the driver said. Only an **admin** resume passes at the cap, and it does not spend the budget, because the human arriving is what lifts it rather than what spends it. The counter is separate from `blocked_count` and `resumed_count`, which are history and count every gate a job legitimately passed.
-- **A reviewer, when a job asks for one.** `post` takes `review_required`. The driver then cannot complete or block a job carrying a pull request until a comment on it starts with `REVIEW:` and ends with `APPROVE`, `CHANGES` or `BLOCK`. APPROVE hands it on as it would with no reviewer; CHANGES sends it back to the driver and spends a correction; BLOCK stops it for the seat with the objection as the reason. The newest review wins, since a reviewer that watched a fix land is allowed to change its mind. A comment rather than a GitHub review approval, because the reviewer holds `can_comment_pr` and nothing else: reading the mark that credential can actually leave is what keeps it narrow. Both transitions consult it, because a gate on one is one the other bypasses, and an unreadable GitHub holds the job rather than reading as an approval.
-- **The table is the source of truth for status.** Every job mirrors to `<namespace>/jobs/<id>.md`, rewritten in the same batch as each transition, so `brief` and `search` see the queue. Every transition is a keyed `UPDATE ... RETURNING`, so one caller wins a contested job.
-
-The driver is the `/improve work` command in Claude Code: it resumes a cleared gate, claims one job, does it in that namespace's clone under that repo's rules, and reports back.
-
-**One driver session per project folder.** The bearer token is fixed when the MCP server is configured, so a session holds one credential and works one namespace. Each repo folder configures its own from `~/.capsid/agent-<ns>-driver.key`. `/improve work all` therefore does not walk the portfolio on one credential: run from the `dev` folder it reports which repo folders have queued jobs, and each is launched separately.
-
-## Autonomy
-
-What the machine may do with no human in the loop. Both policies ship **disabled**, and
-each one lives in two places: a reviewable file in `docs/policy/`, and the copy the
-Worker actually reads, a signed document in the store. An unsigned copy, or one edited
-after signing, authorizes nothing.
-
-**Auto-merge** (`docs/policy/auto-merge.md`, read from `capsid/policy/auto-merge.md`).
-The five-minute tick walks every open pull request on the namespaces the policy names
-and merges only those that pass all seven checks, evaluated in order, each refusing on
-its own:
-
-| check | what it requires |
-| --- | --- |
-| `body_names_job` | the PR body carries the id of the job the work came from |
-| `author_is_driver` | that job was claimed by a minted, unrevoked agent of kind `driver` |
-| `base_is_default_branch` | the PR targets the repo's default branch |
-| `ci_green` | every check run on the head sha completed and concluded success, skipped or neutral, and at least one reported |
-| `paths_unprotected` | no changed path matches `PROTECTED_PATH_PATTERNS`, the list the loop enforces |
-| `paths_not_money` | no changed path names a billing or payment surface |
-| `no_migration_workflow_lockfile` | no changed path is a migration, a workflow or a lockfile |
-
-The document names the checks and the code enforces them: a check the Worker runs that
-the document does not name is refused at load time, and a test asserts the two agree in
-both directions. A pull request failing any check is left open, audited with the check
-that refused it, and reported under `improve_status` as awaiting the seat.
-
-**Pre-approved gates** (`docs/policy/gates.md`, read from `capsid/policy/gates.md`). A
-driver that reaches a push, a migration or a pull request blocks with the exact command,
-and every one of those waits on a person. This policy lets the seat send a bounded one
-back in itself: `jobs` action `resume` with `approved_by_policy` set to the document's
-version, refused unless the blocked command matches one of three classes.
-`additive_migration` is a `wrangler d1 execute` naming a `--file` under `migrations/`
-whose every statement is `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ... ADD COLUMN` or
-`CREATE INDEX`, with an unrecognized statement form a refusal rather than a pass.
-`push_branch` is a `git push origin <branch>` for a branch that is not `master` or
-`main`, with no force flag. `open_pr` is a `gh pr create`. A never-list is checked over
-the whole command before any class is tried: secrets, revocations, force pushes, pushes
-to a default branch, `wrangler deploy` and `rollback`, mode changes, drops and deletes,
-and merging a pull request, which stays the human's gate. The audit row records which
-class matched and what it matched on.
-
-**Signing is admin only.** `improve_run` action `sign_policy` signs the body **already
-stored** rather than any body the caller supplies, only in the `capsid` namespace and
-only under `policy/`, and a minted agent is refused outright. Turning a policy on is
-therefore two deliberate acts: editing the document, which is on the ordinary write
-tool's refusal list and needs `allow_improve_paths` plus `can_touch_protected`, and
-signing it again afterwards.
-
-**The nightly driver runs on this machine, not in the cloud.** `scripts/schedule-drivers.mjs`
-installs one Windows Task Scheduler task per project folder, each invoking `/improve work`
-in that folder at 04:00 America/Chicago, so each task reaches Capsid as exactly one
-driver agent from its own `~/.capsid/agent-<ns>-driver.key`. A Claude Code cloud routine
-was measured and rejected: a routine can attach only claude.ai connectors, the registered
-Capsid connector points at `/mcp`, the OAuth admin path, and there is no verified way to
-hand a routine a secret, so a nightly routine would run the whole queue on the wide
-credential the driver agents were minted to replace. The scheduler is off twice over:
-nothing is created without `--apply`, and an installed task is created disabled.
-
-## Self-improvement loop
-
-An optional nightly loop that proposes one scoped change at a time to a small roster of repos, has each repo's own CI score it, and keeps only what improved the repo without regressing it. It is **off by default**, and every machine-authored change arrives as a pull request a human merges.
-
-- **Modes.** `subscription` has the Worker write a task document for a session to run, so it calls no model itself. `api` calls the model directly. `off` is the default, and any unreadable or unexpected setting falls back to it.
-- **Cadence.** A nightly opener (a Cron Trigger at 03:00 America/Chicago) starts a run per eligible namespace; a five-minute tick advances any run in flight.
-- **Scoring runs in two jobs, and the second never puts attempt code on the runner.** `build` checks out the attempt branch and runs that repo's build, tests, lint and bundle measurement with no credential in its environment. `score` checks out the default branch only and runs the hidden holdout suite in a network-less, read-only container with the attempt mounted read-only, reading results from its stdout pipe. `score` is byte-identical across all five roster repos; only `build` differs. `scripts/sync-scorer.mjs` re-copies it and its dry run verifies the copies match.
-- **No long-lived scoring credential.** The score job asks the Worker for a one-hour, object-read-only credential scoped to that namespace's `HOLDOUT` prefix, minted per run and signed with the same per-namespace key as the score report.
-- **Keep or revert.** A change that regresses a pinned anchor metric, or fails to improve the weighted score, is reverted; one that improves it opens a pull request. Anchors are checksummed and pinned, and a mismatch refuses every run for that namespace until a human re-pins.
-- **Protected paths.** Tests, CI configuration, lockfiles, manifests, compiler and lint config, migrations, the agent steering layer and the loop's own files are off limits to an attempt, enforced by a deterministic path guard. These files define the score; an attempt may not change what scores it.
-- **Budget, pause and one driver.** Monthly caps on estimated model spend and CI minutes stop the loop when exceeded. A per-namespace pause key holds that namespace until a human clears it. In subscription mode a KV driver lease (six-hour TTL) keeps two sessions off one namespace.
-
-`improve_status` reports the mode, the budget, the protected-path patterns, the agent inventory and each namespace's state, including queued and blocked jobs. `improve_run` starts or resumes a run by hand.
-
-## Skills
-
-The loop abstracts an idea from work that landed and offers it back to other projects.
-
-**A skill package is layered, and the Worker reads the layers separately.** The declared
-fields (trigger condition, namespaces, termination test, composition interface) live on
-the `improve_skills` row as well as in the repo's `SKILL.md` frontmatter, so the Worker
-matches a trigger and enforces a status without cloning a repository. The instruction
-body is a document, and it is what an edit is measured and bounded against. The repo
-copy is the reviewable source; the stored copy is what the machine acts on, the same
-split the policy documents use.
-
-**The lifecycle is three states.** Every skill starts `candidate`, including one
-abstracted from an attempt that was kept, since being born of a success says nothing
-about whether the written form helps anybody else. A candidate goes `live` on two
-positive evaluations; a live skill goes `retired` on two consecutive non-positive ones.
-Retired rows stay, with their record, so the same idea is not abstracted twice from the
-same source.
-
-**A status changes on evaluation evidence and never on a driver's report of its own
-run.** Two evaluations minimum in either direction: one result is a sample. Evidence
-counts per version and per probe set, so an accepted edit resets it. Edits are bounded
-at 20 percent of the instruction lines, counted by distinct lines touched, and accepted
-only on strict improvement; a tie is a rejection. Rejected edits are kept in
-`skill_edits` and handed to the next optimizer run, so a proposal already refused is not
-proposed again.
-
-**A skill is credited only when it was used and the verifier reported success**, so an
-offered-and-ignored skill and a run that died on the environment both earn nothing.
-Offered and used are both stored on `job_outcomes`, because the gap between them is its
-own measurement.
-
-**Failure notes are memory rather than a second score.** `skill_failures` carries a note
-per reverted attempt and failed job, linked to the skills in use at the time, and the
-recommend step attaches the two most recent for each skill it offers. Nothing there
-moves a status.
-
-**Two live skills whose triggers overlap and whose bodies differ by less than 10 percent
-are proposed for merging**, to a human. Only live skills: a candidate has not earned its
-place and a retired one is a record.
-
-**The evaluation cycle is fortnightly**, KV-configurable under
-`skills:evaluate:cadence-days` and riding the five-minute tick, which gates on the
-cadence before doing anything else. Each cycle runs the namespace's probe set in the
-scorer sandbox twice per skill, with it and without it, and records the difference. A
-cadence below one day falls back to the default rather than being obeyed.
-
-**The console carries a skills panel per namespace**: counts by status, the last
-evaluation, and the offered-to-used rate, which is the number a reader cannot compute
-from the others.
-
-Full model: `docs/schema.md`, under Skill records.
-
-## Console
-
-One page at `/console` that answers "what is the state of every namespace" without asking a chat. It renders what `improve_status` and `jobs` already compute, so the page and the tools cannot disagree.
-
-- **Who gets in.** The GitHub admin session, and nothing else. The console rides the same GitHub OAuth app and the same single-admin check as the MCP flow, and turns the result into a signed cookie that lasts twelve hours. An operator key or an agent key gets a 403 that says so: those authenticate to `/ops/mcp`, and answering them with a login redirect would send a machine to GitHub.
-- **What it shows.** A header with the deployed sha, the schema version, the backup age, the month's spend against its caps and the improve mode. Then one row per namespace: the pause reason if any, whether the anchor block is pinned, the last run's attempts, kept and reverted, the four job counts, the truth report's integrity percentage, and the driver agent's last_seen. **A blocked job prints the exact command it is waiting on**, so the reader knows what to run.
-- **The agents panel** lists every credential with its kind, namespaces, flags held, last_seen and revoked state, beside what it did: jobs done, failed and blocked, pull requests opened and merged, and for a driver, its namespaces' attempts kept and reverted. A **verified** column carries the three numbers this Worker checked against GitHub itself, merge rate, CI green rate and median duration, kept separate from the counts the store wrote; a dash means there was nothing to divide by. Counts and rates only. No composite score.
-- **Recent activity** is the last 50 audit rows, filterable by namespace and by actor.
-- **Six controls**, each a POST with a CSRF token and a confirmation step that states what is about to happen before anything changes: pause, unpause, set the mode, resume a blocked job with the approval reason, mark a job failed, revoke an agent. Every one goes through the same function the MCP tool calls and writes its own audit row naming the person who clicked.
-- **It never merges and it never mints.** Merging can start a CI deploy in two of these repos, so that stays with `manage_pr` behind a caller holding `can_merge`; minting hands out a key, so that stays with the `agents` tool. Neither is in the console's action list, and a test asserts their absence.
-- **`GET /console.json`** serves the same object the page renders, so a dashboard or a chat reads the state without scraping.
-
-The page is self-contained: no scripts, no external fonts, one inline stylesheet, and a CSP that denies everything by default. Light and dark come from `prefers-color-scheme`.
-
-## The watcher
-
-A half-hourly step on the five-minute tick that reads the surface and, when something is wrong, **posts a job**. That is all it does: it holds no blast-radius flag, it is scoped to `jobs.post`, and it cannot claim what it posts or fix what it found.
-
-- **What it reads.** `/health` against master (degraded store, a deployed sha that is not master head, a backup older than the window or that never ran, a live schema behind the newest migration); `improve_status` (a pause the loop set itself, a monthly cap over 80 percent); blocked jobs older than a day; and CI on each roster repo's default branch, red for more than two hours.
-- **A healthy surface posts nothing**, and a pause a human set is not a finding. A watcher that cried every half hour would be muted inside a week, and the queue would still look watched.
-- **Deduplication is the queue's own rule.** The finding's fingerprint goes in the job title, and `post` already refuses a duplicate while one is open, so a finding posts once and stays posted until it clears. A finding that stops being found has its job failed with `cleared`, keyed on `queued` so a job a driver has claimed is never closed underneath it.
-- **Cadence** is `watcher:cadence-minutes` in `APP_KV`, 30 by default, with a floor of 5. It rides the tick before the budget check, with the lease sweep and auto-merge, because it spends no model tokens and no CI minutes and an exhausted budget is exactly when nobody is looking.
+## How it works
+
+- **Memory.** Documents are typed (`core`, `concept`, `decision`, `task`, `episodic`, `procedural`, `prompt`, `source` and more), stored in D1 with FTS5 search, and grouped into namespaces that map to GitHub repos. `write` validates the type, so an off-schema document cannot escape the consolidation loop. Full model: [docs/schema.md](docs/schema.md).
+- **Agents.** Every caller resolves to an agent with its own key, scopes and audit identity, through one enforcement point. Scopes are five axes, and the blast-radius flags (merge, direct write, dispatch, workflows, protected paths, money paths) are held one at a time by separate roles.
+- **Repo access.** A dedicated GitHub App mints short-lived installation tokens, so the Worker reads and writes your repositories with no long-lived credential stored. The namespace mapping is the authorization boundary.
+- **The work queue.** A job hands a task from a chat that has no shell to a session that has no conversation. Bodies are signed, claims take a four-hour lease, and a job reaching a push, a deploy or a merge blocks with the exact command a human runs.
+- **The self-improvement loop.** An optional nightly loop proposes one scoped change at a time, has each repo's own CI score it against hidden tests, and opens a pull request only for changes that improved the repo without regressing an anchor. Off by default, and it never merges.
+- **The console.** One admin page at `/console` showing every namespace: pauses, job counts, the command each blocked job waits on, the agent inventory and recent activity. It renders what the tools already compute, so the page and the tools cannot disagree.
+- **Backups.** A daily cron exports every table to R2 as JSON plus a markdown mirror of every document body, pulled off-account daily. Restore is documented and rehearsed weekly against a scratch database.
+- **An audit trail under all of it.** Every write snapshots the prior version into `document_versions` and appends to `audit_log`, and every destructive write asks for confirmation first.
+
+## Documentation
+
+- [docs/auth.md](docs/auth.md) the agent model, the five scope axes, the roles, and the two gated endpoints
+- [docs/repo-access.md](docs/repo-access.md) how the GitHub App token flow works and which tools read and write repos
+- [docs/work-queue.md](docs/work-queue.md) the job lifecycle, signing, leases, gates, evidence and agent records
+- [docs/autonomy.md](docs/autonomy.md) auto-merge, pre-approved gate classes, the nightly driver and the watcher
+- [docs/improve.md](docs/improve.md) the self-improvement loop: how it runs, and what stops it moving its own goalposts
+- [docs/skills.md](docs/skills.md) how an idea abstracted from work that landed is offered to other projects
+- [docs/console.md](docs/console.md) what the admin page shows, who gets in, and what it deliberately cannot do
+- [docs/consolidation.md](docs/consolidation.md) the wiki maintenance loop, and the confirmation step on destructive writes
+- [docs/backups.md](docs/backups.md) what the daily dump contains, and three restore paths in the order to try them
+- [docs/rollback.md](docs/rollback.md) serving the previous Worker version when a deploy shipped a bad one
+- [docs/schema.md](docs/schema.md) the knowledge model, the document types and the tables
+- [docs/bootstrap.md](docs/bootstrap.md) minting agents and removing the operator key
 
 ## Endpoints
 
@@ -288,73 +56,6 @@ A half-hourly step on the five-minute tick that reads the surface and, when some
 - `POST /token`, `POST /register` token exchange and dynamic client registration (served by the library)
 - `GET /.well-known/oauth-authorization-server` and `GET /.well-known/oauth-protected-resource` discovery metadata (served by the library)
 - `GET /health` no auth. Reports deploy provenance (git sha, whether the tree was dirty, build time) and probes the store: `SELECT 1` against D1 plus an FTS5 MATCH pinned to one known document. Either probe failing returns 503 with `status: "degraded"` and a `store` object naming which one, because a Worker whose bindings resolved to nothing starts normally and would otherwise answer `ok` while every read tool errors
-
-## Destructive writes need confirmation
-
-`delete`, `move`, `restore`, `lint` finalize, and any `write` that would overwrite an existing document ask for confirmation first. When the client supports [MCP elicitation](https://modelcontextprotocol.io/specification/draft/client/elicitation), the server sends an elicitation request and proceeds only on an explicit accept. Most Streamable HTTP clients run stateless and cannot answer server-initiated requests, so the tool rejects and you re-run it with `confirm: true`. Creating a new document never needs confirmation.
-
-Every delete and overwrite snapshots the prior row into `document_versions` first, whatever happened at the confirmation step.
-
-## Security
-
-Several independent audits have run against this surface. What they produced is in the code: path traversal closed on every document path, OAuth consent bound to the exact redirect it was granted for, the scorer isolated so attempt code never runs beside a credential, protected paths enforced by a deterministic guard, an Origin allowlist on the browser-facing routes, and a replay cache keyed by a database primary key rather than a read-then-write. Each fix ships with a test observed failing against the code it replaced. The audits live in Capsid, not in this repository.
-
-## Backups
-
-D1 Time Travel already provides 30-day point-in-time recovery, so backups here are for longer retention and portability.
-
-A daily Cron Trigger (09:00 UTC) exports the database to `MEDIA`:
-
-- `backups/json/<timestamp>/<table>.json` one JSON dump per table (`TABLES` in `src/backup.ts` is the list). Retention treats the run: kept for 90 days, the 14 most recent runs always kept whatever their age, and a run that ages out is deleted whole.
-- `backups/markdown/<namespace>/<path>` a plain-markdown mirror of every document body, one file per document, tracking current state (files for deleted documents are pruned).
-
-After each export, `document_versions` rows older than 90 days and `audit_log` rows older than 180 are pruned. Pruning runs after the export, so every pruned row exists in at least one retained dump.
-
-A private `capsid-backups` repository pulls the latest JSON dump daily, so the dumps survive loss of the whole Cloudflare account.
-
-Run one on demand with a write-grant key (read-only keys are refused):
-
-```
-curl -X POST https://capsid.<your-subdomain>.workers.dev/ops/backup -H "Authorization: Bearer <key>"
-```
-
-## Restore
-
-Three paths, in the order to try them. Path 2 has been executed end to end against a scratch database: all table counts matched the source and search worked on the restored copy. `restore-rehearsal.yml` exercises the per-table form weekly, rebuilding the newest R2 dump into a fresh FTS5 database, documents first.
-
-1. **D1 Time Travel** (last 30 days, fastest), for fat-finger recovery or a bad bulk change. Run `wrangler d1 time-travel info capsid`, then `wrangler d1 time-travel restore capsid --bookmark=<bookmark>`. This rewinds the live database in place, so take a fresh bookmark first to keep the restore reversible.
-
-2. **Table-scoped export and import**, for rebuilding into a new database. `wrangler d1 export` fails outright here, because D1 cannot export databases with FTS5 virtual tables. Export the real tables individually and data-only, taking the schema from the migrations:
-
-   ```
-   wrangler d1 export capsid --remote --no-schema --table <table> --output export-<table>.sql
-   ```
-
-   There are seventeen real tables: `documents`, `namespaces`, `document_versions`, `audit_log`, `document_links`, the four improve-loop tables `improve_scores`, `improve_attempts`, `improve_runs` and `improve_skills` (`migrations/0003_improve.sql`), `jobs`, the work queue (`migrations/0006_jobs.sql`), `job_outcomes`, what each finished job produced (`migrations/0011_job_outcomes.sql`), `agents`, the scoped credentials (`migrations/0008_agents.sql`), `improve_jti`, the signed-request replay cache (`migrations/0004_improve_jti.sql`), and `skill_evaluations`, `skill_edits` and `skill_failures`, the skill lifecycle's evidence (`migrations/0012_skill_records.sql` and `migrations/0013_skill_attribution.sql`), and `job_outcome_prs`, which pull requests an outcome counted (`migrations/0015_outcome_prs.sql`). `TABLES` in `src/backup.ts` is authoritative, derived-checked against `migrations/` by `test/backup.test.ts`. Never export `documents_fts` or its `documents_fts_*` shadow tables: FTS5 derives them from `documents`, and they are what makes a whole-database export fail.
-
-   Create the new database and apply every migration in order: `0001_init.sql`, `0002_document_links.sql`, `0003_improve.sql`, `0004_improve_jti.sql`, `0005_query_plan_indexes.sql`, `0006_jobs.sql`, `0007_jobs_resume.sql`, `0008_agents.sql`, `0009_jobs_required_scopes.sql`, `0010_console_indexes.sql`, `0011_job_outcomes.sql`, `0012_skill_records.sql`, `0013_skill_attribution.sql`, `0014_skill_status_index.sql`, `0015_outcome_prs.sql`, `0016_jobs_retry_cap.sql`, `0017_jobs_review.sql`. Stopping early leaves later tables missing for the import to land in, and a column the code reads absent from a table that does exist. Then execute the exports with `documents` first: importing it fires the FTS sync triggers, so `documents_fts` rebuilds itself. The rest have no triggers and no foreign keys, so their order does not matter. Verify with count queries against both databases and one MATCH query on the new one, then point `wrangler.jsonc` at the new `database_id` and deploy.
-
-3. **The R2 JSON dump**, beyond the 30-day Time Travel window. Wrangler cannot list R2 objects, so take the exact keys from the Cloudflare dashboard or the `json_keys` field of a `/ops/backup` response, then fetch each: `wrangler r2 object get capsid-media/backups/json/<timestamp>/<table>.json --file <table>.json`. Convert each object's `rows` to INSERT statements and follow path 2 from the create step, `documents` first. The same dumps are mirrored off-account in `capsid-backups`, so this path works if the Cloudflare account is gone. The `backups/markdown/` mirror is the last-resort human-readable copy: bodies only, no metadata.
-
-   **A dump run is more than tables.** Two underscore-prefixed sidecars ride beside them and neither is D1, so a restore that rebuilds the database and stops is incomplete:
-
-   - `_kv.json` holds the loop's control pins, by allowlist: `improve_mode`, `improve:budget`, `improve:meta:last`, `backup:last-ok`, and per roster namespace its best record, pause reason and anchor checksum. Put them back with `wrangler kv key put` before turning the loop on, or every namespace runs unanchored. Deliberately not a prefix sweep of `APP_KV`: that namespace also holds cached GitHub installation tokens, and a dump leaves the account.
-   - `_holdout-manifests.json` holds each namespace's hidden-suite count, never a test. Without it every namespace scores as "no holdout manifest", which the scorer refuses.
-
-   The dump is written as a single D1 batch, so its tables describe one instant. `scripts/restore-rehearsal.mjs` checks that weekly and refuses a torn one.
-
-Recovering one document rarely needs any of this: read its latest `document_versions` snapshot back.
-
-## Rollback
-
-Restore is about data. Rollback is about code: a deploy shipped a bad Worker and the fix is to serve the previous version now.
-
-```
-npx wrangler deployments list
-npx wrangler rollback [<version-id>]
-```
-
-With no id it reverts to the immediately previous deployment; pass a version id to go further back. It swaps the Worker script and that version's bindings and vars only. It does not touch D1, R2 or KV data, and it does not change `master`: the next push redeploys `HEAD` through CI and supersedes the rollback. Afterwards `/health` reports the rolled-back sha, so the scheduled live gate (which asserts `/health` sha equals master head) goes red until the fix ships. That red is correct: production is deliberately behind master.
 
 ## Clone setup
 
@@ -454,6 +155,10 @@ Two more shipped on 2026-09-12. **Autonomy** (PR #24): auto-merge by signed poli
 One item left: **the experiment scheduler**, once the loop has real nights behind it.
 
 **Three switches, all off by default, each turned on separately.** The loop runs only when `improve_mode` in `APP_KV` is set to `subscription` or `api`, by `improve_run` action `mode`; anything unreadable or unexpected falls back to `off`. Auto-merge and pre-approved gates run only when their policy document's `enabled` field is `true` **and** the document has been signed again afterwards with `improve_run` action `sign_policy`, which is admin only; editing without re-signing leaves the policy authorizing nothing. The nightly driver exists only after `node scripts/schedule-drivers.mjs --install --namespace <ns> --apply`, and the task it creates is disabled until it is enabled by hand.
+
+## Security
+
+Several independent audits have run against this surface. What they produced is in the code: path traversal closed on every document path, OAuth consent bound to the exact redirect it was granted for, the scorer isolated so attempt code never runs beside a credential, protected paths enforced by a deterministic guard, an Origin allowlist on the browser-facing routes, and a replay cache keyed by a database primary key rather than a read-then-write. Each fix ships with a test observed failing against the code it replaced. The audits live in Capsid, not in this repository.
 
 ## License
 

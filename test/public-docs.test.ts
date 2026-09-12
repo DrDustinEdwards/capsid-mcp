@@ -24,11 +24,36 @@ const ROOT = join(import.meta.dirname, "..");
 const DOCS = join(ROOT, "docs");
 const read = (name: string) => readFileSync(join(DOCS, name), "utf8");
 
-test("the three public docs exist and are substantial", () => {
+// The list is exact on purpose. docs/ is public surface in a public repo, so a new
+// file appearing here is a deliberate act and this assertion is what makes it one.
+// It grew from three to twelve when the README was cut to its top-level shape and
+// its long sections moved here; the three originals are still the deep ones.
+const DEEP = ["bootstrap.md", "improve.md", "schema.md"];
+const TOPIC = [
+  "auth.md",
+  "autonomy.md",
+  "backups.md",
+  "console.md",
+  "consolidation.md",
+  "repo-access.md",
+  "rollback.md",
+  "skills.md",
+  "work-queue.md",
+];
+
+test("the public docs are exactly the expected set, and each explains something", () => {
   const files = readdirSync(DOCS).filter((f) => f.endsWith(".md")).sort();
-  assert.deepEqual(files, ["bootstrap.md", "improve.md", "schema.md"]);
-  for (const file of files) {
+  assert.deepEqual(files, [...DEEP, ...TOPIC].sort());
+  // The deep docs carry the system's model and keep the original bar.
+  for (const file of DEEP) {
     assert.ok(read(file).length > 2000, `docs/${file} is too short to explain anything`);
+  }
+  // A topic doc is one section, so the bar is lower. It is still a bar: a stub that
+  // exists only to satisfy a README link is worse than a link to nothing.
+  for (const file of TOPIC) {
+    const text = read(file);
+    assert.ok(text.length > 600, `docs/${file} is a stub (${text.length} chars)`);
+    assert.match(text, /^# /m, `docs/${file} has no heading`);
   }
 });
 
