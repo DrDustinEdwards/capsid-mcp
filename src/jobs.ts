@@ -15,6 +15,10 @@ import {
   type JobStatus,
   type MinRecord,
   type RequiredScopes,
+  CORRECTION_CAP,
+  RETRY_CAP_REASON,
+  atCorrectionCap,
+  cappedSummary,
 } from "./jobs-schema";
 import type { Agent } from "./agents";
 import { approveByPolicy } from "./gate-policy";
@@ -206,6 +210,7 @@ export async function postJob(
     min_record: args.min_record?.prs_merged ? serializeMinRecord(args.min_record) : null,
     blocked_count: 0,
     resumed_count: 0,
+    corrections_count: 0,
     created_at: now.toISOString(),
     updated_at: now.toISOString(),
   };
@@ -620,9 +625,16 @@ export async function blockJob(
 ): Promise<JobResult> {
   if (!args.reason?.trim()) return refuse("block", "block needs a reason: what gate was hit.");
   const summary = args.command ? `${args.reason}\n\n${RESUME_MARKER}\n\n    ${args.command}` : args.reason;
+  // THE CAP IS APPLIED WHERE THE BLOCK IS WRITTEN, so a capped job says so in the
+  // one field every reader already looks at: the console prints result_summary, the
+  // driver reads it to continue, and a human deciding reads it there too. The budget
+  // is read before the transition, because the transition is what makes this block
+  // the third one.
+  const current = await readJob(env.DB, id);
+  const capped = current !== null && atCorrectionCap(current.corrections_count);
   return holderTransition(env, agent, now, "block", id, {
     status: "blocked",
-    result_summary: summary,
+    result_summary: capped ? cappedSummary(summary) : summary,
     lease_expires: null,
     bumpBlocked: true,
   });
@@ -706,6 +718,19 @@ export async function resumeJob(
     return refuse("resume", `${actor} cannot resume ${id} ('${current.title}'): ${resumeShortfall} It stays blocked for a driver that can finish it.`);
   }
 
+  // THE RETRY CAP, CHECKED BEFORE ANYTHING IS SPENT. A job sent back twice already
+  // is one where each further correction has stopped being progress, and what to do
+  // next belongs to a person. An ADMIN is that person arriving, so an admin resume
+  // passes and does not spend the budget.
+  if (!agent.admin && atCorrectionCap(current.corrections_count)) {
+    return refuse(
+      "resume",
+      `${id} has been corrected ${current.corrections_count} times, which is the cap of ${CORRECTION_CAP}: ${RETRY_CAP_REASON}. ` +
+        `Every resume so far was defensible on its own, which is why the ceiling is counted rather than argued. ` +
+        `An admin caller may resume it; a driver or the seat may not.`
+    );
+  }
+
   const verdict = await verifySignedBody(env.IMPROVE_SCORE_SECRET, current.body, "job body");
   if (!verdict.ok) {
     await env.DB.prepare(
@@ -743,12 +768,16 @@ export async function resumeJob(
   }
 
   const expires = leaseUntil(now);
+  // AN ADMIN RESUME DOES NOT SPEND THE BUDGET, and the 0 or 1 is BOUND rather than
+  // interpolated for the same reason bumpBlocked is: the statement stays one static
+  // string that the source guards can read and the query-plan test can EXPLAIN.
+  const spend = agent.admin ? 0 : 1;
   const won = await env.DB.prepare(
     `UPDATE jobs SET status = 'claimed', claimed_by = ?2, claimed_at = ?3, lease_expires = ?4,
-       resumed_count = resumed_count + 1, updated_at = ?3
+       resumed_count = resumed_count + 1, corrections_count = corrections_count + ?5, updated_at = ?3
      WHERE id = ?1 AND status = 'blocked' RETURNING id`
   )
-    .bind(id, actor, now.toISOString(), expires)
+    .bind(id, actor, now.toISOString(), expires, spend)
     .first<{ id: string }>();
   if (!won) {
     return refuse("resume", `${id} left blocked between reading it and resuming it. Ask again.`);
@@ -761,6 +790,8 @@ export async function resumeJob(
       approved: reason,
       lease_expires: expires,
       resumed_count: job.resumed_count,
+      corrections_count: job.corrections_count,
+      ...(agent.admin ? { cap_lifted_by_admin: true } : {}),
       // WHICH CLASS MATCHED, not merely that one did. A row saying "approved by policy"
       // cannot be checked against the policy afterwards; one naming the class and what
       // it matched can.

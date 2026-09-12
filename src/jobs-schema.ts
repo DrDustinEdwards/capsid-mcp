@@ -59,8 +59,47 @@ export interface JobRow {
   // is derived from the other).
   blocked_count: number;
   resumed_count: number;
+  // THE BUDGET THE RETRY CAP IS MEASURED AGAINST (migrations/0016). Distinct from the
+  // two counters above, which are history and count every gate: this counts only the
+  // times the work was sent BACK to be corrected, and an admin resume does not spend
+  // it. See atCorrectionCap below.
+  corrections_count: number;
   created_at: string;
   updated_at: string;
+}
+
+// ---- the retry cap -------------------------------------------------------------
+//
+// TWO CORRECTIONS, THEN A HUMAN. `resume` made a gate a pause rather than an ending,
+// and left the loop unbounded: block, sent back, block again, sent back again, block
+// again. Each step is defensible on its own, which is why the ceiling is counted
+// rather than judged at each step.
+//
+// Pure functions, in the schema module, so the rule can be driven to its refusals in
+// a test without a database and so the tool layer and the queue cannot disagree
+// about where the line is.
+
+export const CORRECTION_CAP = 2;
+
+// The exact string a capped job carries, so the console, the driver and a human
+// reading the row all see the same words.
+export const RETRY_CAP_REASON = "retry cap; human decision required";
+
+/** Whether a job has spent its correction budget. FAILS CLOSED: a count that is not
+ *  a finite number at or above zero is treated as at the cap, because a budget that
+ *  cannot be read is one that cannot be bounded, and waving it through would hand
+ *  the loop the one case nobody tested. */
+export function atCorrectionCap(corrections: number): boolean {
+  if (!Number.isFinite(corrections) || corrections < 0) return true;
+  return corrections >= CORRECTION_CAP;
+}
+
+/** What a capped job's summary says. The driver's own summary is KEPT and the cap is
+ *  stated above it: the human now deciding needs to read what the driver was trying
+ *  to do, and a cap that replaced that would throw away the thing being decided. */
+export function cappedSummary(summary: string | null): string {
+  const said = summary?.trim();
+  return said ? `${RETRY_CAP_REASON}\n\n${said}` : RETRY_CAP_REASON;
 }
 
 export function isJobStatus(value: unknown): value is JobStatus {
