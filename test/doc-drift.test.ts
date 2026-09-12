@@ -58,7 +58,7 @@ test("the restore runbook states the table count TABLES actually has", () => {
   // "five real tables" when there were nine, then "the nine real tables" beside a
   // sentence enumerating ten. Derived from TABLES, so the next addition fails here
   // rather than being found during a restore.
-  const words = ["five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen"];
+  const words = ["five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen"];
   const correct = words[TABLES.length - 5];
   for (const [i, word] of words.entries()) {
     if (i === TABLES.length - 5) continue;
