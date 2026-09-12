@@ -1,6 +1,6 @@
 # Auth model
 
-Every caller resolves to an **agent**: a name, a set of scopes, and its own audit identity. There is one enforcement point, `checkScope` in `src/scope.ts`. The registrar wraps every tool registration before any tool module runs, so a tool is covered by existing, and `TOOL_GRANTS` states what each tool requires.
+Every caller resolves to an agent: a name, a set of scopes, and its own audit identity. There is one enforcement point, `checkScope` in `src/scope.ts`. The registrar wraps every tool registration before any tool module runs, so a tool is covered by existing, and `TOOL_GRANTS` states what each tool requires.
 
 Scopes are five axes. `namespaces` and `repos` are a list or `*`. `tools` is an allow list or `*`. `grants` is read, or read and write. `flags` are the blast radius:
 
@@ -12,13 +12,13 @@ Scopes are five axes. `namespaces` and `repos` are a list or `*`. `tools` is an 
 | `can_write_workflows` | writing under `.github/workflows/` |
 | `can_touch_protected` | tests, CI, lint and compiler config, lockfiles, manifests, the agent steering layer, migrations |
 | `money_paths` | a path naming a billing or payment surface |
-| `can_comment_pr` | commenting on a pull request, which is the smallest write `manage_pr` makes and is deliberately not `can_merge` |
+| `can_comment_pr` | commenting on a pull request, the smallest write `manage_pr` makes. It is not `can_merge`. |
 
 A new agent gets read on its named namespaces and no flags. Scopes are stored as JSON and the parse fails closed: a null, truncated or wrong-shaped column resolves to no namespaces, no tools, no grants and no flags.
 
 ### Roles
 
-Roles are few and separated, and each one is a single capability rather than a bundle. `scripts/mint-agents.mjs` holds them; `node scripts/mint-agents.mjs --roles` prints a mint command for each, and a test fails the build if any role names a second blast-radius flag.
+Roles are few and separated. Each one is a single capability, not a bundle. `scripts/mint-agents.mjs` holds them. `node scripts/mint-agents.mjs --roles` prints a mint command for each. A test fails the build if any role names a second blast-radius flag.
 
 | role | reads | writes | flag |
 | --- | --- | --- | --- |
@@ -29,9 +29,9 @@ Roles are few and separated, and each one is a single capability rather than a b
 | `seat` | every namespace | every namespace | `can_merge` |
 | `site-seat` | `dustinedwards` | `dustinedwards` | `can_merge` |
 
-The reviewer and the watcher both need the write grant, because commenting and posting a job both go through write tools. What keeps that from being a general write is the **tools axis, which may name an action**: an entry can be qualified, `jobs.post` or `manage_pr.comment`, and a list naming at least one action of a tool is narrowed to the actions it names. A bare tool name with no qualified sibling still means the whole tool, and `*` still allows everything, so no agent minted before this changes behaviour. The two tools whose action decides what they do (`jobs` and `lint`) pass the action to `checkScope` at the point where it is known, which is the same shape the grant check already uses.
+The reviewer and the watcher both need the write grant, because commenting and posting a job both go through write tools. The tools axis keeps that from being a general write. An entry can name an action: `jobs.post` or `manage_pr.comment`. A list naming at least one action of a tool is narrowed to the actions it names. A bare tool name with no qualified sibling still means the whole tool, and `*` still allows everything, so no agent minted before this changes behaviour. The two tools whose action decides what they do (`jobs` and `lint`) pass the action to `checkScope` at the point where it is known, which is the same shape the grant check already uses.
 
-The `agents` tool is **admin only**, because an agent that could mint another could widen itself. `mint` returns a key once and stores only its sha256. `list` is the inventory, revoked rows included. `revoke` sets `revoked_at` rather than deleting, so rows an agent wrote still resolve to what it was allowed to do, while its key stops resolving immediately. `update_scopes` replaces named axes and leaves the rest.
+The `agents` tool is admin only. An agent that could mint another could widen itself. `mint` returns a key once and stores only its sha256. `list` is the inventory, revoked rows included. `revoke` sets `revoked_at` rather than deleting, so rows an agent wrote still resolve to what it was allowed to do, while its key stops resolving immediately. `update_scopes` replaces named axes and leaves the rest.
 
 Audit rows and `jobs.claimed_by` record a minted agent as `agent:<name>`.
 
@@ -45,7 +45,7 @@ The operator hash has been removed from the roster machines. Every Claude Code s
 
 Two gated endpoints:
 
-1. **OAuth (`/mcp`)** for human clients. The client discovers the server via `.well-known`, registers dynamically, and goes through `/authorize` and a one-time approval screen to GitHub. On return the user is checked against `ADMIN_GITHUB_LOGIN`: your GitHub username, or your numeric user id (find it at `https://api.github.com/users/<login>`). Any other account gets a 403. The check runs again on every `/mcp` request. An admitted admin holds a full write grant.
+1. **OAuth (`/mcp`)** for human clients. The client discovers the server via `.well-known`, registers dynamically, and goes through `/authorize` and a one-time approval screen to GitHub. On return the user is checked against `ADMIN_GITHUB_LOGIN`: the GitHub username, or the numeric user id (find it at `https://api.github.com/users/<login>`). Any other account gets a 403. The check runs again on every `/mcp` request. An admitted admin holds a full write grant.
 2. **Agent and operator keys (`/ops/mcp`)** for agents and cron, gated by sha256-hashed bearer keys. An agent key resolves to its row. Failing that, `OPERATOR_KEY_HASH` holds comma-separated hashes: a plain entry is a write key, an entry prefixed `ro:` is read-only and is denied write, delete, move, register_namespace, update_namespace, repo writes, PR management and lint finalize. Revoke by removing a hash; the others keep working. The OAuth library never sees this route.
 
 Login and repo access use two different GitHub credentials: an OAuth App for login (OAuth Apps cannot mint installation tokens) and a GitHub App for repo access. Keep both.
