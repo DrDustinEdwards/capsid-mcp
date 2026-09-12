@@ -125,7 +125,7 @@ export interface EvidenceVerdict {
   notes: string[];
 }
 
-async function prFacts(env: Env, namespace: string, url: string): Promise<PrFacts | string> {
+export async function prFacts(env: Env, namespace: string, url: string): Promise<PrFacts | string> {
   const match = PR_URL.exec(url);
   if (!match) return `${url} is not a GitHub pull request URL, so nothing could be verified about it`;
   const [, owner, repo, number] = match;
@@ -180,6 +180,55 @@ async function ciGreenForSha(env: Env, namespace: string, sha: string): Promise<
     return { green: null, note: `CI for ${sha.slice(0, 7)} has not finished, so it is neither green nor red yet` };
   }
   return { green: runs.every((r) => NOT_A_FAILURE.has(r.conclusion ?? "")) };
+}
+
+// EVIDENCE ARRIVES AS AN OBJECT OR AS A JSON STRING, and both are accepted.
+//
+// WHY. An MCP client caches the tool schema at connect time, so a session that
+// connected before `evidence` existed holds a schema without it and its client
+// refuses the argument locally, before the Worker ever sees it: the session reports
+// the work in prose and the outcome row stores nulls, which is the exact undercount
+// this migration's sibling exists to stop. Some clients also flatten an object
+// argument to a string rather than dropping it.
+//
+// Both are the same failure from the Worker's side: a caller that knows what it did
+// and cannot say so in the shape asked for. A string that parses to an object is
+// accepted; a string that does not parse is REFUSED rather than ignored, because
+// silently discarding evidence is how a row ends up saying nothing happened.
+export type EvidenceInput = JobEvidence | string | undefined;
+
+export function parseEvidence(input: EvidenceInput): { evidence: JobEvidence | undefined } | { error: string } {
+  if (input === undefined) return { evidence: undefined };
+  if (typeof input !== "string") return { evidence: input };
+  const text = input.trim();
+  if (text.length === 0) return { evidence: undefined };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { error: `evidence was sent as a string that is not JSON: ${text.slice(0, 120)}` };
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { error: "evidence parsed to something that is not an object, so there are no fields to read." };
+  }
+  const row = parsed as Record<string, unknown>;
+  const num = (key: string): number | undefined => {
+    const value = row[key];
+    if (value === undefined || value === null) return undefined;
+    const n = Number(value);
+    // A count that is not a non-negative integer is dropped rather than coerced: a
+    // stored 0 would read as "somebody counted and the answer was none".
+    return Number.isInteger(n) && n >= 0 ? n : undefined;
+  };
+  const prs = Array.isArray(row.prs) ? row.prs.filter((p): p is string => typeof p === "string") : undefined;
+  return {
+    evidence: {
+      ...(prs && prs.length > 0 ? { prs } : {}),
+      ...(num("commits") !== undefined ? { commits: num("commits") } : {}),
+      ...(num("files_changed") !== undefined ? { files_changed: num("files_changed") } : {}),
+      ...(num("tests_added") !== undefined ? { tests_added: num("tests_added") } : {}),
+    },
+  };
 }
 
 // BEST EFFORT, AND IT NEVER FAILS THE JOB. A driver that finished its work must be
