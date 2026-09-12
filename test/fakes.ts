@@ -232,6 +232,11 @@ export interface FakeD1Rows {
   improve_scores: Array<Record<string, unknown>>;
   improve_skills: Array<Record<string, unknown>>;
   improve_jti: Array<Record<string, unknown>>;
+  // The skill lifecycle's evidence (migrations 0012 and 0013), delegated to the
+  // improve dialect like the rest of those tables.
+  skill_evaluations: Array<Record<string, unknown>>;
+  skill_edits: Array<Record<string, unknown>>;
+  skill_failures: Array<Record<string, unknown>>;
   audit_log: Array<{ namespace: string; path: string; actor: string | null }>;
   agents: Array<Record<string, unknown>>;
 }
@@ -321,6 +326,9 @@ export function fakeD1(opts: FakeD1Options = {}): FakeD1 {
     improve_scores: opts.improveScores ?? [],
     improve_skills: (opts.improveSkills ?? []).map((k) => ({ ...IMPROVE_SKILL_DEFAULTS, ...k })),
     improve_jti: [],
+    skill_evaluations: [],
+    skill_edits: [],
+    skill_failures: [],
     audit_log: opts.auditLog ?? [],
     agents: opts.agents ?? [],
   };

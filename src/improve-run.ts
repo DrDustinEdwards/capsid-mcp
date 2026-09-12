@@ -75,6 +75,49 @@ export async function verifyTaskDocument(
   return { path, namespace, ok: verdict.ok, actor, reason: verdict.ok ? null : verdict.reason };
 }
 
+// ONE PASS PER NAMESPACE over the three things a reader asks about skills: how many
+// there are in each state, whether the ones offered get used, and when the lifecycle
+// last measured anything.
+async function skillsSummary(db: D1Database, namespace: string): Promise<SkillsSummary> {
+  const counts = await db
+    .prepare(
+      `SELECT status, COUNT(*) AS n FROM improve_skills
+       WHERE namespaces IS NULL OR namespaces LIKE ?1 GROUP BY status`
+    )
+    .bind(`%"${namespace}"%`)
+    .all<{ status: string; n: number }>();
+  const by = new Map((counts.results ?? []).map((r) => [r.status, r.n]));
+
+  // Counted from the outcome rows rather than from a counter, so the numbers cannot
+  // drift from the jobs they describe. json_array_length over a NULL column is NULL,
+  // and SUM skips NULLs, which is the behaviour wanted: a job that recorded nothing
+  // contributes to neither total.
+  const gap = await db
+    .prepare(
+      `SELECT COALESCE(SUM(json_array_length(skill_ids_offered)), 0) AS offered,
+              COALESCE(SUM(json_array_length(skill_ids_used)), 0) AS used
+       FROM job_outcomes WHERE namespace = ?1`
+    )
+    .bind(namespace)
+    .first<{ offered: number; used: number }>();
+
+  const latest = await db
+    .prepare("SELECT MAX(evaluated_at) AS last FROM skill_evaluations WHERE namespace = ?1")
+    .bind(namespace)
+    .first<{ last: string | null }>();
+
+  const offered = gap?.offered ?? 0;
+  return {
+    candidate: by.get("candidate") ?? 0,
+    live: by.get("live") ?? 0,
+    retired: by.get("retired") ?? 0,
+    offered,
+    used: gap?.used ?? 0,
+    use_rate: offered > 0 ? (gap?.used ?? 0) / offered : null,
+    last_evaluation: latest?.last ?? null,
+  };
+}
+
 // ---- status -----------------------------------------------------------------
 
 export interface NamespaceStatus {
@@ -113,6 +156,26 @@ export interface NamespaceStatus {
   // appearing on the next one and this needs no expiry of its own. Empty when the
   // policy is disabled, which is how it ships.
   awaiting_seat: AwaitingSeat[];
+  // THE SKILL RECORDS FOR THIS NAMESPACE. Counts by status, plus the gap that says
+  // whether the recommend step is any good: a skill offered often and used rarely is
+  // not a failing skill, it is a trigger condition that does not describe the work.
+  skills: SkillsSummary;
+}
+
+export interface SkillsSummary {
+  candidate: number;
+  live: number;
+  retired: number;
+  // Across every finished job in this namespace that recorded them. NULL-safe: a job
+  // that predates the recommend step contributes to neither.
+  offered: number;
+  used: number;
+  // used / offered, or null when nothing has been offered yet. Not zero: nothing
+  // offered is not a use rate of nought.
+  use_rate: number | null;
+  // The newest evaluation anywhere in this namespace, so a reader can tell a quiet
+  // lifecycle from a stalled one.
+  last_evaluation: string | null;
 }
 
 export interface StatusReport {
@@ -250,6 +313,7 @@ export async function improveStatus(env: Env, only?: string, taskPath?: string):
         : null,
       jobs: await jobsSummary(env.DB, namespace, new Date()),
       awaiting_seat: awaitingAll.filter((a) => a.namespace === namespace),
+      skills: await skillsSummary(env.DB, namespace),
     });
   }
 
