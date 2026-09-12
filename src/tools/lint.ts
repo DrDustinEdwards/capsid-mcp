@@ -4,7 +4,7 @@ import { z } from "zod";
 import { repoBlobPaths } from "../github";
 import { documentUpsert, isMissingRowAbort, requireExists } from "../store-guards";
 import { authoritativeFor, scanCountClaims } from "../counts";
-import { buildTruthReport, renderTruthReport, reportPath, type ReportDoc, type ReportEdge } from "../truth-report";
+import { buildTruthReport, isUnscanned, renderTruthReport, reportPath, type ReportDoc, type ReportEdge } from "../truth-report";
 import { docPath, GATHER_BUDGET, LINT_CONSUMED_MAX, nsName } from "../limits";
 import { improveWriteRefusal } from "../improve-scores";
 import { fail, ok, pathMutation, requireConfirmation, type ToolCtx } from "./docs";
@@ -204,8 +204,10 @@ export function registerLintTools(server: McpServer, ctx: ToolCtx): void {
           .bind(namespace)
           .all<ReportEdge>();
         // The count-claim scan wants standing documents only, same as gather.
+        // `isUnscanned` is the one statement of which prefixes those are, so the
+        // scanner and the report cannot disagree about what is a subject.
         const claims = scanCountClaims(
-          docs.results.filter((d) => !d.path.startsWith("archive/")).map((d) => ({ path: d.path, type: d.type, body: d.body })),
+          docs.results.filter((d) => !isUnscanned(d.path)).map((d) => ({ path: d.path, type: d.type, body: d.body })),
           namespace
         );
         // NULL, NOT AN EMPTY SET, when the tree cannot be read. An empty set would
