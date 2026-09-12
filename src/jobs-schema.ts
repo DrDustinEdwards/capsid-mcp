@@ -180,3 +180,63 @@ export function missingForRecord(record: { prs_merged: number }, minRecord: stri
   if (prs_merged === undefined || record.prs_merged >= prs_merged) return null;
   return `this job asks for a driver with at least ${prs_merged} merged pull request${prs_merged === 1 ? "" : "s"} on its record, and this one has ${record.prs_merged}.`;
 }
+
+// ---- a swallowed parameter tag --------------------------------------------------
+//
+// WHAT THIS CATCHES, and it is a real failure measured twice on 2026-09-11 rather
+// than a hypothetical. A caller that closes a parameter tag INSIDE a value sends one
+// argument where it meant to send three: `result_ref` and `evidence` never arrive as
+// arguments at all, they arrive as literal text in the middle of `result_summary`,
+// and the job is completed with no reference and no evidence. Both times the outcome
+// row recorded nothing.
+//
+// WHY IT IS REFUSED RATHER THAN CLEANED UP. The arguments are already gone by the
+// time this runs; there is nothing to recover from the text, because what was lost is
+// the STRUCTURE. Stripping the tags would leave a tidy summary that is still missing
+// its result_ref and its evidence, and the caller would never learn. And the outcome
+// row cannot be corrected afterwards by design (a primary key plus ON CONFLICT DO
+// NOTHING is what makes it evidence), so before the write is the only place to catch
+// this at all.
+//
+// THE PARAMETER NAMES ARE THE ONES A CALLER WRITES. test/jobs.test.ts derives them
+// against the tool's own schema, so a parameter added to `jobs` and not added here is
+// a build failure rather than a hole.
+export const JOB_PARAM_NAMES = [
+  "action",
+  "namespace",
+  "title",
+  "body",
+  "id",
+  "result_summary",
+  "result_ref",
+  "reason",
+  "command",
+  "evidence",
+] as const;
+
+// DELIBERATELY NARROW: the full `</name>` spelling and nothing looser. A guard that
+// fired on a bare "</" would refuse a job body explaining this very rule, and a guard
+// that gets in the way of ordinary prose is one somebody deletes rather than fixes.
+// Writing the pieces apart, as this feature's own job body did, is not matched.
+const SWALLOWED_TAG = new RegExp(`</(${JOB_PARAM_NAMES.join("|")})>`);
+
+// The first parameter name found, or null. The first one is the useful one: it is
+// where the value was cut off, and everything after it was lost.
+export function swallowedParamTag(value: string): string | null {
+  const match = SWALLOWED_TAG.exec(value ?? "");
+  return match ? match[1] : null;
+}
+
+// One message for all three call sites, so a caller sees the same explanation
+// wherever it happens. It names the field that swallowed the text AND the tag that
+// did the swallowing, because on the measured cases those differ only sometimes: a
+// value cut off by its OWN closing tag is the common shape and reads confusingly
+// unless both are stated.
+export function swallowedTagRefusal(field: string, tag: string): string {
+  const own = field === tag ? " (its own closing tag)" : "";
+  return (
+    `${field} contains the literal text '</${tag}>'${own}. That means a parameter tag was closed inside a value, ` +
+    `so '${tag}' and everything after it were swallowed into ${field} rather than arriving as their own arguments. ` +
+    `Nothing was written. Re-send the call with each parameter as a separate argument.`
+  );
+}

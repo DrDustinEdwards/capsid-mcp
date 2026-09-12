@@ -8,6 +8,8 @@ import {
   mintJobId,
   missingForRecord,
   serializeMinRecord,
+  swallowedParamTag,
+  swallowedTagRefusal,
   serializeRequiredScopes,
   type JobRow,
   type JobStatus,
@@ -170,6 +172,11 @@ export async function postJob(
   const title = args.title.trim();
   if (!title) return refuse("post", "a job needs a title: it is how the queue refuses a duplicate while one is still open.");
   if (!args.body.trim()) return refuse("post", "a job needs a body. The body is the prompt the driver executes.");
+  // A body is the prompt a driver EXECUTES, so a malformed post is worse here than
+  // anywhere else: the swallowed text is signed along with everything else and the
+  // driver runs whatever survived.
+  const postSwallowed = swallowedParamTag(args.body);
+  if (postSwallowed) return refuse("post", swallowedTagRefusal("body", postSwallowed));
 
   const signed = await signTaskBody(env.IMPROVE_SCORE_SECRET, args.body);
   const job: JobRow = {
@@ -503,6 +510,11 @@ export async function completeJob(
   if (!args.result_summary?.trim()) {
     return refuse("complete", "complete needs a result_summary. A done job with no summary is a job the seat has to reconstruct from the diff.");
   }
+  // BEFORE THE WRITE, because the outcome row this call produces cannot be corrected
+  // afterwards. Measured twice on 2026-09-11: result_ref and evidence swallowed into
+  // the summary, and the row recorded nothing.
+  const swallowed = swallowedParamTag(args.result_summary);
+  if (swallowed) return refuse("complete", swallowedTagRefusal("result_summary", swallowed));
   return holderTransition(env, agent, now, "complete", id, {
     status: "done",
     result_summary: args.result_summary,
@@ -514,6 +526,8 @@ export async function completeJob(
 
 export async function failJob(env: Env, agent: Agent, now: Date, id: string, reason: string): Promise<JobResult> {
   if (!reason?.trim()) return refuse("fail", "fail needs a reason. A failed job with no reason is one nobody can retry or rule on.");
+  const failSwallowed = swallowedParamTag(reason);
+  if (failSwallowed) return refuse("fail", swallowedTagRefusal("reason", failSwallowed));
   return holderTransition(env, agent, now, "fail", id, { status: "failed", result_summary: reason, lease_expires: null });
 }
 
