@@ -64,6 +64,10 @@ export interface JobRow {
   // times the work was sent BACK to be corrected, and an admin resume does not spend
   // it. See atCorrectionCap below.
   corrections_count: number;
+  // 1 when this job's work needs a reviewer to speak before it reaches the seat
+  // (migrations/0017). A gate on the ROW rather than a convention, because the
+  // alternative is the party being reviewed deciding whether it is reviewed.
+  review_required: number;
   created_at: string;
   updated_at: string;
 }

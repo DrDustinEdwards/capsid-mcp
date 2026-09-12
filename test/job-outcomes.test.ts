@@ -44,6 +44,7 @@ function job(overrides: Partial<JobRow> = {}): JobRow {
     min_record: null,
     blocked_count: 0,
     corrections_count: 0,
+    review_required: 0,
     resumed_count: 0,
     created_at: "2026-09-11T09:00:00.000Z",
     updated_at: "2026-09-11T11:00:00.000Z",
