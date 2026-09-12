@@ -9,7 +9,7 @@ A daily Cron Trigger (09:00 UTC) exports the database to `MEDIA`:
 
 After each export, `document_versions` rows older than 90 days and `audit_log` rows older than 180 are pruned. Pruning runs after the export, so every pruned row exists in at least one retained dump.
 
-A private `capsid-backups` repository pulls the latest JSON dump daily, so the dumps survive loss of the whole Cloudflare account.
+The private `DrDustinEdwards/capsid-backups` repository mirrors the JSON dumps off-account, so they survive loss of the whole Cloudflare account. This repo mints that job's credential at `POST /backup/credential` and nothing more: the mirror workflow, its schedule and its retention live in that repository, and no check here reads whether it is still running. Local backup freshness is measured (`BACKUP_STALE_HOURS`, read by live gate 1c and by the watcher); the mirror's is not.
 
 Run one on demand with a write-grant key (read-only keys are refused):
 
