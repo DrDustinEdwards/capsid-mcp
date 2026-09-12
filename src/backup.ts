@@ -92,6 +92,10 @@ export const TABLES = [
   // wrong, read by the next driver before it follows the same skill. Nothing prunes
   // it and nothing else holds it.
   "skill_failures",
+  // Which pull requests an outcome counted (migrations/0015). The counts on the
+  // outcome row are derived from these, and GitHub can delete a pull request, so a
+  // dump is the only copy of what the merge state was verified against.
+  "job_outcome_prs",
   // The replay cache (migrations/0004). Pruned below rather than retained: a jti
   // is only meaningful inside the 30-minute signature window.
   "improve_jti",

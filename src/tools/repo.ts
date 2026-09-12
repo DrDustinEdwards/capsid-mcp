@@ -27,6 +27,14 @@ import {
 import { bounded, CI_DISPATCH_MAX_INPUTS, DEFAULT_SCAN_FILES, DEFAULT_SCAN_RESULTS, MAX_BODY, MAX_COMMIT_MESSAGE, MAX_PATH, MAX_PR_BODY, MAX_PR_TITLE, MAX_QUERY, MAX_REF, MAX_REPO_SELECTOR, MAX_SCAN_CAP, MAX_SHA, nsName } from "../limits";
 import { fail, ok, type ToolCtx } from "./docs";
 import { repoWriteFlags } from "../scope";
+import { reverifyPr } from "../outcome-prs";
+
+// The pull request's canonical URL, for a managePr result that did not carry one.
+// The merge response names the repo and the caller named the number, which is all a
+// GitHub pull request URL is.
+function prUrlFor(result: { repo?: string }, number: number): string {
+  return `https://github.com/${result.repo ?? ""}/pull/${number}`;
+}
 
 export function registerRepoTools(server: McpServer, ctx: ToolCtx): void {
   const { env, db, actor } = ctx;
@@ -284,7 +292,29 @@ export function registerRepoTools(server: McpServer, ctx: ToolCtx): void {
         "manage_pr",
         namespace,
         null,
-        () => managePr(env, namespace, number, action, merge_method ?? "squash", repo),
+        async () => {
+          const result = await managePr(env, namespace, number, action, merge_method ?? "squash", repo);
+          // A MERGE IS WHEN AN OUTCOME ROW'S MERGE STATE BECOMES WRONG. The driver
+          // wrote "opened, not merged" at complete time and was right then; this is
+          // the moment it stops being true, so the rows that named this pull request
+          // are re-read from GitHub here rather than waiting for the daily sweep.
+          //
+          // It never fails the merge. The merge already happened, and reporting it as
+          // failed because a bookkeeping update did not land would be a lie about the
+          // merge; the sweep picks the row up tomorrow either way.
+          if (action === "merge") {
+            try {
+              const url = (result as { url?: string }).url ?? prUrlFor(result as { repo?: string }, number);
+              const updated = await reverifyPr(env, namespace, url, new Date());
+              if (updated.length > 0) {
+                return { ...result, outcome_rows_updated: updated.filter((u) => u.changed).length };
+              }
+            } catch (err) {
+              console.error(`OUTCOME_REVERIFY_FAILED pr ${number}: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+          return result;
+        },
         { action }
       )
   );
