@@ -435,6 +435,44 @@ describe("the mirrored document", () => {
       .first<{ n: number }>();
     expect(versions?.n).toBeGreaterThanOrEqual(2);
   });
+
+  it("PLANT: a failed job's document is closed too, because failed is terminal", async () => {
+    // THE DEFECT THIS PINS. The mirror's document status was written as
+    // `job.status === "done" ? "closed" : "active"`, so a FAILED job, which is as
+    // finished as a done one, projected as `active` forever. `fail` did rewrite the
+    // mirror; the status it wrote was the wrong one. Three capsid job documents sat
+    // at active against failed rows before this was fixed.
+    const posted = await post({ title: "failed is terminal" });
+    const id = posted.job!.id;
+    await claimJob(jobsEnv(), DRIVER, NOW, { id });
+    await failJob(jobsEnv(), DRIVER, NOW, id, "could not reach the thing");
+
+    const doc = await env.DB.prepare(
+      "SELECT body, status FROM documents WHERE namespace = 'capsid' AND path = ?1"
+    )
+      .bind(jobDocPath(id))
+      .first<{ body: string; status: string }>();
+    expect(doc!.body).toContain("status: **failed**");
+    expect(doc!.status).toBe("closed");
+  });
+
+  it("a blocked job's document stays active, because blocked is a pause", async () => {
+    // The innocent case, in the same commit as the fix. Closing every status that is
+    // not `done` would be the same bug pointed the other way: a blocked job is
+    // waiting for a human and is still open work, so brief must keep carrying it.
+    const posted = await post({ title: "blocked is not terminal" });
+    const id = posted.job!.id;
+    await claimJob(jobsEnv(), DRIVER, NOW, { id });
+    await blockJob(jobsEnv(), DRIVER, NOW, id, { reason: "needs a push", command: "git push origin HEAD" });
+
+    const doc = await env.DB.prepare(
+      "SELECT body, status FROM documents WHERE namespace = 'capsid' AND path = ?1"
+    )
+      .bind(jobDocPath(id))
+      .first<{ body: string; status: string }>();
+    expect(doc!.body).toContain("status: **blocked**");
+    expect(doc!.status).toBe("active");
+  });
 });
 
 describe("list", () => {

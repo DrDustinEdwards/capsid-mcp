@@ -15,6 +15,16 @@ export type JobStatus = (typeof JOB_STATUSES)[number];
 // let two open jobs share a title.
 export const OPEN_JOB_STATUSES: readonly JobStatus[] = ["queued", "claimed"];
 
+// THE STATES A JOB IS FINISHED IN. A job's mirrored document closes on these and
+// stays active on the rest, so `brief` and `search` stop carrying finished work as
+// open. `blocked` is deliberately not here: it is a pause a human clears, and
+// `resume` takes it back to claimed, so it is still open work while it waits.
+export const TERMINAL_JOB_STATUSES: readonly JobStatus[] = ["done", "failed"];
+
+export function isTerminalJobStatus(status: JobStatus): boolean {
+  return TERMINAL_JOB_STATUSES.includes(status);
+}
+
 export const JOB_ACTIONS = ["post", "list", "claim", "heartbeat", "complete", "fail", "block", "resume"] as const;
 export type JobAction = (typeof JOB_ACTIONS)[number];
 

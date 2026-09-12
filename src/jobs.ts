@@ -8,6 +8,7 @@ import {
   mintJobId,
   missingForRecord,
   serializeMinRecord,
+  isTerminalJobStatus,
   swallowedParamTag,
   swallowedTagRefusal,
   serializeRequiredScopes,
@@ -111,7 +112,13 @@ async function mirrorStatements(db: D1Database, job: JobRow, action: string, act
     title: `Job: ${job.title}`,
     body: renderJobDoc(job),
     type: "task",
-    status: job.status === "done" ? "closed" : "active",
+    // CLOSED ON A FINISHED ROW, and `failed` is as finished as `done`. This read
+    // `job.status === "done"` until 2026-09-12, so a failed job's mirror stayed
+    // `active` forever and brief kept carrying it as open work; three capsid job
+    // documents sat that way. isTerminalJobStatus is the one statement of which
+    // statuses are finished, and test/jobs.test.ts classifies every status in the
+    // vocabulary so a new one cannot land unclassified.
+    status: isTerminalJobStatus(job.status) ? "closed" : "active",
     tags: "jobs",
     prior,
     action,
