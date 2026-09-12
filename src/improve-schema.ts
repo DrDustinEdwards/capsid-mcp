@@ -93,6 +93,11 @@ export const PROPOSAL_PREFIX = "improve/proposals/";
 export const PROMPTS_PREFIX = "improve/prompts/";
 export const SKILLS_PREFIX = "improve/skills/";
 
+// THE AUTONOMY POLICY DOCUMENTS. Not under improve/, because they govern the work
+// queue and the merge path as well as the loop, and a reader looking for what the
+// machine may do alone should not have to know the loop exists to find them.
+export const POLICY_PREFIX = "policy/";
+
 
 export const SCORER_WORKFLOW = "improve-score.yml";
 

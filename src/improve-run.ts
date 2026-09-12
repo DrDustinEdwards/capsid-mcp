@@ -41,6 +41,7 @@ import {
   type BudgetStatus,
   type OpenOutcome,
 } from "./improve/open";
+import { AWAITING_SEAT_KEY, type AwaitingSeat } from "./auto-merge";
 import { tickRuns, type TickOutcome } from "./improve/tick";
 
 // The barrel. Only what something outside src/improve/ actually imports: src/index.ts
@@ -107,6 +108,11 @@ export interface NamespaceStatus {
   // blocked job is not a failure, it is work waiting on a human, and a count of them
   // tells nobody what to run. This is what the console shows.
   jobs: JobsSummary;
+  // PULL REQUESTS THE AUTO-MERGE POLICY DECLINED, each with the check that refused it.
+  // Recorded whole by the five-minute tick, so a PR a human merged or closed stops
+  // appearing on the next one and this needs no expiry of its own. Empty when the
+  // policy is disabled, which is how it ships.
+  awaiting_seat: AwaitingSeat[];
 }
 
 export interface StatusReport {
@@ -184,6 +190,20 @@ export async function improveStatus(env: Env, only?: string, taskPath?: string):
   const namespaces = only ? [only] : [...ROSTER];
   const out: NamespaceStatus[] = [];
 
+  // ONE READ FOR EVERY NAMESPACE. An unreadable or malformed key reports an empty set
+  // rather than failing status: a PR waiting for the seat is still waiting whether or
+  // not this surface can describe it.
+  let awaitingAll: AwaitingSeat[] = [];
+  try {
+    const raw = await env.APP_KV.get(AWAITING_SEAT_KEY);
+    if (raw) {
+      const parsed: unknown = JSON.parse(raw);
+      if (Array.isArray(parsed)) awaitingAll = parsed as AwaitingSeat[];
+    }
+  } catch {
+    awaitingAll = [];
+  }
+
   for (const namespace of namespaces) {
     const { doc, refusal } = await loadScores(env, namespace);
     const verification = await verifyAnchors(env.APP_KV, namespace, doc);
@@ -229,6 +249,7 @@ export async function improveStatus(env: Env, only?: string, taskPath?: string):
         ? { path: `${namespace}/${report.path}`, integrity: integrityOf(report.body), generated: report.updated_at }
         : null,
       jobs: await jobsSummary(env.DB, namespace, new Date()),
+      awaiting_seat: awaitingAll.filter((a) => a.namespace === namespace),
     });
   }
 

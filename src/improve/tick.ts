@@ -1,5 +1,6 @@
 import type { Env } from "../env";
 import { dispatchWorkflow } from "../github";
+import { autoMergeTick } from "../auto-merge";
 import { expireJobLeases } from "../jobs";
 import { proposeChange, pushAttempt } from "../improve-attempt";
 import { pathMonitor } from "../improve-gates";
@@ -72,6 +73,19 @@ export async function tickRuns(env: Env, now: Date): Promise<TickOutcome[]> {
   const expired = await expireJobLeases(env, now);
   if (expired.requeued.length > 0) {
     console.log(`JOB_LEASE_EXPIRED returned ${expired.requeued.length} job(s) to queued: ${expired.requeued.join(", ")}`);
+  }
+
+  // AUTO-MERGE RIDES THIS TICK TOO, on the same reasoning as the lease sweep and with
+  // the same placement: before the runs, outside the budget check. It spends no model
+  // tokens and no CI minutes, and an exhausted improve budget says nothing about
+  // whether a driver's finished pull request should land. The policy document decides
+  // whether it does anything at all, and it ships disabled.
+  try {
+    const merged = await autoMergeTick(env, now);
+    if (merged.ran) console.log(`AUTO_MERGE ${merged.note}`);
+  } catch (err) {
+    // A throwing merge step does not stop the improve runs advancing.
+    console.error(`AUTO_MERGE_THREW: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   const runs = await advanceableRuns(env.DB, RUNS_PER_TICK);
