@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { JOB_ACTIONS, JOB_LEASE_SECONDS, JOB_PARAM_NAMES, JOB_STATUSES, OPEN_JOB_STATUSES, isJobStatus, jobDocPath, mintJobId, swallowedParamTag } from "../src/jobs-schema.ts";
+import { JOB_ACTIONS, JOB_LEASE_SECONDS, JOB_PARAM_NAMES, JOB_STATUSES, OPEN_JOB_STATUSES, TERMINAL_JOB_STATUSES, isJobStatus, isTerminalJobStatus, jobDocPath, mintJobId, swallowedParamTag } from "../src/jobs-schema.ts";
 import { allSourceText, sourceFile } from "./source-files.ts";
 import { completeJob, failJob, postJob } from "../src/jobs.ts";
 import { legacyAgent } from "../src/agents.ts";
@@ -39,6 +39,39 @@ test("every status the code knows is a status the migration's comment declares",
   const declared = /-- (queued \| claimed \| done \| failed \| blocked)\./.exec(MIGRATION);
   assert.ok(declared, "migrations/0006_jobs.sql no longer declares the status vocabulary");
   assert.deepEqual(declared[1].split(" | ").sort(), [...JOB_STATUSES].sort());
+});
+
+test("every status in the vocabulary is classified terminal or not, and the two do not overlap", () => {
+  // The mirror document's status is decided by this classification, so a status
+  // added to JOB_STATUSES and left out of the classification would project as open
+  // work forever. That is the defect this pins: `failed` was unclassified in effect,
+  // because the mirror asked `=== "done"` rather than asking the vocabulary.
+  for (const status of JOB_STATUSES) {
+    assert.equal(
+      typeof isTerminalJobStatus(status),
+      "boolean",
+      `${status} is not classified by isTerminalJobStatus`
+    );
+  }
+  assert.deepEqual([...TERMINAL_JOB_STATUSES].sort(), ["done", "failed"]);
+  // Both directions: a terminal status is a real status, and the open ones are not
+  // terminal. `blocked` is in neither list and that is deliberate, so it is named.
+  for (const status of TERMINAL_JOB_STATUSES) assert.ok(isJobStatus(status));
+  for (const status of OPEN_JOB_STATUSES) assert.equal(isTerminalJobStatus(status), false);
+  assert.equal(isTerminalJobStatus("blocked"), false, "a blocked job is paused, not finished");
+});
+
+test("the job mirror asks the vocabulary which statuses are finished", () => {
+  // The source-text half, because the behavioural half needs a real D1 and lives in
+  // test-integration/jobs.test.ts. A mirror that goes back to comparing one status
+  // literal is the exact shape of the bug that left three documents stuck at active.
+  const jobs = sourceFile("jobs.ts");
+  assert.match(jobs, /status: isTerminalJobStatus\(job\.status\) \? "closed" : "active"/);
+  assert.doesNotMatch(
+    jobs,
+    /status: job\.status === "[a-z]+" \? "closed"/,
+    "the mirror decides its document status from one status literal again"
+  );
 });
 
 test("isJobStatus refuses anything that is not one of them", () => {
