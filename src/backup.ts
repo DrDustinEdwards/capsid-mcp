@@ -88,6 +88,10 @@ export const TABLES = [
   // skill_edits would not lose a skill, it would lose every reason one was refused.
   "skill_evaluations",
   "skill_edits",
+  // The failure notes (migrations/0013). Prose a driver wrote about a run that went
+  // wrong, read by the next driver before it follows the same skill. Nothing prunes
+  // it and nothing else holds it.
+  "skill_failures",
   // The replay cache (migrations/0004). Pruned below rather than retained: a jti
   // is only meaningful inside the 30-minute signature window.
   "improve_jti",
