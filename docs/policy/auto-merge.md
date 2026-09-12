@@ -35,8 +35,8 @@ that passed before the one that refused.
   manifests, the agent steering layer, migrations, and the loop's own source.
 - `paths_not_money` No changed path names a billing or payment surface.
 - `no_migration_workflow_lockfile` No changed path is a migration, a workflow, or a
-  lockfile. The protected list already covers these three; stating them again means
-  removing a pattern from one list does not quietly open the other.
+  lockfile. The protected list already covers these three. Stating them again means
+  removing a pattern from one list does not open the other.
 
 Anything else waits for the seat. A pull request that fails any check is left open,
 audited with the check that refused it, and reported under `improve_status` as
@@ -47,5 +47,4 @@ awaiting the seat.
 It cannot widen the set of repos the Worker reaches: a namespace it names that is not
 on the improve roster is refused when the policy is parsed. It cannot describe less
 than the code enforces: a check the Worker runs that this document does not name is
-refused at load time, because this document is what a reader consults to know what the
-machine may do alone.
+refused at load time.
