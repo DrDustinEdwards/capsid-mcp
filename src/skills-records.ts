@@ -147,10 +147,18 @@ export function shouldCreateCandidate(source: CandidateSource): CreateVerdict {
  * again, and retired again, forever.
  */
 export async function alreadyAbstracted(env: Env, source: CandidateSource): Promise<{ skill: string; status: string } | null> {
-  const column = source.kind === "attempt" ? "source_attempt" : "source_job";
-  const row = await env.DB.prepare(`SELECT id, status FROM improve_skills WHERE ${column} = ?1 LIMIT 1`)
-    .bind(source.id)
-    .first<{ id: string; status: string }>();
+  // TWO SPELLED-OUT STATEMENTS rather than one with the column interpolated. A query
+  // assembled by string concatenation cannot be reconstructed and checked by the
+  // integration suite's query-plan guard, and that guard is the only thing that reads
+  // every statement this Worker issues.
+  const row =
+    source.kind === "attempt"
+      ? await env.DB.prepare("SELECT id, status FROM improve_skills WHERE source_attempt = ?1 LIMIT 1")
+          .bind(source.id)
+          .first<{ id: string; status: string }>()
+      : await env.DB.prepare("SELECT id, status FROM improve_skills WHERE source_job = ?1 LIMIT 1")
+          .bind(source.id)
+          .first<{ id: string; status: string }>();
   return row ? { skill: row.id, status: row.status } : null;
 }
 
@@ -235,8 +243,12 @@ export function attributionStatements(db: D1Database, input: AttributionInput): 
   for (const skill of input.offered) {
     const verdict = attribute(used.has(skill), input.signal);
     if (verdict.credit === "none") continue;
-    const column = verdict.credit === "win" ? "wins" : "losses";
-    statements.push(db.prepare(`UPDATE improve_skills SET ${column} = ${column} + 1 WHERE id = ?1`).bind(skill));
+    // Spelled out for the same reason as above.
+    statements.push(
+      verdict.credit === "win"
+        ? db.prepare("UPDATE improve_skills SET wins = wins + 1 WHERE id = ?1").bind(skill)
+        : db.prepare("UPDATE improve_skills SET losses = losses + 1 WHERE id = ?1").bind(skill)
+    );
   }
   return statements;
 }

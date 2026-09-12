@@ -66,13 +66,18 @@ test("this module cannot create a skill at all, so it cannot create one that is 
   assert.equal(/SET status\s*=/i.test(SOURCE.replace(/commitTransition[\s\S]*?\n\}/, "")), false, "only commitTransition may move a status");
 });
 
-test("a source that already produced a skill is queried including retired ones", () => {
+test("a source that already produced a skill is looked up without filtering by status", () => {
   // A skill retired for not helping would otherwise be abstracted again from the same
-  // attempt next pass, evaluated again, and retired again, forever.
+  // attempt next pass, evaluated again, and retired again, forever. Both columns are
+  // spelled out rather than interpolated, because a query assembled by concatenation
+  // cannot be reconstructed by the integration suite's query-plan guard, which is the
+  // only thing that reads every statement this Worker issues.
   const query = /alreadyAbstracted[\s\S]*?\n\}/.exec(SOURCE);
   assert.ok(query, "alreadyAbstracted is gone");
-  assert.equal(/status\s*(=|IN)\s*/.test(query[0].split("SELECT")[1]?.split("`")[0] ?? ""), false);
-  assert.match(query[0], /SELECT id, status FROM improve_skills WHERE \$\{column\} = \?1/, "it must not filter by status");
+  assert.match(query[0], /WHERE source_attempt = \?1 LIMIT 1/);
+  assert.match(query[0], /WHERE source_job = \?1 LIMIT 1/);
+  assert.equal(/\$\{/.test(query[0]), false, "no interpolation into the statement");
+  assert.equal(/status\s*(=|IN)/.test(query[0]), false, "and no status filter, or a retired source would look unused");
 });
 
 // ---- group 3: what gets offered --------------------------------------------------
