@@ -107,6 +107,65 @@ The driver is the `/improve work` command in Claude Code: it resumes a cleared g
 
 **One driver session per project folder.** The bearer token is fixed when the MCP server is configured, so a session holds one credential and works one namespace. Each repo folder configures its own from `~/.capsid/agent-<ns>-driver.key`. `/improve work all` therefore does not walk the portfolio on one credential: run from the `dev` folder it reports which repo folders have queued jobs, and each is launched separately.
 
+## Autonomy
+
+What the machine may do with no human in the loop. Both policies ship **disabled**, and
+each one lives in two places: a reviewable file in `docs/policy/`, and the copy the
+Worker actually reads, a signed document in the store. An unsigned copy, or one edited
+after signing, authorizes nothing.
+
+**Auto-merge** (`docs/policy/auto-merge.md`, read from `capsid/policy/auto-merge.md`).
+The five-minute tick walks every open pull request on the namespaces the policy names
+and merges only those that pass all seven checks, evaluated in order, each refusing on
+its own:
+
+| check | what it requires |
+| --- | --- |
+| `body_names_job` | the PR body carries the id of the job the work came from |
+| `author_is_driver` | that job was claimed by a minted, unrevoked agent of kind `driver` |
+| `base_is_default_branch` | the PR targets the repo's default branch |
+| `ci_green` | every check run on the head sha completed and concluded success, skipped or neutral, and at least one reported |
+| `paths_unprotected` | no changed path matches `PROTECTED_PATH_PATTERNS`, the list the loop enforces |
+| `paths_not_money` | no changed path names a billing or payment surface |
+| `no_migration_workflow_lockfile` | no changed path is a migration, a workflow or a lockfile |
+
+The document names the checks and the code enforces them: a check the Worker runs that
+the document does not name is refused at load time, and a test asserts the two agree in
+both directions. A pull request failing any check is left open, audited with the check
+that refused it, and reported under `improve_status` as awaiting the seat.
+
+**Pre-approved gates** (`docs/policy/gates.md`, read from `capsid/policy/gates.md`). A
+driver that reaches a push, a migration or a pull request blocks with the exact command,
+and every one of those waits on a person. This policy lets the seat send a bounded one
+back in itself: `jobs` action `resume` with `approved_by_policy` set to the document's
+version, refused unless the blocked command matches one of three classes.
+`additive_migration` is a `wrangler d1 execute` naming a `--file` under `migrations/`
+whose every statement is `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ... ADD COLUMN` or
+`CREATE INDEX`, with an unrecognized statement form a refusal rather than a pass.
+`push_branch` is a `git push origin <branch>` for a branch that is not `master` or
+`main`, with no force flag. `open_pr` is a `gh pr create`. A never-list is checked over
+the whole command before any class is tried: secrets, revocations, force pushes, pushes
+to a default branch, `wrangler deploy` and `rollback`, mode changes, drops and deletes,
+and merging a pull request, which stays the human's gate. The audit row records which
+class matched and what it matched on.
+
+**Signing is admin only.** `improve_run` action `sign_policy` signs the body **already
+stored** rather than any body the caller supplies, only in the `capsid` namespace and
+only under `policy/`, and a minted agent is refused outright. Turning a policy on is
+therefore two deliberate acts: editing the document, which is on the ordinary write
+tool's refusal list and needs `allow_improve_paths` plus `can_touch_protected`, and
+signing it again afterwards.
+
+**The nightly driver runs on this machine, not in the cloud.** `scripts/schedule-drivers.mjs`
+installs one Windows Task Scheduler task per project folder, each invoking `/improve work`
+in that folder at 04:00 America/Chicago, so each task reaches Capsid as exactly one
+driver agent from its own `~/.capsid/agent-<ns>-driver.key`. A Claude Code cloud routine
+was measured and rejected: a routine can attach only claude.ai connectors, the registered
+Capsid connector points at `/mcp`, the OAuth admin path, and there is no verified way to
+hand a routine a secret, so a nightly routine would run the whole queue on the wide
+credential the driver agents were minted to replace. The scheduler is off twice over:
+nothing is created without `--apply`, and an installed task is created disabled.
+
 ## Self-improvement loop
 
 An optional nightly loop that proposes one scoped change at a time to a small roster of repos, has each repo's own CI score it, and keeps only what improved the repo without regressing it. It is **off by default**, and every machine-authored change arrives as a pull request a human merges.
@@ -124,15 +183,53 @@ An optional nightly loop that proposes one scoped change at a time to a small ro
 ## Skills
 
 The loop abstracts an idea from work that landed and offers it back to other projects.
-Each skill is a row with a lifecycle: `candidate`, then `live` on two positive
-evaluations, then `retired` on two consecutive non-positive ones. Retired rows stay,
-with their record, so the same idea is not abstracted twice from the same source.
 
-A status changes on evaluation evidence and never on a driver's report of its own run.
-Evidence counts per version and per probe set, so an accepted edit resets it; edits are
-bounded at 20 percent of the instruction lines and accepted only on strict improvement.
-A skill is credited only when it was used and the verifier reported success, so an
+**A skill package is layered, and the Worker reads the layers separately.** The declared
+fields (trigger condition, namespaces, termination test, composition interface) live on
+the `improve_skills` row as well as in the repo's `SKILL.md` frontmatter, so the Worker
+matches a trigger and enforces a status without cloning a repository. The instruction
+body is a document, and it is what an edit is measured and bounded against. The repo
+copy is the reviewable source; the stored copy is what the machine acts on, the same
+split the policy documents use.
+
+**The lifecycle is three states.** Every skill starts `candidate`, including one
+abstracted from an attempt that was kept, since being born of a success says nothing
+about whether the written form helps anybody else. A candidate goes `live` on two
+positive evaluations; a live skill goes `retired` on two consecutive non-positive ones.
+Retired rows stay, with their record, so the same idea is not abstracted twice from the
+same source.
+
+**A status changes on evaluation evidence and never on a driver's report of its own
+run.** Two evaluations minimum in either direction: one result is a sample. Evidence
+counts per version and per probe set, so an accepted edit resets it. Edits are bounded
+at 20 percent of the instruction lines, counted by distinct lines touched, and accepted
+only on strict improvement; a tie is a rejection. Rejected edits are kept in
+`skill_edits` and handed to the next optimizer run, so a proposal already refused is not
+proposed again.
+
+**A skill is credited only when it was used and the verifier reported success**, so an
 offered-and-ignored skill and a run that died on the environment both earn nothing.
+Offered and used are both stored on `job_outcomes`, because the gap between them is its
+own measurement.
+
+**Failure notes are memory rather than a second score.** `skill_failures` carries a note
+per reverted attempt and failed job, linked to the skills in use at the time, and the
+recommend step attaches the two most recent for each skill it offers. Nothing there
+moves a status.
+
+**Two live skills whose triggers overlap and whose bodies differ by less than 10 percent
+are proposed for merging**, to a human. Only live skills: a candidate has not earned its
+place and a retired one is a record.
+
+**The evaluation cycle is fortnightly**, KV-configurable under
+`skills:evaluate:cadence-days` and riding the five-minute tick, which gates on the
+cadence before doing anything else. Each cycle runs the namespace's probe set in the
+scorer sandbox twice per skill, with it and without it, and records the difference. A
+cadence below one day falls back to the default rather than being obeyed.
+
+**The console carries a skills panel per namespace**: counts by status, the last
+evaluation, and the offered-to-used rate, which is the number a reader cannot compute
+from the others.
 
 Full model: `docs/schema.md`, under Skill records.
 
@@ -142,7 +239,7 @@ One page at `/console` that answers "what is the state of every namespace" witho
 
 - **Who gets in.** The GitHub admin session, and nothing else. The console rides the same GitHub OAuth app and the same single-admin check as the MCP flow, and turns the result into a signed cookie that lasts twelve hours. An operator key or an agent key gets a 403 that says so: those authenticate to `/ops/mcp`, and answering them with a login redirect would send a machine to GitHub.
 - **What it shows.** A header with the deployed sha, the schema version, the backup age, the month's spend against its caps and the improve mode. Then one row per namespace: the pause reason if any, whether the anchor block is pinned, the last run's attempts, kept and reverted, the four job counts, the truth report's integrity percentage, and the driver agent's last_seen. **A blocked job prints the exact command it is waiting on**, so the reader knows what to run.
-- **The agents panel** lists every credential with its kind, namespaces, flags held, last_seen and revoked state, beside what it did: jobs done, failed and blocked, pull requests opened and merged, and for a driver, its namespaces' attempts kept and reverted. Counts and rates only. No composite score.
+- **The agents panel** lists every credential with its kind, namespaces, flags held, last_seen and revoked state, beside what it did: jobs done, failed and blocked, pull requests opened and merged, and for a driver, its namespaces' attempts kept and reverted. A **verified** column carries the three numbers this Worker checked against GitHub itself, merge rate, CI green rate and median duration, kept separate from the counts the store wrote; a dash means there was nothing to divide by. Counts and rates only. No composite score.
 - **Recent activity** is the last 50 audit rows, filterable by namespace and by actor.
 - **Six controls**, each a POST with a CSRF token and a confirmation step that states what is about to happen before anything changes: pause, unpause, set the mode, resume a blocked job with the approval reason, mark a job failed, revoke an agent. Every one goes through the same function the MCP tool calls and writes its own audit row naming the person who clicked.
 - **It never merges and it never mints.** Merging can start a CI deploy in two of these repos, so that stays with `manage_pr` behind a caller holding `can_merge`; minting hands out a key, so that stays with the `agents` tool. Neither is in the console's action list, and a test asserts their absence.
@@ -325,11 +422,11 @@ MCP clients cache the tool list at connect time. After deploying new tools, reco
 
 Four things shipped on 2026-09-11. **Agents as users**: the credentials and the one enforcement point are live, and what remains there is operational, mint one agent per project and per machine then remove the operator hash (`docs/bootstrap.md`). **The console** (PR #20): the admin surface for what the queue holds, which jobs are blocked and on what command, and what the loop did last night. **The model-refresh skill**: a weekly cron in the claude-skills repo that rewrites the model-facing lines in this repo's skills and commands to match a named model's prompting guide, calibration only, never a gate or a ruling or task content. **Jobs as evidence** (PR #21): a verified outcome row per finished job, and agent records as counts and rates.
 
-Three items left, in order:
+Two more shipped on 2026-09-12. **Autonomy** (PR #24): auto-merge by signed policy, pre-approved gate classes, and a nightly scheduled driver, all described under Autonomy above. **Skill records** (PR #25): the lifecycle, the evaluation cycle, the bounded edit gate and the console panel, described under Skills above.
 
-1. **Autonomy.** Auto-merge by signed policy, pre-approved gate classes, and a nightly scheduled driver.
-2. **Skill records.** Capturing what an agent learned doing the work, in a form the next session retrieves.
-3. **The experiment scheduler**, once the loop has real nights behind it.
+One item left: **the experiment scheduler**, once the loop has real nights behind it.
+
+**Three switches, all off by default, each turned on separately.** The loop runs only when `improve_mode` in `APP_KV` is set to `subscription` or `api`, by `improve_run` action `mode`; anything unreadable or unexpected falls back to `off`. Auto-merge and pre-approved gates run only when their policy document's `enabled` field is `true` **and** the document has been signed again afterwards with `improve_run` action `sign_policy`, which is admin only; editing without re-signing leaves the policy authorizing nothing. The nightly driver exists only after `node scripts/schedule-drivers.mjs --install --namespace <ns> --apply`, and the task it creates is disabled until it is enabled by hand.
 
 ## License
 
