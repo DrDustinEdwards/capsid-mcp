@@ -317,6 +317,41 @@ export function improveExec(sql: string, params: unknown[], rows: ImproveRows): 
   }
 
 
+  // The optimizer's negative feedback: refused proposals only, newest first.
+  if (/FROM skill_edits/i.test(text)) {
+    const skill = params[0];
+    // THE FILTER IS READ FROM THE SQL, not assumed. A fake that applied `accepted = 0`
+    // whatever the query said could not disagree with a handler that stopped asking
+    // for it, and a plant removing that clause would leave this green.
+    const onlyRejected = /accepted = 0/i.test(text);
+    const mine = rows.skill_edits.filter((e) => e.skill === skill && (!onlyRejected || Number(e.accepted) === 0));
+    mine.sort((a, b) => String(b.evaluated_at).localeCompare(String(a.evaluated_at)));
+    return { handled: true, results: mine.slice(0, Number(params[1] ?? 5)) };
+  }
+
+  // The merge scan: live skills with a trigger, joined to their prose. Matched before
+  // the generic `FROM improve_skills s` reader for the reason that one documents.
+  if (/LEFT JOIN documents d/i.test(text)) {
+    // Both filters read from the SQL for the same reason as above: this branch must be
+    // able to disagree with a handler that dropped one of them.
+    const onlyLive = /s\.status = 'live'/i.test(text);
+    const needsTrigger = /s\.trigger_condition IS NOT NULL/i.test(text);
+    const out = rows.improve_skills
+      .filter(
+        (s) =>
+          (!onlyLive || String(s.status) === "live") &&
+          (!needsTrigger || (s.trigger_condition !== null && s.trigger_condition !== undefined))
+      )
+      .map((s) => ({
+        id: s.id,
+        status: s.status,
+        trigger_condition: s.trigger_condition,
+        body: (rows.documents ?? []).find((d) => d.path === s.body_ref && d.namespace === "capsid")?.body ?? null,
+      }));
+    return { handled: true, results: out };
+  }
+
+
   // ---- the skill records summary (migrations 0012, 0013) --------------------
   //
   // Modelled against the rows rather than answered empty, on this fake's own rule:

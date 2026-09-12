@@ -265,6 +265,28 @@ function namespaceRow(data: ConsoleData, ns: NamespaceStatus, csrf: string): str
     ? `<h4>Blocked jobs, and what each waits on</h4><ul class="blocked-list">${ns.jobs.blocked_jobs.map((j) => blockedJob(j, csrf)).join("")}</ul>`
     : "";
 
+  // THE SKILLS PANEL. Three numbers and a gap, because the gap is the one a reader
+  // cannot compute from the others: a skill offered often and used rarely is a trigger
+  // condition that does not describe the work, not a failing skill.
+  const s = ns.skills;
+  const total = s.candidate + s.live + s.retired;
+  const skills =
+    total === 0 && s.offered === 0
+      ? `<p class="quiet">No skills recorded for this namespace yet.</p>`
+      : `<ul class="facts">${[
+          fact("skills", `${s.candidate} candidate, ${s.live} live, ${s.retired} retired`),
+          s.use_rate === null
+            ? fact("use rate", "nothing offered yet", "warn")
+            : fact(
+                "use rate",
+                `${s.used} used of ${s.offered} offered (${Math.round(s.use_rate * 100)} percent)`,
+                s.use_rate >= 0.5 ? "good" : "warn"
+              ),
+          s.last_evaluation
+            ? fact("last evaluation", escapeHtml(s.last_evaluation))
+            : fact("last evaluation", "never evaluated", "warn"),
+        ].join("")}</ul>`;
+
   return `<section class="ns">
 <h3>${escapeHtml(ns.namespace)}</h3>
 ${paused}${anchorProblem}
@@ -277,6 +299,8 @@ ${
   }
 </div>
 ${blocked}
+<h4>Skills</h4>
+${skills}
 </section>`;
 }
 

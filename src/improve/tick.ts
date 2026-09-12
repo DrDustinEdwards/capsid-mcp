@@ -1,6 +1,7 @@
 import type { Env } from "../env";
 import { dispatchWorkflow } from "../github";
 import { autoMergeTick } from "../auto-merge";
+import { runEvaluationCycle } from "../skills-evaluate";
 import { expireJobLeases } from "../jobs";
 import { proposeChange, pushAttempt } from "../improve-attempt";
 import { pathMonitor } from "../improve-gates";
@@ -86,6 +87,19 @@ export async function tickRuns(env: Env, now: Date): Promise<TickOutcome[]> {
   } catch (err) {
     // A throwing merge step does not stop the improve runs advancing.
     console.error(`AUTO_MERGE_THREW: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // THE SKILL EVALUATION CYCLE rides this tick too, and gates itself on its own
+  // cadence rather than on the tick's: the tick runs every five minutes and the cycle
+  // runs fortnightly, so all but one invocation in four thousand returns immediately
+  // after one KV read. Placed with the others, before the budget check, because it
+  // spends CI rather than model tokens and an exhausted model budget says nothing
+  // about whether a skill is still earning its place.
+  try {
+    const cycle = await runEvaluationCycle(env, now);
+    if (cycle.ran) console.log(`SKILL_CYCLE ${cycle.note}`);
+  } catch (err) {
+    console.error(`SKILL_CYCLE_THREW: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   const runs = await advanceableRuns(env.DB, RUNS_PER_TICK);
