@@ -5,6 +5,7 @@ import { bounded, MAX_BODY, MAX_TITLE, nsName, resultRef } from "../limits";
 import { JOB_ACTIONS, JOB_LEASE_SECONDS, JOB_STATUSES, isJobStatus } from "../jobs-schema";
 import { SCOPE_FLAGS } from "../agents-schema";
 import { blockJob, claimJob, completeJob, failJob, heartbeatJob, listJobs, postJob, resumeJob } from "../jobs";
+import { parseEvidence } from "../job-outcomes";
 import { fail, ok, type ToolCtx } from "./docs";
 
 const MAX_JOB_ID = 64;
@@ -63,12 +64,23 @@ export function registerJobTools(server: McpServer, ctx: ToolCtx): void {
             "For resume: the version of capsid/policy/gates.md this approval is made under. Pass it when the seat is approving a blocked command on the signed gate policy rather than on a human having said yes. The Worker matches the command the job blocked on against the policy's classes (an additive migration, a branch push, opening a pull request) and REFUSES the resume when it matches none, so this narrows what the seat may approve alone rather than widening it. The audit row records which class matched and what it matched on."
           ),
         evidence: z
-          .object({
-            prs: z.array(resultRef).max(MAX_EVIDENCE_PRS).optional().describe("Pull request URLs this job produced."),
-            commits: z.number().int().nonnegative().optional(),
-            files_changed: z.number().int().nonnegative().optional(),
-            tests_added: z.number().int().nonnegative().optional(),
-          })
+          .union([
+            z.object({
+              prs: z.array(resultRef).max(MAX_EVIDENCE_PRS).optional().describe("Pull request URLs this job produced."),
+              commits: z.number().int().nonnegative().optional(),
+              files_changed: z.number().int().nonnegative().optional(),
+              tests_added: z.number().int().nonnegative().optional(),
+            }),
+            // A JSON STRING IS ACCEPTED TOO, and this is not a convenience. An MCP
+            // client caches the tool schema at connect time, so a session that
+            // connected before this parameter existed refuses the object LOCALLY and
+            // the Worker never sees it; that session then reports its work in prose
+            // and the outcome row stores nulls, which is the undercount this whole
+            // change exists to stop. Some clients also flatten an object to a string
+            // rather than dropping it. Both are a caller that knows what it did and
+            // cannot say so in the shape asked for, and refusing them buys nothing.
+            bounded(MAX_BODY),
+          ])
           .optional()
           .describe(
             "For complete: what the work produced. Every field is optional and an omitted one is recorded as NULL, never as 0, because 'nobody counted' and 'the count was zero' are different facts. Naming pull requests is what unlocks verification: the Worker reads each one from GitHub and stores ITS merge state, commit count and file count rather than yours, and checks the last one's head commit for a CI conclusion. tests_added is never verifiable here and is stored as your claim."
@@ -114,11 +126,17 @@ export function registerJobTools(server: McpServer, ctx: ToolCtx): void {
           }
           case "complete": {
             if (!args.id) return fail("complete needs the job id.");
+            // A string that does not parse is REFUSED rather than ignored. Silently
+            // dropping evidence is how a row ends up saying nothing happened, which is
+            // the failure this path exists to prevent.
+            const parsed = parseEvidence(args.evidence);
+            if ("error" in parsed) return fail(parsed.error);
+            const parsedEvidence = parsed.evidence;
             return ok(
               await completeJob(env, agent, now, args.id, {
                 result_summary: args.result_summary ?? "",
                 result_ref: args.result_ref,
-                evidence: args.evidence,
+                evidence: parsedEvidence,
               })
             );
           }

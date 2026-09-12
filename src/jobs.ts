@@ -18,6 +18,7 @@ import {
 } from "./jobs-schema";
 import type { Agent } from "./agents";
 import { approveByPolicy } from "./gate-policy";
+import { outcomePrStatements } from "./outcome-prs";
 import { readRepoFile } from "./github/contents";
 import { signTaskBody, verifySignedBody } from "./improve-task";
 import { loadRecordRows, recordFor } from "./agent-record";
@@ -493,6 +494,11 @@ async function holderTransition(
     const row = outcomeFrom(job, verdict, now);
     outcome = { row, notes: verdict.notes };
     statements.push(outcomeStatement(env.DB, row));
+    // ONE ROW PER PULL REQUEST THE EVIDENCE NAMED, in the same batch as the outcome.
+    // Until this existed the URLs were read once during verification and thrown away,
+    // so the row kept counts with no way back to what they counted, and the merge
+    // state it recorded at complete time could never be corrected.
+    statements.push(...outcomePrStatements(env.DB, job.id, patch.evidence?.prs ?? []));
   }
   await env.DB.batch(statements);
   return { ok: true, action, job, ...(outcome ? { outcome } : {}) };

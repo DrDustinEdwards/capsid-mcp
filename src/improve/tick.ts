@@ -2,6 +2,7 @@ import type { Env } from "../env";
 import { dispatchWorkflow } from "../github";
 import { autoMergeTick } from "../auto-merge";
 import { runEvaluationCycle } from "../skills-evaluate";
+import { sweepIfDue } from "../outcome-prs";
 import { expireJobLeases } from "../jobs";
 import { proposeChange, pushAttempt } from "../improve-attempt";
 import { pathMonitor } from "../improve-gates";
@@ -100,6 +101,18 @@ export async function tickRuns(env: Env, now: Date): Promise<TickOutcome[]> {
     if (cycle.ran) console.log(`SKILL_CYCLE ${cycle.note}`);
   } catch (err) {
     console.error(`SKILL_CYCLE_THREW: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // THE MERGE-STATE SWEEP, daily, on its own stamp. Every outcome row records a pull
+  // request as unmerged because the driver blocks and the seat merges afterwards; the
+  // merge path corrects the rows it can see, and this catches the ones it could not:
+  // a merge done with gh rather than manage_pr, and every row written before the join
+  // table existed. Bounded per sweep, so the cost is fixed however far behind it is.
+  try {
+    const swept = await sweepIfDue(env, now);
+    if (swept) console.log(`OUTCOME_SWEEP checked ${swept.checked}, changed ${swept.changed}, seeded ${swept.seeded}`);
+  } catch (err) {
+    console.error(`OUTCOME_SWEEP_THREW: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   const runs = await advanceableRuns(env.DB, RUNS_PER_TICK);
