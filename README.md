@@ -19,13 +19,13 @@ Every write snapshots the prior version into `document_versions` and appends to 
 ## How it works
 
 - **Memory.** Documents are typed (`core`, `concept`, `decision`, `task`, `episodic`, `procedural`, `prompt`, `source` and more), stored in D1 with FTS5 search, and grouped into namespaces that map to GitHub repos. `write` validates the type, so an off-schema document cannot escape the consolidation loop. Full model: [docs/schema.md](docs/schema.md).
-- **Agents.** Every caller resolves to an agent with its own key, scopes and audit identity, through one enforcement point. Scopes are five axes, and the blast-radius flags (merge, direct write, dispatch, workflows, protected paths, money paths) are held one at a time by separate roles.
+- **Agents.** Every caller resolves to an agent with its own key, scopes and audit identity, through one enforcement point. Scopes are five axes, and the blast-radius flags (merge, direct write, dispatch, workflows, protected paths, money paths, commenting on a pull request) are held one at a time by separate roles.
 - **Repo access.** A dedicated GitHub App mints short-lived installation tokens. The Worker reads and writes mapped repositories with no long-lived credential stored. The namespace mapping is the authorization boundary.
 - **The work queue.** A job hands a task from a chat that has no shell to a session that has no conversation. Bodies are signed, claims take a four-hour lease, and a job reaching a push, a deploy or a merge blocks with the exact command a human runs.
 - **The self-improvement loop.** An optional nightly loop proposes one scoped change at a time, has each repo's own CI score it against hidden tests, and opens a pull request only for changes that improved the repo without regressing an anchor. Off by default, and it never merges.
 - **The console.** One admin page at `/console` showing every namespace: pauses, job counts, the command each blocked job waits on, the agent inventory and recent activity. It renders what the tools already compute.
 - **Backups.** A daily cron exports every table to R2 as JSON plus a markdown mirror of every document body, pulled off-account daily. Restore is documented and rehearsed weekly against a scratch database.
-- **Audit trail.** Every write snapshots the prior version into `document_versions` and appends to `audit_log`. Every destructive write asks for confirmation first.
+- **Audit trail.** Every write snapshots the prior version into `document_versions` and appends to `audit_log`. Every destructive document write asks for confirmation first.
 
 ## Documentation
 

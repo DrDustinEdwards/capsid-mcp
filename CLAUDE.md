@@ -9,7 +9,7 @@ Capsid: a single-user, Cloudflare-native MCP server serving a consolidated knowl
 **Capsid documents itself, and those documents outrank this file.** Read them before trusting any description of this system, including this one:
 
 - `capsid/conventions.md` portfolio-wide standing rules. Read first, every session.
-- `capsid/core.md` what Capsid IS and its current status. The only place status lives: tool count, deployed sha, open items.
+- `capsid/core.md` what Capsid IS and its current status, for the things no gate can verify. Numbers the repo owns stay in the repo: the tool count is pinned in `src/counts.ts` and asserted against the registrations, and the deployed sha is served by `/health` and asserted against master head by `npm run verify:live`.
 - `capsid/decisions.md` the rulings and why they are what they are.
 - `capsid/schema.md` the knowledge model and the lint loop.
 - `capsid/repo-structure.md` the 9-layer precedence model and the .claude standard shape.
@@ -24,7 +24,7 @@ End: write NOTHING by default. The end-of-session episodic was withdrawn portfol
 
 - **MCP tool lists cache at connect time.** A tool deployed mid-session is invisible until the connector reconnects or a new chat starts. Verified again 2026-08-14, when a reconnected session still held 22 tools against a deployed 24.
 - To verify a fresh deploy without waiting for a reconnect, call the Worker directly: POST `initialize`, then `notifications/initialized`, then `tools/call`, parsing SSE `data:` lines. The OAuth access token is in `~/.claude/.credentials.json` under `mcpOAuth` (key prefix `capsid|`). Never print it.
-- Two gated paths: OAuth on `/mcp` for human clients, agent and operator keys on `/ops/mcp` for agents and cron. Every caller resolves to a scoped agent and every tool call goes through one enforcement point; the legacy operator key keeps its authority until its hash is removed by hand. The model is in README.md under **Auth model**; minting one is `docs/bootstrap.md`.
+- Two gated paths: OAuth on `/mcp` for human clients, agent and operator keys on `/ops/mcp` for agents and cron. Every caller resolves to a scoped agent and every tool call goes through one enforcement point; the legacy operator key keeps its authority until its hash is removed by hand. The model is `docs/auth.md`; minting one is `docs/bootstrap.md`.
 
 ## Commands
 
@@ -58,4 +58,4 @@ End: write NOTHING by default. The end-of-session episodic was withdrawn portfol
 
     npx wrangler d1 export capsid --remote --no-schema --table <table> --output export-<table>.sql
 
-Export the real tables individually (ELEVEN since migrations/0006_jobs.sql added the work queue; `TABLES` in `src/backup.ts` is the list, and test/backup.test.ts derives it from `migrations/` in both directions), take the schema from `migrations/`, and import `documents` FIRST so the FTS triggers rebuild the index. Never export `documents_fts` or its shadow tables. Full runbook, including the measured traps: `capsid/protocol-restore.md`.
+Export the real tables individually (SEVENTEEN as of migrations/0015_outcome_prs.sql; `TABLES` in `src/backup.ts` is the list, and test/backup.test.ts derives it from `migrations/` in both directions), take the schema from `migrations/`, and import `documents` FIRST so the FTS triggers rebuild the index. Never export `documents_fts` or its shadow tables. Full runbook, including the measured traps: `capsid/protocol-restore.md`.
