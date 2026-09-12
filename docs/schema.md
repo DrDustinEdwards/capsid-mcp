@@ -243,6 +243,92 @@ opened ten and merged one.
 the claim against this same function, so the bar a claim is measured against is the
 number a human can read on the page.
 
+## Roles, and what each one cannot do
+
+Ruled 2026-09-12. **Roles are few and separated, and a role is one capability rather
+than a bundle.** `scripts/mint-agents.mjs` holds them and a test fails the build if any
+role names a second blast-radius flag, because a role that accumulates flags is a
+driver wearing a different name.
+
+**A reviewer never writes code.** Commenting on a pull request goes through
+`manage_pr`, which is a write tool, so the reviewer needs the write grant; `can_comment_pr`
+is what stops that grant also being merge and close. It is the smallest write this
+Worker makes, separated from the largest on purpose.
+
+**The tools axis can name an action.** `jobs` is one tool with a read action and seven
+write ones, and "may post a job" and "may claim, complete and resume one" are different
+authorities the tool name cannot separate. So an entry may be qualified, `jobs.post`,
+and the rule is stated once in `allowsToolAction`:
+
+- `*` allows everything, so every agent minted before this is untouched.
+- A list naming at least one action **of this tool** is narrowed to the actions it names.
+- A bare tool name with no qualified sibling still means the whole tool. Narrowing is
+  opted into, never inherited.
+- A qualified entry narrows only its own tool.
+
+The two tools whose action decides what they do, `jobs` and `lint`, pass the action to
+`checkScope` where it is known. That is the same shape the grant check already used and
+not a second enforcement point.
+
+## Two corrections, then a human
+
+`resume` made a gate a pause rather than an ending (migrations/0007), and left the loop
+unbounded: block, sent back, block again, sent back again, block again. Every step is
+defensible on its own, which is why the ceiling is **counted rather than argued** at
+each one.
+
+`jobs.corrections_count` (migrations/0016) is that ceiling's budget. It is deliberately
+a third counter beside `blocked_count` and `resumed_count`, which are history and are
+never reset: those answer "how many gates has this job hit" and "how many times has it
+come back", and deriving the budget from them would tie the cap to gates the job passed
+legitimately.
+
+- `resume` spends one. At `CORRECTION_CAP` (2) a further resume is refused for a driver
+  **and for the seat**, because the seat is a machine and the cap exists to put a person
+  at the boundary.
+- An **admin** resume passes and does **not** spend the budget. The human arriving is
+  what lifts the cap, not what spends it.
+- `block` writes `retry cap; human decision required` into `result_summary`, above
+  whatever the driver said rather than instead of it: the person now deciding needs to
+  read what the driver was trying to do.
+- `atCorrectionCap` **fails closed**. A count that is not a finite number at or above
+  zero is treated as at the cap, because a budget that cannot be read is one that cannot
+  be bounded.
+
+## The review gate
+
+`jobs.review_required` (migrations/0017) says a job's work needs a second reader before
+it reaches the seat. A gate on the **row**, checked by the Worker, because the
+alternative is a driver remembering to wait, which is the party being reviewed deciding
+whether it is reviewed.
+
+**A review is a comment** whose body starts with `REVIEW:` and ends with `APPROVE`,
+`CHANGES` or `BLOCK`. Deliberately not a GitHub review approval: the reviewer agent holds
+`can_comment_pr` and nothing else, so a comment is the only mark it can leave, and
+reading the thing the credential can actually write is what keeps the credential narrow.
+
+The envelope is strict at both ends and `src/review.ts` states why. A comment that opens
+with `REVIEW:` and trails off is a reviewer who did not finish, and inventing a verdict
+there is the one thing this parser must never do; a comment ending in `APPROVE` without
+the prefix is ordinary prose that happens to end in a word.
+
+**The newest review wins**, ordered by timestamp rather than by the order GitHub
+returned, because a reviewer that said `CHANGES`, watched the driver fix it and then
+said `APPROVE` has changed its mind.
+
+| verdict | what happens |
+| --- | --- |
+| none yet | the job stays claimed and its lease keeps running |
+| `APPROVE` | the hand-off proceeds exactly as it would with no reviewer |
+| `CHANGES` | back to the driver, and it **spends a correction** from the budget above |
+| `BLOCK` | blocked for the seat, with the objection as the reason |
+
+Both `complete` and `block` consult it. A gate on one of them is not a gate: the driver
+would use the other and the bypass would look like ordinary use. A job with no
+`review_required`, or one whose `result_ref` is not a pull request, proceeds untouched.
+**An unreadable GitHub holds the job** rather than waving it through, since an unreadable
+comment list is not evidence that anybody read the code.
+
 ## Skill records
 
 A skill is an idea abstracted from work that landed, written down so another project

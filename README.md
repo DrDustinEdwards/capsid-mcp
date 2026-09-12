@@ -45,8 +45,24 @@ Scopes are five axes. `namespaces` and `repos` are a list or `*`. `tools` is an 
 | `can_write_workflows` | writing under `.github/workflows/` |
 | `can_touch_protected` | tests, CI, lint and compiler config, lockfiles, manifests, the agent steering layer, migrations |
 | `money_paths` | a path naming a billing or payment surface |
+| `can_comment_pr` | commenting on a pull request, which is the smallest write `manage_pr` makes and is deliberately not `can_merge` |
 
 A new agent gets read on its named namespaces and no flags. Scopes are stored as JSON and the parse fails closed: a null, truncated or wrong-shaped column resolves to no namespaces, no tools, no grants and no flags.
+
+### Roles
+
+Roles are few and separated, and each one is a single capability rather than a bundle. `scripts/mint-agents.mjs` holds them; `node scripts/mint-agents.mjs --roles` prints a mint command for each, and a test fails the build if any role names a second blast-radius flag.
+
+| role | reads | writes | flag |
+| --- | --- | --- | --- |
+| `<ns>-driver` | its own namespace | its own namespace, pull requests only | none |
+| `auditor` | every namespace and repo | nothing at all | none |
+| `reviewer` | every namespace and repo | a comment on a pull request | `can_comment_pr` |
+| `watcher` | every namespace | `jobs.post`, and no other job action | none |
+| `seat` | every namespace | every namespace | `can_merge` |
+| `site-seat` | `dustinedwards` | `dustinedwards` | `can_merge` |
+
+The reviewer and the watcher both need the write grant, because commenting and posting a job both go through write tools. What keeps that from being a general write is the **tools axis, which may name an action**: an entry can be qualified, `jobs.post` or `manage_pr.comment`, and a list naming at least one action of a tool is narrowed to the actions it names. A bare tool name with no qualified sibling still means the whole tool, and `*` still allows everything, so no agent minted before this changes behaviour. The two tools whose action decides what they do (`jobs` and `lint`) pass the action to `checkScope` at the point where it is known, which is the same shape the grant check already uses.
 
 The `agents` tool is **admin only**, because an agent that could mint another could widen itself. `mint` returns a key once and stores only its sha256. `list` is the inventory, revoked rows included. `revoke` sets `revoked_at` rather than deleting, so rows an agent wrote still resolve to what it was allowed to do, while its key stops resolving immediately. `update_scopes` replaces named axes and leaves the rest.
 
@@ -101,6 +117,8 @@ The queue hands a task from a chat that has no shell to a session that has no co
 - **`complete` takes a `result_ref`**, a document key or a pull request URL, and an optional `evidence` object (`prs`, `commits`, `files_changed`, `tests_added`).
 - **Finishing a job writes one row of evidence.** `complete` and `fail` each write a single `job_outcomes` row, and the Worker never stores a count it could check and did not: every pull request named in `evidence` is read from GitHub, so the merge, commit and file counts recorded are GitHub's rather than the driver's, and the last one's head commit is checked for a CI conclusion. A per-field `verified` flag says which numbers were checked, a field nobody reported is `NULL` rather than `0`, and the row is written once, enforced by its primary key. An unreachable GitHub costs the verified flags, never the driver's ability to close finished work.
 - **Agent records are built from those rows.** `improve_status` and the console carry a record per credential: jobs done, failed and blocked, gates hit and resumes, pull requests opened and merged, a merge rate, a CI green rate and a median duration. Counts and rates only, never a composite score, and only a verified field feeds a rate, since a rate built from what a credential said about itself is a credential grading its own work. A rate with no denominator is `null`, not zero.
+- **Two corrections, then a human.** `resume` makes a gate a pause rather than an ending, and `corrections_count` is what bounds the loop that opens: a driver sent back twice has spent the budget, and the third hand-off is refused for a driver AND for the seat, with `retry cap; human decision required` written into the summary above whatever the driver said. Only an **admin** resume passes at the cap, and it does not spend the budget, because the human arriving is what lifts it rather than what spends it. The counter is separate from `blocked_count` and `resumed_count`, which are history and count every gate a job legitimately passed.
+- **A reviewer, when a job asks for one.** `post` takes `review_required`. The driver then cannot complete or block a job carrying a pull request until a comment on it starts with `REVIEW:` and ends with `APPROVE`, `CHANGES` or `BLOCK`. APPROVE hands it on as it would with no reviewer; CHANGES sends it back to the driver and spends a correction; BLOCK stops it for the seat with the objection as the reason. The newest review wins, since a reviewer that watched a fix land is allowed to change its mind. A comment rather than a GitHub review approval, because the reviewer holds `can_comment_pr` and nothing else: reading the mark that credential can actually leave is what keeps it narrow. Both transitions consult it, because a gate on one is one the other bypasses, and an unreadable GitHub holds the job rather than reading as an approval.
 - **The table is the source of truth for status.** Every job mirrors to `<namespace>/jobs/<id>.md`, rewritten in the same batch as each transition, so `brief` and `search` see the queue. Every transition is a keyed `UPDATE ... RETURNING`, so one caller wins a contested job.
 
 The driver is the `/improve work` command in Claude Code: it resumes a cleared gate, claims one job, does it in that namespace's clone under that repo's rules, and reports back.
@@ -246,6 +264,15 @@ One page at `/console` that answers "what is the state of every namespace" witho
 - **`GET /console.json`** serves the same object the page renders, so a dashboard or a chat reads the state without scraping.
 
 The page is self-contained: no scripts, no external fonts, one inline stylesheet, and a CSP that denies everything by default. Light and dark come from `prefers-color-scheme`.
+
+## The watcher
+
+A half-hourly step on the five-minute tick that reads the surface and, when something is wrong, **posts a job**. That is all it does: it holds no blast-radius flag, it is scoped to `jobs.post`, and it cannot claim what it posts or fix what it found.
+
+- **What it reads.** `/health` against master (degraded store, a deployed sha that is not master head, a backup older than the window or that never ran, a live schema behind the newest migration); `improve_status` (a pause the loop set itself, a monthly cap over 80 percent); blocked jobs older than a day; and CI on each roster repo's default branch, red for more than two hours.
+- **A healthy surface posts nothing**, and a pause a human set is not a finding. A watcher that cried every half hour would be muted inside a week, and the queue would still look watched.
+- **Deduplication is the queue's own rule.** The finding's fingerprint goes in the job title, and `post` already refuses a duplicate while one is open, so a finding posts once and stays posted until it clears. A finding that stops being found has its job failed with `cleared`, keyed on `queued` so a job a driver has claimed is never closed underneath it.
+- **Cadence** is `watcher:cadence-minutes` in `APP_KV`, 30 by default, with a floor of 5. It rides the tick before the budget check, with the lease sweep and auto-merge, because it spends no model tokens and no CI minutes and an exhausted budget is exactly when nobody is looking.
 
 ## Endpoints
 
