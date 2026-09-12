@@ -24,6 +24,7 @@ import type { Env } from "./env";
 import type { Agent } from "./agents";
 import { postJob } from "./jobs";
 import { bytesToHex } from "./encoding";
+import { noFlags } from "./agents-schema";
 
 const DOCS = "https://platform.claude.com/docs/en";
 const OVERVIEW = `${DOCS}/about-claude/models/overview.md`;
@@ -121,14 +122,10 @@ export function skillsRefreshAgent(): Agent {
       repos: [],
       tools: ["jobs"],
       grants: ["write"],
-      flags: {
-        can_merge: false,
-        can_direct_write: false,
-        can_dispatch: false,
-        can_write_workflows: false,
-        can_touch_protected: false,
-        money_paths: false,
-      },
+      // DERIVED, never spelled out. This object listed the six flags by hand and
+      // went stale the moment a seventh was added, which is the drift the rest of
+      // this codebase keeps a single list to avoid.
+      flags: noFlags(),
     },
     admin: false,
     row: null,

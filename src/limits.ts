@@ -20,6 +20,9 @@ export const MAX_SHA = 128;
 export const MAX_COMMIT_MESSAGE = 4096;
 export const MAX_PR_TITLE = 512;
 export const MAX_PR_BODY = 65_536;
+// A review comment. Smaller than a PR body on purpose: a verdict plus its reasons is
+// a paragraph, and GitHub's own comment ceiling is 65_536 either way.
+export const MAX_PR_COMMENT = 16_384;
 
 export const MAX_ROWS = 500;
 export const SEARCH_ROWS = 25;

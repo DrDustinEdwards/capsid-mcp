@@ -99,7 +99,12 @@ export function registerJobTools(server: McpServer, ctx: ToolCtx): void {
         // EVERYTHING ELSE CHANGES THE QUEUE, so the grant is checked here rather than
         // at the registrar: `jobs` is one tool with a read action and seven write
         // ones, and the registrar cannot know which this call is.
-        const refusal = ctx.scope({ tool: "jobs", grant: "write", namespace: args.namespace });
+        //
+        // The ACTION goes with it, because the same fact that makes the grant
+        // uncheckable at the registrar makes the tools axis uncheckable there: a
+        // watcher scoped to `jobs.post` may post and may not claim, and only here is
+        // it known which of those this call is.
+        const refusal = ctx.scope({ tool: "jobs", action: args.action, grant: "write", namespace: args.namespace });
         if (refusal) return fail(refusal);
         switch (args.action) {
           case "post": {

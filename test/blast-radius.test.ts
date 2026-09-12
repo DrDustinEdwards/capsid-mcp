@@ -91,6 +91,12 @@ const PLANTS: Array<{ flag: ScopeFlag; tool: string; args: Record<string, unknow
     what: "a merge, which can trigger a deploy on a repo that deploys on push",
   },
   {
+    flag: "can_comment_pr",
+    tool: "manage_pr",
+    args: { namespace: "capsid", number: 7, action: "comment", comment: "REVIEW: looks fine. APPROVE" },
+    what: "a comment on a pull request, which is the one write a reviewer makes and is not a merge",
+  },
+  {
     flag: "can_dispatch",
     tool: "ci_dispatch",
     args: { namespace: "capsid", workflow: "verify.yml", ref: "master" },

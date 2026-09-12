@@ -152,11 +152,26 @@ export async function managePr(
   env: Env,
   namespace: string,
   number: number,
-  action: "merge" | "close",
+  action: "merge" | "close" | "comment",
   mergeMethod: "merge" | "squash" | "rebase" = "squash",
-  repoSelector?: string
+  repoSelector?: string,
+  comment?: string
 ) {
   const { owner, repo } = await resolveRepo(env, namespace, repoSelector);
+  // A COMMENT LEAVES THE PULL REQUEST OPEN AND CHANGES NO BRANCH. It is handled
+  // before the other two for that reason: it must never reach the head-branch
+  // cleanup below, which exists because merge and close END a pull request.
+  if (action === "comment") {
+    if (!comment) throw new Error("comment needs a body; a comment action with nothing to say is a call that did nothing.");
+    const resp = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/issues/${number}/comments`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ body: comment }),
+    });
+    if (!resp.ok) throw new Error(`comment failed (${resp.status}): ${await resp.text()}`);
+    const data = (await resp.json()) as { id: number; html_url: string };
+    return { repo: `${owner}/${repo}`, number, action: "comment", comment_id: data.id, url: data.html_url };
+  }
   if (action === "merge") {
     const resp = await ghFetch(env, owner, repo, `/repos/${owner}/${repo}/pulls/${number}/merge`, {
       method: "PUT",

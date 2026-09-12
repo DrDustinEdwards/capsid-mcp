@@ -132,11 +132,21 @@ test("an unknown namespace is refused, and the refusal names the known ones", ()
 });
 
 test("parseArgs reads --apply and --namespace, and refuses a bare --namespace", () => {
-  assert.deepEqual(parseArgs([]), { apply: false, namespace: undefined });
-  assert.deepEqual(parseArgs(["--apply"]), { apply: true, namespace: undefined });
-  assert.deepEqual(parseArgs(["--namespace", "capsid", "--apply"]), { apply: true, namespace: "capsid" });
+  assert.deepEqual(parseArgs([]), { apply: false, namespace: undefined, role: undefined, roles: false });
+  assert.deepEqual(parseArgs(["--apply"]), { apply: true, namespace: undefined, role: undefined, roles: false });
+  assert.deepEqual(parseArgs(["--namespace", "capsid", "--apply"]), { apply: true, namespace: "capsid", role: undefined, roles: false });
   // A value-less flag would otherwise select every agent and mint the lot.
   assert.throws(() => parseArgs(["--namespace"]), /needs a value/);
+});
+
+test("parseArgs reads the role selectors, and refuses the two selectors together", () => {
+  assert.deepEqual(parseArgs(["--role", "auditor", "--apply"]), { apply: true, namespace: undefined, role: "auditor", roles: false });
+  assert.deepEqual(parseArgs(["--roles"]), { apply: false, namespace: undefined, role: undefined, roles: true });
+  assert.throws(() => parseArgs(["--role"]), /needs a value/);
+  // The two select different lists. Accepting both and preferring one would mint
+  // something the caller did not name, which is the failure --namespace already
+  // refuses for an unknown value.
+  assert.throws(() => parseArgs(["--namespace", "capsid", "--role", "auditor"]), /one or the other/);
 });
 
 test("the key file path is the one docs/bootstrap.md and the driver both name", () => {

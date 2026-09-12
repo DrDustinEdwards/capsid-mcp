@@ -24,7 +24,7 @@ import {
   searchCode,
   writeRepoFile,
 } from "../github";
-import { bounded, CI_DISPATCH_MAX_INPUTS, DEFAULT_SCAN_FILES, DEFAULT_SCAN_RESULTS, MAX_BODY, MAX_COMMIT_MESSAGE, MAX_PATH, MAX_PR_BODY, MAX_PR_TITLE, MAX_QUERY, MAX_REF, MAX_REPO_SELECTOR, MAX_SCAN_CAP, MAX_SHA, nsName } from "../limits";
+import { bounded, CI_DISPATCH_MAX_INPUTS, DEFAULT_SCAN_FILES, DEFAULT_SCAN_RESULTS, MAX_BODY, MAX_COMMIT_MESSAGE, MAX_PATH, MAX_PR_BODY, MAX_PR_COMMENT, MAX_PR_TITLE, MAX_QUERY, MAX_REF, MAX_REPO_SELECTOR, MAX_SCAN_CAP, MAX_SHA, nsName } from "../limits";
 import { fail, ok, type ToolCtx } from "./docs";
 import { repoWriteFlags } from "../scope";
 import { reverifyPr } from "../outcome-prs";
@@ -278,22 +278,31 @@ export function registerRepoTools(server: McpServer, ctx: ToolCtx): void {
     {
       annotations: hintsFor("manage_pr"),
       description:
-        "Merge or close an open pull request in a namespace's repo. action 'merge' uses merge_method (default 'squash'); action 'close' just closes it. EITHER WAY IT DELETES THE HEAD BRANCH, because write_repo_file's PR mode creates one per write and nothing else cleans them up (capsid/conventions.md, 2026-09-06); the result carries head_branch and head_branch_deleted, plus head_branch_note when it declined. It REFUSES to delete the default branch, a branch under the improve loop's prefix, or a head branch on a fork, and a cleanup failure never fails the merge or close itself since that already succeeded. Merging can trigger CI deploys in repos with deploy workflows (foxhound): prefer PR mode plus manage_pr for anything touching live behavior, per conventions. Requires operator key.",
+        "Merge, close or comment on an open pull request in a namespace's repo. action 'merge' uses merge_method (default 'squash'); action 'close' just closes it; action 'comment' posts `comment` on the pull request and changes nothing else, needs the can_comment_pr flag rather than can_merge, and leaves the branch alone. MERGE AND CLOSE DELETE THE HEAD BRANCH, because write_repo_file's PR mode creates one per write and nothing else cleans them up (capsid/conventions.md, 2026-09-06); the result carries head_branch and head_branch_deleted, plus head_branch_note when it declined. It REFUSES to delete the default branch, a branch under the improve loop's prefix, or a head branch on a fork, and a cleanup failure never fails the merge or close itself since that already succeeded. Merging can trigger CI deploys in repos with deploy workflows (foxhound): prefer PR mode plus manage_pr for anything touching live behavior, per conventions. Requires operator key.",
       inputSchema: {
         namespace: nsName,
         number: z.number().int().positive(),
-        action: z.enum(["merge", "close"]),
+        action: z.enum(["merge", "close", "comment"]),
         merge_method: z.enum(["merge", "squash", "rebase"]).optional(),
+        comment: bounded(MAX_PR_COMMENT).optional().describe("For action 'comment': the comment body. Required for that action and refused for the others."),
         repo: bounded(MAX_REPO_SELECTOR).optional().describe(REPO_ARG),
       },
     },
-    ({ namespace, number, action, merge_method, repo }) =>
+    ({ namespace, number, action, merge_method, comment, repo }) =>
       guardedWrite(
         "manage_pr",
         namespace,
         null,
         async () => {
-          const result = await managePr(env, namespace, number, action, merge_method ?? "squash", repo);
+          // The argument belongs to exactly one action. Refused rather than ignored
+          // in both directions: a comment silently dropped from a merge call is a
+          // review nobody posted, and a merge_method on a comment is a caller who
+          // believes something else is about to happen.
+          if (action === "comment" && !comment) return fail("manage_pr action 'comment' needs a comment body.");
+          if (action !== "comment" && comment !== undefined) {
+            return fail(`manage_pr action '${action}' takes no comment; only action 'comment' posts one.`);
+          }
+          const result = await managePr(env, namespace, number, action, merge_method ?? "squash", repo, comment);
           // A MERGE IS WHEN AN OUTCOME ROW'S MERGE STATE BECOMES WRONG. The driver
           // wrote "opened, not merged" at complete time and was right then; this is
           // the moment it stops being true, so the rows that named this pull request
