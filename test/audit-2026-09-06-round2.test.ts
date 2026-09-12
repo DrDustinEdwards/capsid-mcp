@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { buildServer } from "../src/server.ts";
-import { ciDispatch, deleteBranch, deleteRepoFile, writeRepoFile } from "../src/github.ts";
+import { SELF_REPO, ciDispatch, deleteBranch, deleteRepoFile, writeRepoFile } from "../src/github.ts";
 import { checkHoldout, type ScoreReport } from "../src/improve-scorer.ts";
 import { mcpOriginProblem } from "../src/headers.ts";
 import { tickRuns } from "../src/improve-run.ts";
@@ -50,10 +50,15 @@ test("ci_dispatch refuses improve-score.yml before any network call", async () =
   });
 });
 
+// These three drive the SELF repo, so they take it from SELF_REPO rather than
+// spelling it out. A hardcoded copy is what made the improve fixtures land one
+// word away from the real mapping and test nothing (see self-repo-attempt.test.ts);
+// the 2026-09-12 rename to DrDustinEdwards/capsid would have done it again.
+// The literal value is pinned once, in repo-name.test.ts.
 test("write_repo_file mode direct against the server's own repo is refused, with no network", async () => {
   await withFetch({}, async (calls) => {
     await assert.rejects(
-      () => writeRepoFile(repoEnv("DrDustinEdwards/capsid-mcp"), "capsid", "src/x.ts", "x", "m", "direct"),
+      () => writeRepoFile(repoEnv(SELF_REPO), "capsid", "src/x.ts", "x", "m", "direct"),
       /own repo/
     );
     assert.equal(calls.length, 0);
@@ -63,7 +68,7 @@ test("write_repo_file mode direct against the server's own repo is refused, with
 test("delete_repo_file mode direct against the server's own repo is refused", async () => {
   await withFetch({}, async (calls) => {
     await assert.rejects(
-      () => deleteRepoFile(repoEnv("DrDustinEdwards/capsid-mcp"), "capsid", "src/x.ts", "m", "direct"),
+      () => deleteRepoFile(repoEnv(SELF_REPO), "capsid", "src/x.ts", "m", "direct"),
       /own repo/
     );
     assert.equal(calls.length, 0);
@@ -72,10 +77,10 @@ test("delete_repo_file mode direct against the server's own repo is refused", as
 
 test("write_repo_file pr mode with the default branch as the work branch is refused on the self-repo", async () => {
   await withFetch(
-    { "GET /repos/DrDustinEdwards/capsid-mcp": { body: { default_branch: "master" } } },
+    { [`GET /repos/${SELF_REPO}`]: { body: { default_branch: "master" } } },
     async (calls) => {
       await assert.rejects(
-        () => writeRepoFile(repoEnv("DrDustinEdwards/capsid-mcp"), "capsid", "src/x.ts", "x", "m", "pr", "master"),
+        () => writeRepoFile(repoEnv(SELF_REPO), "capsid", "src/x.ts", "x", "m", "pr", "master"),
         /own repo/
       );
       assert.equal(calls.filter((c) => c.method !== "GET").length, 0, "nothing may be written");

@@ -64,7 +64,7 @@ if (!root) {
 if (namespace === "--backup-credential") {
   const backupKey = createHmac("sha256", root).update("capsid-backup-credential:v1").digest("hex");
   console.error("improve-derive-key: derived the backup credential key. Set it as the repo secret BACKUP_CREDENTIAL_KEY");
-  console.error("improve-derive-key: on DrDustinEdwards/capsid-backups (the mirror) and DrDustinEdwards/capsid-mcp (the restore rehearsal).");
+  console.error("improve-derive-key: on DrDustinEdwards/capsid-backups (the mirror) and DrDustinEdwards/capsid (the restore rehearsal).");
   process.stdout.write(`${backupKey}\n`);
   process.exit(0);
 }

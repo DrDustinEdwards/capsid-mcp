@@ -142,7 +142,7 @@ export async function handleConsoleCallback(request: Request, env: Env, now: Dat
     headers: {
       Authorization: `Bearer ${tokenData.access_token}`,
       Accept: "application/vnd.github+json",
-      "User-Agent": "capsid-mcp",
+      "User-Agent": "capsid",
     },
   });
   if (!userResp.ok) return refusal("failed to fetch github user", 502);

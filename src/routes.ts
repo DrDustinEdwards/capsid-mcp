@@ -289,7 +289,7 @@ async function handleCallback(request: Request, env: Env): Promise<Response> {
     headers: {
       Authorization: `Bearer ${tokenData.access_token}`,
       Accept: "application/vnd.github+json",
-      "User-Agent": "capsid-mcp",
+      "User-Agent": "capsid",
     },
   });
   if (!userResp.ok) return textResponse("failed to fetch github user", 502);

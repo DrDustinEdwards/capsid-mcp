@@ -283,7 +283,7 @@ async function putFile(
 // The repo this Worker deploys from. A write landing on its default branch is a
 // production deploy of the server itself, which is why commitOnBranch refuses direct
 // mode, and pr mode aimed at the default branch, against it.
-export const SELF_REPO = "DrDustinEdwards/capsid-mcp";
+export const SELF_REPO = "DrDustinEdwards/capsid";
 
 // THE WORKFLOW DIRECTORY IS NOT ORDINARY REPO CONTENT. The App holds Workflows:
 // write, verified by probe. A workflow is code CI executes with that repo's secrets
