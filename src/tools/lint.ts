@@ -9,18 +9,32 @@ import { docPath, GATHER_BUDGET, LINT_CONSUMED_MAX, nsName } from "../limits";
 import { improveWriteRefusal } from "../improve-scores";
 import { fail, ok, pathMutation, requireConfirmation, type ToolCtx } from "./docs";
 
+// Exported so test/lint-description.test.ts can derive the check list from a real
+// buildTruthReport response and assert this names every id. Inline, it was only
+// reachable by parsing the source, and a paraphrase cannot be derived from
+// anything.
+export const LINT_DESCRIPTION =
+  "Consolidation loop and truth report for a namespace. mode 'gather' (default, read-only) returns the packet a driving LLM needs to compile the wiki: current core.md, the concept and decision docs, every unconsolidated episodic and source doc, and the capsid schema and conventions rules. After writing the updated core.md and concept docs via write, call mode 'finalize' with consumed: the episodic/source paths that were compiled. Finalize moves them under archive/ (never deletes, never touches core or concept docs) and writes one audit row. mode 'report' measures the store instead of compiling it. It runs six checks and the response names each one by these ids: `contradictions` (prose asserting a number the artifact disagrees with), `stale_decisions`, `unbound_specs`, `broken_links`, `doc_vs_code_drift` (a repo path named in canon that is no longer in the repo) and `unconsolidated` (the episodic and source backlog). It also counts documents by type, which is reported beside the checks rather than being one of them, and produces ONE integrity percentage. It STORES the result as <namespace>/reports/lint-<date>.md so the trend is a document, and improve_status surfaces the latest number per namespace. A check that could not run is excluded from integrity rather than counted as clean. finalize and report require operator key; finalize also requires confirmation, elicited when the client supports it, otherwise pass confirm: true.";
+
 export function registerLintTools(server: McpServer, ctx: ToolCtx): void {
   const { env, db, actor } = ctx;
 
   // Consolidation loop (the LLM Wiki maintenance step). The Worker does no reasoning:
   // a capable client calls gather, synthesizes the update with the read and write
   // tools, then calls finalize to archive what it consumed.
+  //
+  // THE REPORT'S CHECKS ARE NAMED BY THEIR RESPONSE IDS, not paraphrased, because
+  // that is what lets a test derive this list from the report itself. It said
+  // "documents by type, contradictions, stale decisions, unbound specs, broken
+  // links, and doc-vs-code drift" until 2026-09-12: five real checks, one count
+  // that is not a check, and `unconsolidated` missing entirely. A description that
+  // miscounts what sits beside it is the defect the count lint exists for, and
+  // this one was the source docs/schema.md copied.
   server.registerTool(
     "lint",
     {
       annotations: hintsFor("lint"),
-      description:
-        "Consolidation loop and truth report for a namespace. mode 'gather' (default, read-only) returns the packet a driving LLM needs to compile the wiki: current core.md, the concept and decision docs, every unconsolidated episodic and source doc, and the capsid schema and conventions rules. After writing the updated core.md and concept docs via write, call mode 'finalize' with consumed: the episodic/source paths that were compiled. Finalize moves them under archive/ (never deletes, never touches core or concept docs) and writes one audit row. mode 'report' measures the store instead of compiling it: documents by type, contradictions (prose asserting a number the artifact disagrees with), stale decisions, unbound specs, broken links, and doc-vs-code drift (a repo path named in canon that is no longer in the repo), plus ONE integrity percentage. It STORES the result as <namespace>/reports/lint-<date>.md so the trend is a document, and improve_status surfaces the latest number per namespace. A check that could not run is excluded from integrity rather than counted as clean. finalize and report require operator key; finalize also requires confirmation, elicited when the client supports it, otherwise pass confirm: true.",
+      description: LINT_DESCRIPTION,
       inputSchema: {
         namespace: nsName,
         mode: z.enum(["gather", "finalize", "report"]).optional(),

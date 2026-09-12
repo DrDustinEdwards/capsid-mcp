@@ -36,9 +36,11 @@
   // exports the same number and test/cloudflare-platform.test.ts fails if they
   // drift; that test also asserts the floor, so shrinking this is a build failure.
   "limits": { "cpu_ms": 3500 },
-  // THREE CRONS. src/index.ts dispatches on which one fired and exports the same
-  // three strings; test/improve-cron.test.ts derives one list from the other and
-  // fails in both directions, so this config and the handler cannot drift.
+  // FOUR CRONS. src/index.ts dispatches on which one fired and exports the same
+  // four strings; test/improve-cron.test.ts derives one list from the other and
+  // fails in both directions, so this config and the handler cannot drift. That
+  // test also derives the two counts in this comment from the array below, because
+  // this said THREE for as long as the fourth cron has existed.
   //   "0 9 * * *"    the daily backup.
   //   "0 8,9 * * *"  the improve opener. Two UTC hours because cron expressions
   //                  are UTC only and 03:00 America/Chicago is 08:00 UTC in CDT
