@@ -48,11 +48,16 @@ test("both improve crons rethrow after logging, like the backup cron", () => {
   }
 });
 
-test("README documents wrangler rollback as the code-recovery path", () => {
-  const readme = read("README.md");
-  assert.match(readme, /^## Rollback$/m, "the Rollback section is gone");
-  assert.match(readme, /wrangler rollback/, "the rollback command is undocumented");
-  assert.match(readme, /wrangler deployments list/, "the version-listing step is missing");
+// The rollback section moved out of README.md into docs/rollback.md when the
+// README was cut to its top-level shape. The guard follows the content: the
+// assertions are the same three, against the file that now holds them.
+test("docs/rollback.md documents wrangler rollback as the code-recovery path", () => {
+  const doc = read("docs/rollback.md");
+  assert.match(doc, /^# Rollback$/m, "the Rollback document lost its heading");
+  assert.match(doc, /wrangler rollback/, "the rollback command is undocumented");
+  assert.match(doc, /wrangler deployments list/, "the version-listing step is missing");
+  // And the README still points at it, so the path is findable from the front page.
+  assert.match(read("README.md"), /docs\/rollback\.md/, "the README never links the rollback doc");
 });
 
 // ---- rollback on a failed gate (residual 7) ---------------------------------

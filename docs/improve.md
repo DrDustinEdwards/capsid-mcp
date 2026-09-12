@@ -7,6 +7,17 @@ the rest. It is **off by default** and it never merges anything.
 **This document is redacted from the private canon.** The roster, the scores, the
 holdout contents and the rulings are not here. What is here is the design and the
 reasoning, which is the part worth reading if you are building something similar.
+## How it runs
+
+- **Modes.** `subscription` has the Worker write a task document for a session to run, so it calls no model itself. `api` calls the model directly. `off` is the default, and any unreadable or unexpected setting falls back to it.
+- **Cadence.** A nightly opener (a Cron Trigger at 03:00 America/Chicago) starts a run per eligible namespace; a five-minute tick advances any run in flight.
+- **Scoring runs in two jobs, and the second never puts attempt code on the runner.** `build` checks out the attempt branch and runs that repo's build, tests, lint and bundle measurement with no credential in its environment. `score` checks out the default branch only and runs the hidden holdout suite in a network-less, read-only container with the attempt mounted read-only, reading results from its stdout pipe. `score` is byte-identical across all five roster repos; only `build` differs. `scripts/sync-scorer.mjs` re-copies it and its dry run verifies the copies match.
+- **No long-lived scoring credential.** The score job asks the Worker for a one-hour, object-read-only credential scoped to that namespace's `HOLDOUT` prefix, minted per run and signed with the same per-namespace key as the score report.
+- **Keep or revert.** A change that regresses a pinned anchor metric, or fails to improve the weighted score, is reverted; one that improves it opens a pull request. Anchors are checksummed and pinned, and a mismatch refuses every run for that namespace until a human re-pins.
+- **Protected paths.** Tests, CI configuration, lockfiles, manifests, compiler and lint config, migrations, the agent steering layer and the loop's own files are off limits to an attempt, enforced by a deterministic path guard. These files define the score; an attempt may not change what scores it.
+- **Budget, pause and one driver.** Monthly caps on estimated model spend and CI minutes stop the loop when exceeded. A per-namespace pause key holds that namespace until a human clears it. In subscription mode a KV driver lease (six-hour TTL) keeps two sessions off one namespace.
+
+`improve_status` reports the mode, the budget, the protected-path patterns, the agent inventory and each namespace's state, including queued and blocked jobs. `improve_run` starts or resumes a run by hand.
 
 ## Why it is shaped this way
 

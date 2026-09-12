@@ -10,13 +10,28 @@ import { AUTHORITATIVE } from "../src/counts.ts";
 // The Capsid count linter guards the store's documents; nothing guarded these two
 // repo files, which is exactly how they drifted. These guards tie each stale-prone
 // number to its source of truth (TABLES, counts.ts) so the next drift fails here.
+//
+// The restore runbook moved to docs/backups.md and the rollback section to
+// docs/rollback.md when the README was cut to its top-level shape. These guards
+// follow the content rather than the filename: what they assert is unchanged.
 
 const ROOT = join(import.meta.dirname, "..");
 const read = (rel: string) => readFileSync(join(ROOT, rel), "utf8");
 
-test("the README restore runbook names every backed-up table", () => {
-  const readme = read("README.md");
-  const restore = readme.slice(readme.indexOf("## Restore"), readme.indexOf("## Rollback"));
+// The runbook is the Restore section of docs/backups.md, which runs to the end of
+// that file. Resolved through a helper so a further move is one edit, and asserted
+// non-empty so a renamed heading fails loudly instead of scanning an empty string.
+function restoreRunbook(): string {
+  const doc = read("docs/backups.md");
+  const from = doc.indexOf("## Restore");
+  assert.ok(from >= 0, "docs/backups.md no longer has a Restore section");
+  const runbook = doc.slice(from);
+  assert.ok(runbook.length > 1000, `the restore runbook came back nearly empty (${runbook.length} chars)`);
+  return runbook;
+}
+
+test("the restore runbook names every backed-up table", () => {
+  const restore = restoreRunbook();
   for (const table of TABLES) {
     assert.match(restore, new RegExp(`\\b${table}\\b`), `the restore runbook never names ${table}`);
   }
@@ -26,9 +41,8 @@ test("the README restore runbook names every backed-up table", () => {
   assert.doesNotMatch(restore, /The five tables are\b/i, "the runbook still enumerates only five tables");
 });
 
-test("the README restore runbook applies every migration, not just 0001 and 0002", () => {
-  const readme = read("README.md");
-  assert.match(readme, /0003_improve\.sql/, "the runbook does not apply migration 0003");
+test("the restore runbook applies every migration, not just 0001 and 0002", () => {
+  assert.match(restoreRunbook(), /0003_improve\.sql/, "the runbook does not apply migration 0003");
 });
 
 test("CLAUDE.md states the authoritative tool count, not a stale one", () => {
@@ -52,8 +66,7 @@ test("CLAUDE.md no longer prescribes the withdrawn end-of-session episodic", () 
 // ---- the dump's real shape, and every migration (residual 14) ----------------
 
 test("the restore runbook states the table count TABLES actually has", () => {
-  const readme = read("README.md");
-  const restore = readme.slice(readme.indexOf("## Restore"), readme.indexOf("## Rollback"));
+  const restore = restoreRunbook();
   // The count is spelled out in prose in three places and drifted twice already:
   // "five real tables" when there were nine, then "the nine real tables" beside a
   // sentence enumerating ten. Derived from TABLES, so the next addition fails here
@@ -73,11 +86,11 @@ test("the restore runbook states the table count TABLES actually has", () => {
 });
 
 test("the restore runbook applies EVERY migration, derived from the directory", () => {
-  const readme = read("README.md");
+  const restore = restoreRunbook();
   const migrations = readdirSync(join(ROOT, "migrations")).filter((f) => f.endsWith(".sql")).sort();
   assert.ok(migrations.length >= 4, "the migration scan found almost nothing");
   for (const file of migrations) {
-    assert.ok(readme.includes(file), `the runbook never names ${file}, so a restore that follows it stops short`);
+    assert.ok(restore.includes(file), `the runbook never names ${file}, so a restore that follows it stops short`);
   }
 });
 
@@ -85,8 +98,33 @@ test("the restore runbook names the two dump sidecars", () => {
   // The dump has carried the KV pins and the holdout manifests since residual 4.
   // A restore that rebuilds D1 and stops leaves the improve loop with no mode, no
   // anchor pins and no manifests, which is a loop that refuses every run.
-  const readme = read("README.md");
-  const restore = readme.slice(readme.indexOf("## Restore"), readme.indexOf("## Rollback"));
+  const restore = restoreRunbook();
   assert.match(restore, /_kv\.json/, "the runbook does not mention the KV pins sidecar");
   assert.match(restore, /_holdout-manifests\.json/, "the runbook does not mention the holdout manifests sidecar");
+});
+
+// ---- the README is an index, and an index that loses an entry reads as deleted
+
+test("the README links every document under docs/", () => {
+  // The README was cut from 460 lines to its top-level shape by moving sections
+  // into docs/. The failure that move can produce is a file nobody links, which
+  // reads as deleted. Derived from the directory, so a new doc fails here until
+  // the README points at it.
+  const readme = read("README.md");
+  const docs = readdirSync(join(ROOT, "docs")).filter((f) => f.endsWith(".md")).sort();
+  assert.ok(docs.length >= 10, `the docs scan found only ${docs.length} files`);
+  for (const name of docs) {
+    assert.ok(readme.includes(`docs/${name}`), `README never links docs/${name}`);
+  }
+});
+
+test("the README states the authoritative tool count", () => {
+  // The count lives in src/counts.ts and the README quotes it. CLAUDE.md was
+  // already guarded above; the README said 32 with nothing checking it.
+  const readme = read("README.md");
+  assert.match(
+    readme,
+    new RegExp(`\\b${AUTHORITATIVE.capsid.tools} tools\\b`),
+    `README does not state the current tool count (${AUTHORITATIVE.capsid.tools})`
+  );
 });

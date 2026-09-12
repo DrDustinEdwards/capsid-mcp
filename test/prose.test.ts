@@ -44,11 +44,16 @@ function scannable(): Array<{ rel: string; text: string }> {
 // The count check that stops this suite passing by reading nothing. A glob that
 // silently matches zero files, or a docs/ that moved, would otherwise report
 // "no banned phrases" as loudly as a clean repo does.
+//
+// The floor is 500 bytes rather than 1000 because docs/ now holds short topic
+// documents as well as the long ones: the rollback procedure is two commands and
+// a paragraph. The check is still "this file had content", which is the thing it
+// exists to prove; nothing this repo writes is under 500 bytes by accident.
 test("the prose guard actually read the files it claims to scan", () => {
   const files = scannable();
-  assert.ok(files.length >= 4, `expected README.md plus the docs, scanned ${files.length} files`);
+  assert.ok(files.length >= 10, `expected README.md plus the docs, scanned ${files.length} files`);
   assert.ok(
-    files.every((f) => f.text.length > 1000),
+    files.every((f) => f.text.length > 500),
     `a scanned file came back nearly empty: ${files.map((f) => `${f.rel}=${f.text.length}`).join(", ")}`
   );
   assert.ok(BANNED.length >= 9, "the banned-phrase list was emptied out");
