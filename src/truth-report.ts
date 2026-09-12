@@ -81,11 +81,44 @@ export const STALE_DECISION_DAYS = 180;
 // match; `capsid/conventions.md` matches too and is excluded below, because a
 // Capsid document path is not a repo path and confusing the two would report the
 // whole canon as drift.
-const REPO_PATH = /\b((?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,5})\b/g;
+//
+// THE LEADING DOT IS PART OF THE PATH. This opened on a word boundary, which does
+// not fall between a space and a dot, so every match started one character late:
+// `.github/workflows/ci.yml` was captured as `github/workflows/ci.yml` and
+// reported absent from a repo that has it. Measured 2026-09-12: five of the
+// report's 79 drift findings were dotfiles that all exist, and they are the paths
+// canon names most, because `.github/**` and `.claude/**` are the protected ones.
+// The lookbehind replaces the boundary so the dot is reachable, and it also stops
+// the same path matching a second time starting after the dot.
+//
+// The extension must START WITH A LETTER, which is what throws out an audit
+// section number: `2/2.1` and `5a-1/5a-3/1.5` are two slashes and a dot, and
+// nothing about them is a file.
+const REPO_PATH = /(?<![A-Za-z0-9_./-])(\.?(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+\.[A-Za-z][A-Za-z0-9]{0,4})\b/g;
 
 // Namespace prefixes that mean "a Capsid document", not "a file in the repo".
 // A path starting with one of these is a store address and is skipped.
-const NAMESPACE_PREFIXES = ["capsid/", "germomics/", "foxing/", "foxhound/", "dustinedwards/", "julieedwards/", "txasm/", "bsw/", "recova/"];
+const NAMESPACE_PREFIXES = ["capsid/", "germomics/", "foxing/", "foxhound/", "dustinedwards/", "julieedwards/", "txasm/", "bsw/", "claude-skills/", "recova/"];
+
+// The stored report's path prefix.
+export const REPORTS_PREFIX = "reports/";
+
+// PREFIXES THAT ARE NOT SUBJECTS OF THE REPORT.
+//
+// `archive/` is consumed history and was always excluded. `reports/` joined it
+// 2026-09-12, because `report` stores its result as an ordinary document and the
+// next run reads that document back: every finding it wrote becomes a finding it
+// finds. Two runs in one session took integrity 76.3 to 71.5 while the store got
+// strictly better, the quote describing a FIXED contradiction was re-parsed as
+// two fresh ones, and roughly forty drift paths were re-attributed to the report
+// that had merely listed them. Left alone it ratchets: each run adds its own text
+// to the corpus the next run reads. A report is an observation of the store and
+// not a member of it.
+const UNSCANNED_PREFIXES = ["archive/", REPORTS_PREFIX];
+
+export function isUnscanned(path: string): boolean {
+  return UNSCANNED_PREFIXES.some((prefix) => path.startsWith(prefix));
+}
 
 function daysBetween(a: Date, b: Date): number {
   return Math.abs(a.getTime() - b.getTime()) / 86_400_000;
@@ -105,8 +138,11 @@ const isArchived = (doc: ReportDoc) => doc.path.startsWith("archive/");
 
 export function buildTruthReport(input: TruthInput): TruthReport {
   const { namespace, now, docs } = input;
-  const standing = docs.filter((d) => !isArchived(d));
-  const archived = docs.length - standing.length;
+  // Held to every check below. archive/ and reports/ are excluded, and `archived`
+  // is counted on its own rather than as "everything not standing", so excluding a
+  // second prefix does not silently inflate the archived number.
+  const standing = docs.filter((d) => !isUnscanned(d.path));
+  const archived = docs.filter(isArchived).length;
 
   const byType: Record<string, number> = {};
   for (const doc of docs) {
@@ -120,11 +156,14 @@ export function buildTruthReport(input: TruthInput): TruthReport {
   //    mechanical form of this and it is the count claim: prose asserting a number
   //    that the artifact disagrees with. src/counts.ts already finds them; this is
   //    what turns "the packet listed some claims" into "N of M claims are wrong".
+  // A claim quoted by an excluded document is not a claim the store is making.
+  // The caller filters too; this is the half that holds when it does not.
+  const countClaims = input.countClaims.filter((claim) => !isUnscanned(claim.path));
   checks.push({
     check: "contradictions",
-    subjects: input.countClaims.length,
+    subjects: countClaims.length,
     ok: 0,
-    findings: input.countClaims.map((claim) => ({
+    findings: countClaims.map((claim) => ({
       check: "contradictions",
       subject: `${namespace}/${claim.path}`,
       detail: `states ${claim.states} ${claim.noun}; the artifact says ${claim.authoritative}. In: ${claim.quote}`,
@@ -134,7 +173,7 @@ export function buildTruthReport(input: TruthInput): TruthReport {
   // count and there is no clean population to divide by. Counting the whole
   // standing corpus as the population instead: a claim is a property of a
   // document, and the question is what fraction of documents carry a wrong one.
-  const contradicting = new Set(input.countClaims.map((c) => c.path));
+  const contradicting = new Set(countClaims.map((c) => c.path));
   checks[0] = {
     check: "contradictions",
     subjects: standing.length,
@@ -206,11 +245,28 @@ export function buildTruthReport(input: TruthInput): TruthReport {
   //    subjects and is excluded from integrity, rather than reporting zero
   //    findings, which would read as perfect.
   if (input.repoPaths) {
+    // A CANDIDATE IS A REPO PATH ONLY WHEN IT RESOLVES AGAINST THIS NAMESPACE'S
+    // MAPPED REPO, and resolving means its first segment is a real top-level entry
+    // of that tree. That is what separates `src/gone.ts`, which this repo could
+    // genuinely be missing, from `apps/web/test/auth-config.test.ts` (foxing's) and
+    // `capsid-backups/.github/workflows/mirror.yml` (another repo entirely). Both
+    // were reported as drift on 2026-09-12 against a repo that was never meant to
+    // hold them.
+    const repoRoots = new Set([...input.repoPaths].map((p) => p.split("/")[0]));
+    // And a document in THIS namespace is a store address, whatever it looks like.
+    // The prefix list cannot reach these: the Worker writes `jobs/<id>.md` itself,
+    // and `improve/` is both a store prefix and a real directory in this repo, so
+    // the root check would pass it through. A document describing store contents
+    // was being penalised for naming them accurately. Every document counts here,
+    // excluded ones included, because an address does not stop being an address.
+    const documentPaths = new Set(docs.map((d) => d.path));
     const cited = new Map<string, Set<string>>();
     for (const doc of standing) {
       for (const match of (doc.body ?? "").matchAll(REPO_PATH)) {
         const path = match[1];
         if (NAMESPACE_PREFIXES.some((p) => path.startsWith(p))) continue;
+        if (documentPaths.has(path)) continue;
+        if (!repoRoots.has(path.split("/")[0])) continue;
         if (!cited.has(path)) cited.set(path, new Set());
         cited.get(path)!.add(doc.path);
       }
@@ -335,13 +391,11 @@ export function renderTruthReport(report: TruthReport): string {
   return lines.join("\n");
 }
 
-// The stored path. One per namespace per day, so a second run the same day
-// overwrites rather than accumulating: the series is daily, not per-invocation.
+// One document per namespace per day, so a second run the same day overwrites
+// rather than accumulating: the series is daily, not per-invocation.
 export function reportPath(date: Date): string {
-  return `reports/lint-${date.toISOString().slice(0, 10)}.md`;
+  return `${REPORTS_PREFIX}lint-${date.toISOString().slice(0, 10)}.md`;
 }
-
-export const REPORTS_PREFIX = "reports/";
 
 // Pull the integrity number back out of a stored report. Returns null on anything
 // unexpected, which `improve_status` reports as "no report" rather than as zero.

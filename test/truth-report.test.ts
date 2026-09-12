@@ -79,6 +79,65 @@ test("PLANT: a check that could not run is EXCLUDED from integrity, never counte
   );
 });
 
+// ---- the report is an observation of the store, not a member of it ---------
+
+test("PLANT: a stored report is not a subject of the next report", () => {
+  // MEASURED 2026-09-12: two runs in one session took integrity 76.3 to 71.5
+  // while the store strictly improved, because `report` stores its result as a
+  // document and the next run reads it back. Every finding it wrote became a
+  // finding it found: the quote describing a FIXED contradiction was re-parsed
+  // as a fresh one, and every drift path it listed was re-attributed to itself.
+  const docs = [
+    doc({ path: "core.md", type: "core", body: "the tools count is right here" }),
+    doc({
+      path: "reports/lint-2026-09-11.md",
+      type: "reference",
+      body: "- **capsid/concept.md**: states 13 of 26 tools; the artifact says 32. Also src/gone.ts",
+    }),
+  ];
+  // The count scanner found the claim in the REPORT, because the report quoted it.
+  const countClaims = [
+    { path: "reports/lint-2026-09-11.md", noun: "tools", states: "13", authoritative: "32", quote: "13 of 26" },
+  ];
+  const report = buildTruthReport({ ...base, docs, countClaims, repoPaths: new Set(["src/server.ts"]) });
+
+  const contradictions = report.checks.find((c) => c.check === "contradictions")!;
+  assert.deepEqual(contradictions.findings, [], "a report quoting a contradiction does not re-flag it");
+  assert.equal(contradictions.subjects, 1, "and the report is not a subject either");
+
+  const drift = report.checks.find((c) => c.check === "doc_vs_code_drift")!;
+  assert.deepEqual(drift.findings, [], "nor is a path the report merely listed re-attributed to it");
+
+  assert.equal(report.documents.archived, 0, "reports are excluded from the scan without being counted as archived");
+  assert.equal(report.integrity, 100, "a clean store reads clean however many reports are stored beside it");
+});
+
+// ---- what counts as a repo path --------------------------------------------
+
+test("PLANT: a dotfile that exists is not reported missing", () => {
+  // The regex matched on a word boundary, so `.github/workflows/ci.yml` was
+  // captured as `github/workflows/ci.yml` and reported absent. Every dotfile the
+  // canon names was a guaranteed false positive, and `.github/**` and `.claude/**`
+  // are what canon names most, because they are the protected paths.
+  const docs = [
+    doc({ path: "core.md", body: "see .github/workflows/ci.yml and .claude/settings.local.json" }),
+  ];
+  const repoPaths = new Set([".github/workflows/ci.yml", ".claude/settings.local.json"]);
+  const report = buildTruthReport({ ...base, docs, repoPaths });
+  const drift = report.checks.find((c) => c.check === "doc_vs_code_drift")!;
+  assert.equal(drift.subjects, 2, "both dotted paths are subjects, with their dots");
+  assert.deepEqual(drift.findings, [], "and both resolve, because they exist");
+});
+
+test("a dotted path that does NOT exist is still drift", () => {
+  // The other direction: fixing the false positive must not switch the check off.
+  const docs = [doc({ path: "core.md", body: "see .github/workflows/gone.yml" })];
+  const report = buildTruthReport({ ...base, docs, repoPaths: new Set([".github/workflows/ci.yml"]) });
+  const drift = report.checks.find((c) => c.check === "doc_vs_code_drift")!;
+  assert.equal(drift.findings.length, 1);
+  assert.equal(drift.findings[0].subject, ".github/workflows/gone.yml");
+});
+
 test("a Capsid document path is not a repo path", () => {
   // Every canon document cites `capsid/conventions.md` and friends. Reporting the
   // whole canon as drift is how this check gets switched off.
@@ -87,6 +146,44 @@ test("a Capsid document path is not a repo path", () => {
   const drift = report.checks.find((c) => c.check === "doc_vs_code_drift")!;
   assert.equal(drift.subjects, 1, "only the real repo path is a subject");
   assert.deepEqual(drift.findings, []);
+});
+
+test("PLANT: an UNPREFIXED document in this namespace is not a repo file", () => {
+  // The harder half of the same bug, and the one the prefix list cannot reach: a
+  // document in the namespace being linted is cited by its bare store path. The
+  // Worker writes `jobs/<id>.md` itself, and `improve/` is BOTH a store prefix and
+  // a real directory in this repo, so the root check alone would not catch it.
+  // A document naming store contents was being penalised for being accurate.
+  const docs = [
+    doc({ path: "core.md", body: "mirrors at jobs/job_cf19ede44f34.md and improve/scores.md" }),
+    doc({ path: "jobs/job_cf19ede44f34.md", type: "task" }),
+    doc({ path: "improve/scores.md", type: "reference" }),
+  ];
+  const report = buildTruthReport({ ...base, docs, repoPaths: new Set(["src/server.ts", "improve/README.md"]) });
+  const drift = report.checks.find((c) => c.check === "doc_vs_code_drift")!;
+  assert.equal(drift.subjects, 0, "a store address is not a repo path, prefixed or not");
+  assert.deepEqual(drift.findings, []);
+});
+
+test("PLANT: another repo's path and a section number are not repo paths", () => {
+  // A candidate counts only when it resolves against THIS namespace's mapped repo,
+  // which means its first segment is a real top-level entry of that tree. That is
+  // what separates `src/gone.ts` (ours, and missing: drift) from `apps/web/x.tsx`
+  // (foxing's) and `capsid-backups/.github/workflows/mirror.yml` (another repo).
+  // A section number is thrown out one step earlier, on having no file extension.
+  const docs = [
+    doc({
+      path: "audit.md",
+      body: "sections 5a-1/5a-3/1.5 and 2/2.1, plus apps/web/x.tsx, capsid-backups/.github/workflows/mirror.yml, api.github.com/repos/x/contents/secrets.env, and src/gone.ts",
+    }),
+  ];
+  const report = buildTruthReport({ ...base, docs, repoPaths: new Set(["src/server.ts"]) });
+  const drift = report.checks.find((c) => c.check === "doc_vs_code_drift")!;
+  assert.deepEqual(
+    drift.findings.map((f) => f.subject),
+    ["src/gone.ts"],
+    "one subject survives, and it is the one this repo could actually be missing"
+  );
 });
 
 // ---- the individual checks --------------------------------------------------
