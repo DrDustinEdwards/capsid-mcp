@@ -47,7 +47,8 @@ the real ones.
 
 ### Statuses
 
-`draft`, `ready`, `active`, `published`, `superseded`. `published` is the default.
+`draft`, `ready`, `active`, `published`, `superseded`, `closed`. `published` is the
+default.
 
 Status records editorial state and never decides what the consolidation loop can
 see. Only the `archive/` prefix does that. This rule has a measured failure
@@ -141,8 +142,9 @@ and write tools.
 A third mode measures the store instead of compiling it, and writes what it found
 to `<namespace>/reports/lint-<date>.md`. Six checks: contradictions (prose
 asserting a number the artifact disagrees with), stale decisions, unbound specs,
-broken links, documents by type, and doc-vs-code drift, where a repository path
-named in the canon is no longer in the repository.
+broken links, unconsolidated documents, and doc-vs-code drift, where a repository
+path named in the canon is no longer in the repository. Documents by type is
+counted and reported beside the checks rather than being one of them.
 
 It produces one integrity percentage: subjects in good standing over subjects
 judged. A check that could not run is excluded from the number rather than counted
