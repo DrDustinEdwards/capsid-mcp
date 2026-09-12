@@ -121,6 +121,21 @@ An optional nightly loop that proposes one scoped change at a time to a small ro
 
 `improve_status` reports the mode, the budget, the protected-path patterns, the agent inventory and each namespace's state, including queued and blocked jobs. `improve_run` starts or resumes a run by hand.
 
+## Skills
+
+The loop abstracts an idea from work that landed and offers it back to other projects.
+Each skill is a row with a lifecycle: `candidate`, then `live` on two positive
+evaluations, then `retired` on two consecutive non-positive ones. Retired rows stay,
+with their record, so the same idea is not abstracted twice from the same source.
+
+A status changes on evaluation evidence and never on a driver's report of its own run.
+Evidence counts per version and per probe set, so an accepted edit resets it; edits are
+bounded at 20 percent of the instruction lines and accepted only on strict improvement.
+A skill is credited only when it was used and the verifier reported success, so an
+offered-and-ignored skill and a run that died on the environment both earn nothing.
+
+Full model: `docs/schema.md`, under Skill records.
+
 ## Console
 
 One page at `/console` that answers "what is the state of every namespace" without asking a chat. It renders what `improve_status` and `jobs` already compute, so the page and the tools cannot disagree.
@@ -191,9 +206,9 @@ Three paths, in the order to try them. Path 2 has been executed end to end again
    wrangler d1 export capsid --remote --no-schema --table <table> --output export-<table>.sql
    ```
 
-   There are thirteen real tables: `documents`, `namespaces`, `document_versions`, `audit_log`, `document_links`, the four improve-loop tables `improve_scores`, `improve_attempts`, `improve_runs` and `improve_skills` (`migrations/0003_improve.sql`), `jobs`, the work queue (`migrations/0006_jobs.sql`), `job_outcomes`, what each finished job produced (`migrations/0011_job_outcomes.sql`), `agents`, the scoped credentials (`migrations/0008_agents.sql`), and `improve_jti`, the signed-request replay cache (`migrations/0004_improve_jti.sql`). `TABLES` in `src/backup.ts` is authoritative, derived-checked against `migrations/` by `test/backup.test.ts`. Never export `documents_fts` or its `documents_fts_*` shadow tables: FTS5 derives them from `documents`, and they are what makes a whole-database export fail.
+   There are sixteen real tables: `documents`, `namespaces`, `document_versions`, `audit_log`, `document_links`, the four improve-loop tables `improve_scores`, `improve_attempts`, `improve_runs` and `improve_skills` (`migrations/0003_improve.sql`), `jobs`, the work queue (`migrations/0006_jobs.sql`), `job_outcomes`, what each finished job produced (`migrations/0011_job_outcomes.sql`), `agents`, the scoped credentials (`migrations/0008_agents.sql`), `improve_jti`, the signed-request replay cache (`migrations/0004_improve_jti.sql`), and `skill_evaluations`, `skill_edits` and `skill_failures`, the skill lifecycle's evidence (`migrations/0012_skill_records.sql` and `migrations/0013_skill_attribution.sql`). `TABLES` in `src/backup.ts` is authoritative, derived-checked against `migrations/` by `test/backup.test.ts`. Never export `documents_fts` or its `documents_fts_*` shadow tables: FTS5 derives them from `documents`, and they are what makes a whole-database export fail.
 
-   Create the new database and apply every migration in order: `0001_init.sql`, `0002_document_links.sql`, `0003_improve.sql`, `0004_improve_jti.sql`, `0005_query_plan_indexes.sql`, `0006_jobs.sql`, `0007_jobs_resume.sql`, `0008_agents.sql`, `0009_jobs_required_scopes.sql`, `0010_console_indexes.sql`, `0011_job_outcomes.sql`. Stopping early leaves later tables missing for the import to land in, and a column the code reads absent from a table that does exist. Then execute the exports with `documents` first: importing it fires the FTS sync triggers, so `documents_fts` rebuilds itself. The rest have no triggers and no foreign keys, so their order does not matter. Verify with count queries against both databases and one MATCH query on the new one, then point `wrangler.jsonc` at the new `database_id` and deploy.
+   Create the new database and apply every migration in order: `0001_init.sql`, `0002_document_links.sql`, `0003_improve.sql`, `0004_improve_jti.sql`, `0005_query_plan_indexes.sql`, `0006_jobs.sql`, `0007_jobs_resume.sql`, `0008_agents.sql`, `0009_jobs_required_scopes.sql`, `0010_console_indexes.sql`, `0011_job_outcomes.sql`, `0012_skill_records.sql`, `0013_skill_attribution.sql`, `0014_skill_status_index.sql`. Stopping early leaves later tables missing for the import to land in, and a column the code reads absent from a table that does exist. Then execute the exports with `documents` first: importing it fires the FTS sync triggers, so `documents_fts` rebuilds itself. The rest have no triggers and no foreign keys, so their order does not matter. Verify with count queries against both databases and one MATCH query on the new one, then point `wrangler.jsonc` at the new `database_id` and deploy.
 
 3. **The R2 JSON dump**, beyond the 30-day Time Travel window. Wrangler cannot list R2 objects, so take the exact keys from the Cloudflare dashboard or the `json_keys` field of a `/ops/backup` response, then fetch each: `wrangler r2 object get capsid-media/backups/json/<timestamp>/<table>.json --file <table>.json`. Convert each object's `rows` to INSERT statements and follow path 2 from the create step, `documents` first. The same dumps are mirrored off-account in `capsid-backups`, so this path works if the Cloudflare account is gone. The `backups/markdown/` mirror is the last-resort human-readable copy: bodies only, no metadata.
 

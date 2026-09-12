@@ -243,6 +243,60 @@ opened ten and merged one.
 the claim against this same function, so the bar a claim is measured against is the
 number a human can read on the page.
 
+## Skill records
+
+A skill is an idea abstracted from work that landed, written down so another project
+can act on it. `improve_skills` has held one row per skill since the first improve
+migration; migrations 0012 and 0013 gave those rows a lifecycle and the evidence to
+move through it.
+
+**The rule the whole thing rests on: a skill's status changes on evaluation evidence,
+never on a driver's judgement of its own run.** A driver reporting that a skill helped
+is the party being measured reporting the measurement.
+
+**Three states.** Every skill starts `candidate`, including one abstracted from an
+attempt that was kept: being born of a success is not evidence that the written form
+of the idea helps anybody else, which is the only thing an evaluation measures. A
+candidate promotes to `live` on two positive evaluations. A live skill goes `retired`
+on two consecutive non-positive ones. Retired rows are kept with their whole record,
+both because a retirement is evidence about what does not work and because the
+creating path checks them, so the same idea is not abstracted again from the same
+source next month.
+
+**Two evaluations minimum, in both directions.** One result is a sample. A system that
+promoted on one would spend its life promoting and retiring the same skill on noise.
+Promotion and retirement have deliberately different shapes: promotion asks for a
+pattern of helping, retirement asks for a run of not helping, so a live skill that
+alternates positive and neutral is doing something and stays.
+
+**Evidence is counted per version and per probe set.** An evaluation of version 2 says
+nothing about version 3, and a delta measured against a different probe set is not
+comparable to one measured against this one. So an accepted edit costs a skill every
+evaluation it had accumulated, which is what makes the edit bound matter rather than
+being a formality.
+
+**Edits are bounded at 20 percent of the instruction lines**, counted by distinct
+lines touched, and accepted only on strict improvement. A tie is a rejection: an edit
+that changes nothing measurable still resets the evidence. Rejected edits are stored
+in `skill_edits` and handed to the next optimizer run, so a proposal that was already
+refused is not proposed again.
+
+**Attribution separates three things a single counter conflated.** A skill moves only
+when it was used AND the verifier reported on the work itself. A skill that was
+offered and ignored while the run succeeded anyway earns nothing, because the success
+is not its. A run that died on the environment earns nothing either, because charging
+a loss for a failed checkout would retire skills for being present during an outage.
+
+**Offered and used are both stored**, on `job_outcomes`. The gap between them is its
+own measurement: a skill offered fifty times and used twice is not a failing skill, it
+is a trigger condition that does not describe the work it is matched to, and those are
+different problems with different fixes.
+
+**Failure notes are not a second score.** `skill_failures` carries a note per reverted
+attempt and failed job, linked to the skills in use at the time, and the recommend
+step attaches the two most recent for each skill it offers. Nothing there moves a
+status; it exists so the next driver reads the failure rather than repeating it.
+
 ## Why documents carry provenance
 
 Reads return `last_actor`: the actor from the most recent audit entry for that

@@ -82,6 +82,16 @@ export const TABLES = [
   // OPERATOR_KEY_HASH carries one; losing this table would orphan every minted
   // credential in the portfolio with no way to tell which was which.
   "agents",
+  // The skill lifecycle's evidence (migrations/0012). Nothing prunes either: an
+  // evaluation is what a status change was decided on, and a REJECTED edit is the
+  // memory that stops the next optimizer proposing the same thing again. Losing
+  // skill_edits would not lose a skill, it would lose every reason one was refused.
+  "skill_evaluations",
+  "skill_edits",
+  // The failure notes (migrations/0013). Prose a driver wrote about a run that went
+  // wrong, read by the next driver before it follows the same skill. Nothing prunes
+  // it and nothing else holds it.
+  "skill_failures",
   // The replay cache (migrations/0004). Pruned below rather than retained: a jti
   // is only meaningful inside the 30-minute signature window.
   "improve_jti",

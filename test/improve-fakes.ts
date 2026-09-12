@@ -83,6 +83,17 @@ export interface ImproveRows {
   // the same (scope, jti) returns no row, and the fake can therefore DISAGREE
   // with a handler that assumed it would.
   improve_jti: Array<Record<string, unknown>>;
+  // The skill lifecycle's evidence (migrations 0012 and 0013). Row-backed like the
+  // rest so a summary assertion can actually disagree with the handler.
+  skill_evaluations: Array<Record<string, unknown>>;
+  skill_edits: Array<Record<string, unknown>>;
+  skill_failures: Array<Record<string, unknown>>;
+  // THE RECOMMEND BRANCH NEEDS THE DOCUMENT BODIES, because the query it models joins
+  // documents_fts and the match is against a skill's prose. Modelling the match
+  // against trigger_condition instead would be a fake that tests something other than
+  // the query. Optional: only that one branch reads it, and fakeD1 already passes its
+  // own rows object, which carries documents.
+  documents?: ReadonlyArray<{ namespace: string; path: string; body?: string | null }>;
 }
 
 export type ImproveAnswer = { handled: false } | { handled: true; results: unknown[] };
@@ -90,7 +101,7 @@ export type ImproveAnswer = { handled: false } | { handled: true; results: unkno
 const flat = (sql: string) => sql.replace(/\s+/g, " ").trim();
 
 export function isImproveStatement(sql: string): boolean {
-  return /\bimprove_(runs|attempts|scores|skills|jti)\b/i.test(sql);
+  return /\b(improve_(runs|attempts|scores|skills|jti)|skill_evaluations|skill_edits|skill_failures)\b/i.test(sql);
 }
 
 // The column list from `INSERT INTO t (a, b, c) VALUES (?1, ?2, ?3)`, paired with
@@ -158,7 +169,9 @@ export function improveExec(sql: string, params: unknown[], rows: ImproveRows): 
   // through to the per-table readers and be mistaken for a filtered read.
   const dump = /^SELECT \* FROM (improve_\w+)$/i.exec(text);
   if (dump) {
-    const table = dump[1] as keyof ImproveRows;
+    // documents is excluded: this branch only matches improve_* tables, and including
+    // it would widen the result type to the read-only shape the recommend branch uses.
+    const table = dump[1] as Exclude<keyof ImproveRows, "documents">;
     if (!(table in rows)) throw new Error(`improve fake: the dump named an unknown table '${table}'`);
     return { handled: true, results: rows[table] };
   }
@@ -268,6 +281,122 @@ export function improveExec(sql: string, params: unknown[], rows: ImproveRows): 
     rows.improve_jti.length = 0;
     return { handled: true, results: [] };
   }
+
+  // THE WHOLE-TABLE READ the nightly dump makes, matched before the filtered ones so
+  // a `SELECT *` is not answered by a branch that expects bound parameters.
+  if (/^SELECT \* FROM skill_(evaluations|edits|failures)/i.test(text)) {
+    const table = /FROM (skill_\w+)/i.exec(text)?.[1] as "skill_evaluations" | "skill_edits" | "skill_failures";
+    return { handled: true, results: rows[table] };
+  }
+
+
+  // THE RECOMMEND QUERY, matched before the generic `FROM improve_skills s` reader
+  // below for the reason that one already documents: a less specific branch placed
+  // first claims this and answers from the wrong table.
+  if (/JOIN documents_fts f/i.test(text)) {
+    const like = String(params[1] ?? "");
+    const ns = like.replace(/^%"|"%$/g, "");
+    const terms = String(params[0] ?? "").toLowerCase().split(" or ").filter(Boolean);
+    const limit = Number(params[2] ?? 3);
+    const out = rows.improve_skills.filter((s) => {
+      if (!["candidate", "live"].includes(String(s.status))) return false;
+      if (s.trigger_condition === null || s.trigger_condition === undefined) return false;
+      if (s.namespaces !== null && s.namespaces !== undefined && !String(s.namespaces).includes('"' + ns + '"')) return false;
+      // The MATCH, modelled: the skill's document body must contain one of the terms.
+      const doc = (rows.documents ?? []).find((d) => d.path === s.body_ref && d.namespace === "capsid");
+      const body = String(doc?.body ?? "").toLowerCase();
+      return terms.some((t) => body.includes(t));
+    });
+    return { handled: true, results: out.slice(0, limit) };
+  }
+
+  // Every candidate and live skill, for the transition pass.
+  if (/^SELECT id, status, version FROM improve_skills/i.test(text)) {
+    const out = rows.improve_skills.filter((s) => ["candidate", "live"].includes(String(s.status)));
+    return { handled: true, results: out };
+  }
+
+
+  // The optimizer's negative feedback: refused proposals only, newest first.
+  if (/FROM skill_edits/i.test(text)) {
+    const skill = params[0];
+    // THE FILTER IS READ FROM THE SQL, not assumed. A fake that applied `accepted = 0`
+    // whatever the query said could not disagree with a handler that stopped asking
+    // for it, and a plant removing that clause would leave this green.
+    const onlyRejected = /accepted = 0/i.test(text);
+    const mine = rows.skill_edits.filter((e) => e.skill === skill && (!onlyRejected || Number(e.accepted) === 0));
+    mine.sort((a, b) => String(b.evaluated_at).localeCompare(String(a.evaluated_at)));
+    return { handled: true, results: mine.slice(0, Number(params[1] ?? 5)) };
+  }
+
+  // The merge scan: live skills with a trigger, joined to their prose. Matched before
+  // the generic `FROM improve_skills s` reader for the reason that one documents.
+  if (/LEFT JOIN documents d/i.test(text)) {
+    // Both filters read from the SQL for the same reason as above: this branch must be
+    // able to disagree with a handler that dropped one of them.
+    const onlyLive = /s\.status = 'live'/i.test(text);
+    const needsTrigger = /s\.trigger_condition IS NOT NULL/i.test(text);
+    const out = rows.improve_skills
+      .filter(
+        (s) =>
+          (!onlyLive || String(s.status) === "live") &&
+          (!needsTrigger || (s.trigger_condition !== null && s.trigger_condition !== undefined))
+      )
+      .map((s) => ({
+        id: s.id,
+        status: s.status,
+        trigger_condition: s.trigger_condition,
+        body: (rows.documents ?? []).find((d) => d.path === s.body_ref && d.namespace === "capsid")?.body ?? null,
+      }));
+    return { handled: true, results: out };
+  }
+
+
+  // ---- the skill records summary (migrations 0012, 0013) --------------------
+  //
+  // Modelled against the rows rather than answered empty, on this fake's own rule:
+  // an empty answer would make every assertion about the summary vacuously true.
+  if (/SELECT status, COUNT\(\*\) AS n FROM improve_skills/i.test(text)) {
+    const like = String(params[0] ?? "");
+    const ns = like.replace(/^%"|"%$/g, "");
+    const counts = new Map<string, number>();
+    for (const skill of rows.improve_skills) {
+      const scoped =
+        skill.namespaces === null || skill.namespaces === undefined || String(skill.namespaces).includes('"' + ns + '"');
+      if (!scoped) continue;
+      const status = String(skill.status ?? "candidate");
+      counts.set(status, (counts.get(status) ?? 0) + 1);
+    }
+    return { handled: true, results: [...counts].map(([status, n]) => ({ status, n })) };
+  }
+
+  if (/FROM skill_evaluations/i.test(text) && /MAX\(evaluated_at\)/i.test(text)) {
+    const ns = params[0];
+    const mine = rows.skill_evaluations.filter((e) => e.namespace === ns);
+    const last = mine.map((e) => String(e.evaluated_at)).sort().pop() ?? null;
+    return { handled: true, results: [{ last }] };
+  }
+
+  if (/FROM skill_evaluations/i.test(text)) {
+    const [skill, version] = params;
+    const mine = rows.skill_evaluations.filter((e) => e.skill === skill && e.version === version);
+    mine.sort((a, b) => String(a.evaluated_at).localeCompare(String(b.evaluated_at)));
+    return { handled: true, results: mine };
+  }
+
+  if (/^INSERT INTO skill_(evaluations|edits|failures)/i.test(text)) {
+    const table = /^INSERT INTO (skill_\w+)/i.exec(text)?.[1] as "skill_evaluations" | "skill_edits" | "skill_failures";
+    rows[table].push(insertRow(text, params));
+    return { handled: true, results: [] };
+  }
+
+  if (/FROM skill_failures/i.test(text)) {
+    const skill = params[0];
+    const mine = rows.skill_failures.filter((f) => f.skill === skill);
+    mine.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+    return { handled: true, results: mine.slice(0, Number(params[1] ?? 2)) };
+  }
+
 
   // ---- skills ---------------------------------------------------------------
   //
