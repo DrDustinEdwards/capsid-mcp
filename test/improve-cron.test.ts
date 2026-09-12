@@ -66,6 +66,53 @@ test("the four are distinct, so the dispatch cannot be ambiguous", () => {
   assert.equal(new Set(HANDLED).size, 4);
 });
 
+// THE COMMENT ABOVE THE ARRAY COUNTS THE ARRAY.
+//
+// It read "THREE CRONS ... exports the same three strings" from the day the fourth
+// cron was added until 2026-09-12, directly above a list of four. The two lists
+// below it were already derived from each other and could not drift; the prose
+// introducing them was derived from nothing. A comment that miscounts what sits
+// beside it is what the count lint exists for, so the two numbers in it are
+// derived here from the same parse the tests above use.
+const COUNT_WORDS = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
+
+test("DERIVED: the crons comment counts the crons the config declares", () => {
+  const example = read("../wrangler.jsonc.example");
+  const count = declaredCrons().length;
+  const expected = COUNT_WORDS[count - 1];
+  assert.ok(expected, `no count word for ${count} crons`);
+
+  // The comment block introducing the array: its banner through the triggers key.
+  const from = example.search(/\/\/ [A-Z]+ CRONS\./);
+  assert.ok(from >= 0, "wrangler.jsonc.example no longer has a CRONS comment banner");
+  const to = example.indexOf('"triggers"', from);
+  assert.ok(to > from, "the CRONS comment banner is no longer followed by the triggers key");
+  // Vacuity guard, same reason as declaredCrons: an empty slice would satisfy every
+  // assertion below by containing nothing to disagree with.
+  const comment = example.slice(from, to);
+  assert.ok(comment.length > 200, `the CRONS comment came back nearly empty (${comment.length} chars)`);
+
+  // Both counts of the same thing. Matched by their own phrasing rather than by
+  // banning every number word in the block, because the block legitimately says
+  // "two UTC hours" about the opener.
+  const banner = /\/\/ ([A-Z]+) CRONS\./.exec(comment);
+  assert.ok(banner, "the CRONS banner no longer states a count");
+  assert.equal(
+    banner[1].toLowerCase(),
+    expected,
+    `the banner says "${banner[1]} CRONS" and the config declares ${count}`
+  );
+
+  const flat = comment.replace(/\/\//g, " ").replace(/\s+/g, " ");
+  const strings = /exports the same ([a-z]+) strings/i.exec(flat);
+  assert.ok(strings, "the CRONS comment no longer says how many strings the handler exports");
+  assert.equal(
+    strings[1].toLowerCase(),
+    expected,
+    `the comment says the handler exports "${strings[1]}" strings and the config declares ${count}`
+  );
+});
+
 test("the handler dispatches on controller.cron, not on the clock", () => {
   // 09:00 UTC matches all three expressions and Cloudflare delivers the
   // invocation once per expression. Branching on the time instead of the matched
