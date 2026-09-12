@@ -14,7 +14,7 @@ const GH = "https://api.github.com";
 const GH_HEADERS: Record<string, string> = {
   Accept: "application/vnd.github+json",
   "X-GitHub-Api-Version": "2022-11-28",
-  "User-Agent": "capsid-mcp",
+  "User-Agent": "capsid",
 };
 
 const TOKEN_TTL_SECONDS = 3300; // installation tokens live 60 min; refresh a little early

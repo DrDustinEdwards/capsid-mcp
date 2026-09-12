@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { writeRepoFile } from "../src/github.ts";
+import { SELF_REPO, writeRepoFile } from "../src/github.ts";
 import { pushAttempt } from "../src/improve-attempt.ts";
 import { branchName } from "../src/improve-schema.ts";
 import { fakeEnv, fakeKv, withFetch } from "./fakes.ts";
@@ -9,8 +9,9 @@ import { fakeEnv, fakeKv, withFetch } from "./fakes.ts";
 // 5.3; Grok records the same collision inside its section 5 CLEAN list, noting
 // that "file-changing attempts on capsid-mcp itself throw").
 //
-// `capsid` is on the improve roster and maps to DrDustinEdwards/capsid-mcp,
-// which is SELF_REPO. pushAttempt commits with writeRepoFile(..., "direct",
+// `capsid` is on the improve roster and maps to whatever SELF_REPO names
+// (DrDustinEdwards/capsid-mcp when this was written, DrDustinEdwards/capsid
+// since the 2026-09-12 rename). pushAttempt commits with writeRepoFile(..., "direct",
 // <attempt branch>), and commitOnBranch refused mode "direct" against the self
 // repo REGARDLESS OF BRANCH. So every capsid attempt threw on its first file:
 // the baseline dispatched and was scored, then startAttempt threw, the tick
@@ -24,8 +25,13 @@ import { fakeEnv, fakeKv, withFetch } from "./fakes.ts";
 // "owner/capsid-mcp", one word away from the real mapping and therefore never
 // equal to SELF_REPO. Those fixtures now use the real owner, and this file
 // drives the push that no test drove at all.
-
-const SELF = "DrDustinEdwards/capsid-mcp";
+//
+// TAKEN FROM SELF_REPO, NOT SPELLED OUT. A hardcoded copy here is the same
+// defect this file was written about: the rename on 2026-09-12 would have put
+// this constant one word away from the real mapping again, and every assertion
+// below would have gone quiet rather than red. The literal value is pinned in
+// exactly one place, repo-name.test.ts.
+const SELF = SELF_REPO;
 
 function selfRepoEnv() {
   const kv = fakeKv({ seedToken: true });

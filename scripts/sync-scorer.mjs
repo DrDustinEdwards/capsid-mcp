@@ -27,7 +27,7 @@ export const WORKFLOW = ".github/workflows/improve-score.yml";
 export const REPORT = "scripts/improve-report.mjs";
 
 const DEV = join(import.meta.dirname, "..", "..");
-const SOURCE = { dir: "capsid-mcp", ref: "master" };
+const SOURCE = { dir: "capsid", ref: "master" };
 const TARGETS = [
   { dir: "dustinedwards-info", ref: "main" },
   { dir: "foxhound", ref: "main" },

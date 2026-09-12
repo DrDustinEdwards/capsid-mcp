@@ -1,4 +1,4 @@
-# CLAUDE.md - capsid-mcp
+# CLAUDE.md - capsid
 
 **This file is the briefing you need BEFORE you can reach Capsid. Everything else is in Capsid.** Consolidated 2026-08-14 from 13.7KB: the precedence model (capsid/repo-structure.md, layer 8) bans a repo file from restating canon, and this one had grown into a second canon store, holding its own copies of the auth model, the backup runbook and a defect list that Capsid already carried and kept more current.
 
