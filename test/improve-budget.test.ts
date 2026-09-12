@@ -35,6 +35,14 @@ async function harness(opts: { runs?: Array<Record<string, unknown>>; budget?: s
     seed: {
       "improve:anchor:capsid": pin,
       improve_mode: "subscription",
+      // THE WATCHER IS NOT WHAT THESE TESTS ARE ABOUT, and it rides the same tick on
+      // its own half-hourly stamp. Seeded fresh so it is not due, which keeps the
+      // "an exceeded budget reached the network zero times" assertion below guarding
+      // exactly what it was written to guard: the improve RUN path. The watcher is
+      // deliberately outside the budget (it spends no model tokens and no CI minutes,
+      // and an exhausted budget is when nobody is looking at the surface), so folding
+      // it into that assertion would be asserting the opposite of the design.
+      "watcher:last": "2026-09-15 08:04:00",
       ...(opts.budget === undefined ? {} : { "improve:budget": opts.budget }),
     },
     seedToken: true,
