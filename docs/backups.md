@@ -35,9 +35,9 @@ Three paths, in the order to try them. Path 2 has been executed end to end again
 
 3. **The R2 JSON dump**, beyond the 30-day Time Travel window. Wrangler cannot list R2 objects, so take the exact keys from the Cloudflare dashboard or the `json_keys` field of a `/ops/backup` response, then fetch each: `wrangler r2 object get capsid-media/backups/json/<timestamp>/<table>.json --file <table>.json`. Convert each object's `rows` to INSERT statements and follow path 2 from the create step, `documents` first. The same dumps are mirrored off-account in `capsid-backups`, so this path works if the Cloudflare account is gone. The `backups/markdown/` mirror is the last-resort human-readable copy: bodies only, no metadata.
 
-   **A dump run is more than tables.** Two underscore-prefixed sidecars ride beside them and neither is D1, so a restore that rebuilds the database and stops is incomplete:
+   Two underscore-prefixed sidecars ride beside the tables and neither is D1, so a restore that rebuilds the database and stops is incomplete:
 
-   - `_kv.json` holds the loop's control pins, by allowlist: `improve_mode`, `improve:budget`, `improve:meta:last`, `backup:last-ok`, and per roster namespace its best record, pause reason and anchor checksum. Put them back with `wrangler kv key put` before turning the loop on, or every namespace runs unanchored. Deliberately not a prefix sweep of `APP_KV`: that namespace also holds cached GitHub installation tokens, and a dump leaves the account.
+   - `_kv.json` holds the loop's control pins, by allowlist: `improve_mode`, `improve:budget`, `improve:meta:last`, `backup:last-ok`, and per roster namespace its best record, pause reason and anchor checksum. Put them back with `wrangler kv key put` before turning the loop on, or every namespace runs unanchored. This is not a prefix sweep of `APP_KV`: that namespace also holds cached GitHub installation tokens, and a dump leaves the account.
    - `_holdout-manifests.json` holds each namespace's hidden-suite count, never a test. Without it every namespace scores as "no holdout manifest", which the scorer refuses.
 
    The dump is written as a single D1 batch, so its tables describe one instant. `scripts/restore-rehearsal.mjs` checks that weekly and refuses a torn one.
