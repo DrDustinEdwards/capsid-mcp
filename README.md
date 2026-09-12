@@ -13,7 +13,7 @@ Every write snapshots the prior version into `document_versions` and appends to 
 - A GitHub OAuth App for login, locked to one admin account
 - A separate GitHub App for repo access, minting short-lived installation tokens
 - D1 for documents, versions, namespaces, jobs, agents and the audit log, with FTS5 search
-- R2: `MEDIA` for media, backups and reports; `HOLDOUT` for the loop's hidden test suites, bound separately so attempt code cannot reach it
+- R2: `MEDIA` for backups, the markdown mirror and CSP reports (the binding name is historical; nothing stores or serves media, and the Worker never reads this bucket back); `HOLDOUT` for the loop's hidden test suites, bound separately so attempt code cannot reach it
 - KV, two separate namespaces: `APP_KV` for the Worker's caches, `OAUTH_KV` for the provider's clients, grants and tokens. They must not be the same namespace (see Clone setup)
 
 ## How it works
@@ -24,7 +24,7 @@ Every write snapshots the prior version into `document_versions` and appends to 
 - **The work queue.** A job hands a task from a chat that has no shell to a session that has no conversation. Bodies are signed, claims take a four-hour lease, and a job reaching a push, a deploy or a merge blocks with the exact command a human runs.
 - **The self-improvement loop.** An optional nightly loop proposes one scoped change at a time, has each repo's own CI score it against hidden tests, and opens a pull request only for changes that improved the repo without regressing an anchor. Off by default, and it never merges.
 - **The console.** One admin page at `/console` showing every namespace: pauses, job counts, the command each blocked job waits on, the agent inventory and recent activity. It renders what the tools already compute.
-- **Backups.** A daily cron exports every table to R2 as JSON plus a markdown mirror of every document body, pulled off-account daily. Restore is documented and rehearsed weekly against a scratch database.
+- **Backups.** A daily cron exports every table to R2 as JSON plus a markdown mirror of every document body. `DrDustinEdwards/capsid-backups` mirrors the dumps off-account; this repo mints that job's credential and sets no schedule for it. Restore is documented and rehearsed weekly against a scratch database.
 - **Audit trail.** Every write snapshots the prior version into `document_versions` and appends to `audit_log`. Every destructive document write asks for confirmation first.
 
 ## Documentation
@@ -111,7 +111,7 @@ Every write snapshots the prior version into `document_versions` and appends to 
    npx wrangler secret put ADMIN_GITHUB_LOGIN      # your GitHub username, or your numeric GitHub user id
    ```
 
-7. For repo access, create a GitHub **App**, separate from the OAuth App. Permissions: Repository contents read and write, Pull requests read and write, Metadata read, Actions read and write, Workflows read and write. The last two are what let the Worker dispatch a workflow and write under `.github/workflows/`; both are gated behind agent flags (`can_dispatch` and `can_write_workflows`), so the App holding the permission does not mean a caller can use it. Install it on the repositories you want reachable. Note its Client ID, generate a private key (`.pem`), then:
+7. For repo access, create a GitHub **App**, separate from the OAuth App. Permissions: Repository contents read and write, Pull requests read and write, Metadata read, Actions read and write, Workflows write (confirmed by probe 2026-09-07: a pull request authoring a workflow file succeeded, and was closed immediately; that probe proves write and says nothing about read, so read is not claimed here). The last two are what let the Worker dispatch a workflow and write under `.github/workflows/`; both are gated behind agent flags (`can_dispatch` and `can_write_workflows`), so the App holding the permission does not mean a caller can use it. Install it on the repositories you want reachable. Note its Client ID, generate a private key (`.pem`), then:
 
    ```
    # put the App client id in wrangler.jsonc vars as GITHUB_APP_CLIENT_ID

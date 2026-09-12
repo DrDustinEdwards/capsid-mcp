@@ -41,7 +41,7 @@ Three kinds of caller resolve, in this order:
 2. **A legacy operator key**, until its hash is removed from `OPERATOR_KEY_HASH` by hand.
 3. **The OAuth admin session**, the synthetic agent `admin` with every scope.
 
-The operator hash has been removed from the roster machines. Every Claude Code session now runs as its folder's driver agent, and the admin OAuth session is the only wider credential.
+The operator hash is removed once every machine runs as its folder's driver agent and the admin OAuth session is the only wider credential. That is the intent, and it is the last step of the migration in `docs/bootstrap.md`, not something this document can report as done. Until `OPERATOR_KEY_HASH` is unset on the Worker the legacy path stays live: `src/auth.ts` reads the secret on every bearer request, and `src/agents.ts` gives a plain entry the admin grant, so a key in it can still mint agents. Whether it is still set is Worker state this repo cannot see. `npx wrangler secret list --name capsid` answers it, and prints names only.
 
 Two gated endpoints:
 
